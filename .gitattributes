@@ -1,0 +1,13 @@
+# Store LF in the repository and check out LF everywhere.  On Windows the
+# default would check files out as CRLF, which breaks the shell test script in
+# Git Bash ("$'\r': command not found") and makes diffs noisy across platforms.
+* text=auto eol=lf
+
+# Explicit, so the shell script keeps working whatever the global setting is.
+*.sh text eol=lf
+
+# Binaries git should never try to normalise.
+*.png binary
+*.jpg binary
+*.pdf binary
+*.whl binary
