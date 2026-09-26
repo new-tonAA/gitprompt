@@ -301,25 +301,14 @@ int cmd_add(struct repo *r, int argc, char **argv)
 		}
 	}
 
-	if (!dry_run)
-		index_write(&ist, repo_index_path(r));
-
 	/*
 	 * Staging a path is how a merge conflict is declared resolved, exactly
-	 * as in git.  A path this command did not touch keeps its conflict, so
+	 * as in git: writing the path's stage-0 entry drops the stages it had.
+	 * A path this command did not touch keeps its conflict, so
 	 * `gitprompt add one.txt` leaves the other one still unmerged.
 	 */
-	if (!dry_run) {
-		size_t nconf = 0;
-		char **conf = merge_conflicts_list(r, &nconf);
-		if (conf) {
-			size_t k;
-			for (k = 0; conf[k]; k++)
-				if (all || matches(&specs, conf[k]))
-					merge_conflicts_resolve(r, conf[k]);
-			merge_conflicts_free(conf);
-		}
-	}
+	if (!dry_run)
+		index_write(&ist, repo_index_path(r));
 
 	index_release(&ist);
 	slist_release(&paths);
@@ -457,6 +446,10 @@ int cmd_mv(struct repo *r, int argc, char **argv)
 		if (e) {
 			struct index_entry copy = *e;
 			copy.path = (char *)buf_cstr(&to);
+			/* the moved file is staged content, whatever stage it was
+			 * read from: a stage on its own would leave the new path
+			 * unmerged with no other side to merge with */
+			copy.stage = 0;
 			index_fill_stat(&copy, tfull);
 			index_remove(&ist, buf_cstr(&from));
 			index_add(&ist, &copy);
@@ -479,12 +472,53 @@ int cmd_mv(struct repo *r, int argc, char **argv)
 struct status_row {
 	const char *path;
 	char x, y;
+	const char *what;
 };
 
 static int row_cmp(const void *a, const void *b)
 {
 	return strcmp(((const struct status_row *)a)->path,
 		      ((const struct status_row *)b)->path);
+}
+
+/*
+ * git's two letters and the words the long form uses for an unmerged path,
+ * from which of the three stages the index holds: it is a switch over the
+ * stages present, and each combination has a name of its own.
+ */
+static void unmerged_desc(const struct index_state *ist, const char *path,
+			  char *x, char *y, const char **what)
+{
+	int mask = (index_get_stage(ist, path, 1) ? 1 : 0) |
+		   (index_get_stage(ist, path, 2) ? 2 : 0) |
+		   (index_get_stage(ist, path, 3) ? 4 : 0);
+
+	switch (mask) {
+	case 1:         /* base only: both sides deleted it */
+		*x = 'D'; *y = 'D'; *what = "both deleted";
+		break;
+	case 2:         /* ours only: we added it, they never had it */
+		*x = 'A'; *y = 'U'; *what = "added by us";
+		break;
+	case 3:         /* base and ours: they deleted what we changed */
+		*x = 'U'; *y = 'D'; *what = "deleted by them";
+		break;
+	case 4:         /* theirs only: they added it */
+		*x = 'U'; *y = 'A'; *what = "added by them";
+		break;
+	case 5:         /* base and theirs: we deleted what they changed */
+		*x = 'D'; *y = 'U'; *what = "deleted by us";
+		break;
+	case 6:         /* ours and theirs, no base: both added it */
+		*x = 'A'; *y = 'A'; *what = "both added";
+		break;
+	case 7:         /* all three: both changed it */
+		*x = 'U'; *y = 'U'; *what = "both modified";
+		break;
+	default:
+		*x = 'U'; *y = 'U'; *what = "unmerged";
+		break;
+	}
 }
 
 int cmd_status(struct repo *r, int argc, char **argv)
@@ -508,13 +542,19 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	if (head_tree(r, &tree) == 0)
 		read_tree_into_index(r, &head_ist, &tree, "");
 	worktree_paths(r, &wt);
-	conf = merge_conflicts_list(r, &nconf);
+	conf = index_unmerged_paths(&ist, &nconf);
 
 	rows = xcalloc(ist.nr + head_ist.nr + wt.nr + nconf + 1, sizeof(*rows));
 
 	/* index against HEAD: what a commit would record */
 	for (i = 0; i < ist.nr; i++) {
-		struct index_entry *h = index_get(&head_ist, ist.e[i].path);
+		struct index_entry *h;
+
+		/* an unmerged path is described from its stages below, not from
+		 * whichever of them this loop would have compared */
+		if (ist.e[i].stage)
+			continue;
+		h = index_get(&head_ist, ist.e[i].path);
 		if (!h)
 			rows[nrows].x = 'A';
 		else if (!oid_equal(&h->oid, &ist.e[i].oid))
@@ -543,6 +583,8 @@ int cmd_status(struct repo *r, int argc, char **argv)
 		int found;
 		size_t k;
 
+		if (e->stage)
+			continue;
 		if (!slist_has(&wt, e->path)) {
 			found = 0;              /* deleted from the work tree */
 		} else {
@@ -602,8 +644,8 @@ int cmd_status(struct repo *r, int argc, char **argv)
 				at = k;
 				break;
 			}
-		rows[at].x = 'U';
-		rows[at].y = 'U';
+		unmerged_desc(&ist, conf[i], &rows[at].x, &rows[at].y,
+			      &rows[at].what);
 		rows[at].path = conf[i];
 		if (at == nrows)
 			nrows++;
@@ -618,7 +660,7 @@ int cmd_status(struct repo *r, int argc, char **argv)
 		index_release(&ist);
 		index_release(&head_ist);
 		slist_release(&wt);
-		merge_conflicts_free(conf);
+		index_paths_free(conf);
 		return 0;
 	}
 
@@ -648,7 +690,9 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	{
 		int section = 0;
 		for (i = 0; i < nrows; i++) {
-			if (rows[i].x == '?' || rows[i].x == 'U')
+			/* `what` is set on unmerged rows and nowhere else; their
+			 * letters can be any of UU/AA/DU/UD */
+			if (rows[i].what || rows[i].x == '?')
 				continue;
 			if (rows[i].x == ' ') {
 				if (section != 2) {
@@ -689,13 +733,13 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	if (nconf) {
 		int printed = 0;
 		for (i = 0; i < nrows; i++) {
-			if (rows[i].x != 'U')
+			if (!rows[i].what)
 				continue;
 			if (!printed) {
 				printf("\nUnmerged paths:\n");
 				printed = 1;
 			}
-			printf("\tboth modified:   %s\n", rows[i].path);
+			printf("\t%s:   %s\n", rows[i].what, rows[i].path);
 		}
 	}
 
@@ -703,7 +747,7 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	index_release(&ist);
 	index_release(&head_ist);
 	slist_release(&wt);
-	merge_conflicts_free(conf);
+	index_paths_free(conf);
 	return 0;
 }
 
@@ -810,24 +854,34 @@ static int do_commit(struct repo *r, const char *message, int amend,
 	 * being recorded as if it were finished.
 	 */
 	if (!amend) {
-		oid_t other;
-		if (merge_in_progress(r, &other) == 0) {
-			size_t nconf = 0;
-			char **conf = merge_conflicts_list(r, &nconf);
+		/*
+		 * The unmerged paths are the index's own stages, so the refusal
+		 * does not depend on MERGE_HEAD being there -- which it may not
+		 * be, an index read from elsewhere carrying stages just the same.
+		 */
+		if (index_has_unmerged(&ist)) {
+			size_t nconf = 0, k;
+			char **conf = index_unmerged_paths(&ist, &nconf);
 
-			if (conf) {
-				size_t k;
-				gp_error("You have unmerged paths.");
-				for (k = 0; conf[k]; k++)
-					fprintf(stderr, "\tUU %s\n", conf[k]);
-				fprintf(stderr, "hint: resolve them, then "
-						"'gitprompt add' and 'gitprompt commit'\n");
-				merge_conflicts_free(conf);
-				commit_release(&c);
-				index_release(&ist);
-				return 1;
+			gp_error("You have unmerged paths.");
+			for (k = 0; k < nconf; k++) {
+				char x, y;
+				const char *what;
+
+				unmerged_desc(&ist, conf[k], &x, &y, &what);
+				fprintf(stderr, "\t%c%c %s\n", x, y, conf[k]);
 			}
-			oid_array_append(&c.parents, &other);
+			fprintf(stderr, "hint: resolve them, then "
+					"'gitprompt add' and 'gitprompt commit'\n");
+			index_paths_free(conf);
+			commit_release(&c);
+			index_release(&ist);
+			return 1;
+		}
+		{
+			oid_t other;
+			if (merge_in_progress(r, &other) == 0)
+				oid_array_append(&c.parents, &other);
 		}
 	}
 
@@ -1535,7 +1589,12 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 		oid_t it;
 		memset(&ist, 0, sizeof ist);
 		index_read(&ist, repo_index_path(r));
-		write_tree_from_index(r, &ist, &it);
+		if (write_tree_from_index(r, &ist, &it) < 0) {
+			/* an index with unmerged paths has no tree to diff */
+			index_release(&ist);
+			buf_release(&out);
+			return 1;
+		}
 		read_tree_obj(r, &it, &index_tree);
 		if (have_old) {
 			diff_trees(r, &old_tree, &it, &out, stat_only);
@@ -1553,7 +1612,12 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 		memset(&ist, 0, sizeof ist);
 		index_read(&ist, repo_index_path(r));
 		for (i = 0; i < ist.nr; i++) {
-			char *full = xstrfmt("%s/%s", r->root, ist.e[i].path);
+			char *full;
+
+			/* three stages of one path are one file, not three */
+			if (ist.e[i].stage)
+				continue;
+			full = xstrfmt("%s/%s", r->root, ist.e[i].path);
 			struct buf w;
 			struct buf piece;
 			int changed;

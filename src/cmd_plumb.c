@@ -702,7 +702,8 @@ int cmd_ls_files(struct repo *r, int argc, char **argv)
 		if (show_stage) {
 			char hex[GP_SHA1_HEXSZ + 1];
 			oid_hex(&ist.e[i].oid, hex);
-			printf("%06o %s 0\t%s\n", ist.e[i].mode, hex, ist.e[i].path);
+			printf("%06o %s %u\t%s\n", ist.e[i].mode, hex,
+			       (unsigned)ist.e[i].stage, ist.e[i].path);
 		} else {
 			printf("%s\n", ist.e[i].path);
 		}

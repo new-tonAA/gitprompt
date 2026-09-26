@@ -1,9 +1,15 @@
 /*
  * index.c - the staging area, in git's binary index version 2 format.
  *
- * Header "DIRC", a version, a count, then one fixed-size record per path
+ * Header "DIRC", a version, a count, then one fixed-size record per entry
  * (a stat block, the id, flags, the path itself, NUL, padded to a multiple
  * of eight bytes), then the whole thing SHA-1'd.  Big-endian throughout.
+ *
+ * An entry is a path at a merge stage.  Most paths have one entry, at stage
+ * 0; a path in conflict has its base, our version and their version as three
+ * entries at stages 1, 2 and 3, which is how git records a conflict and why
+ * `git ls-files -u` reads a conflicted gitprompt index the same way it reads
+ * git's own.
  *
  * gitprompt keeps its index at .gitprompt/index rather than .git/index, so
  * it does not collide with a real git repository sitting in the same tree.
@@ -84,40 +90,143 @@ static void index_push(struct index_state *istate,
 	istate->nr++;
 }
 
-struct index_entry *index_get(const struct index_state *istate,
-			      const char *path)
+struct index_entry *index_get_stage(const struct index_state *istate,
+				    const char *path, unsigned stage)
 {
 	size_t i;
 	for (i = 0; i < istate->nr; i++)
-		if (!strcmp(istate->e[i].path, path))
+		if (istate->e[i].stage == stage &&
+		    !strcmp(istate->e[i].path, path))
 			return (struct index_entry *)&istate->e[i];
 	return NULL;
 }
 
+struct index_entry *index_get(const struct index_state *istate,
+			      const char *path)
+{
+	struct index_entry *first = NULL;
+	size_t i;
+
+	for (i = 0; i < istate->nr; i++) {
+		if (strcmp(istate->e[i].path, path))
+			continue;
+		if (istate->e[i].stage == 0)
+			return (struct index_entry *)&istate->e[i];
+		if (!first)
+			first = (struct index_entry *)&istate->e[i];
+	}
+	return first;
+}
+
 void index_add(struct index_state *istate, const struct index_entry *e)
 {
-	struct index_entry *old = index_get(istate, e->path);
-	if (old) {
-		free(old->path);
-		*old = *e;
-		old->path = xstrdup(e->path);
+	struct index_entry *slot = NULL;
+	size_t i;
+
+	if (e->stage) {
+		struct index_entry *old = index_get_stage(istate, e->path,
+							  e->stage);
+		if (old) {
+			free(old->path);
+			*old = *e;
+			old->path = xstrdup(e->path);
+			return;
+		}
+		index_push(istate, e);
 		return;
 	}
+
+	/*
+	 * A stage-0 entry is the whole story for its path: the unmerged stages
+	 * go, which is how `add` records a conflict as resolved.  The new entry
+	 * takes the first slot the path occupied and the others are dropped, so
+	 * a caller looping over the index does not have the array move under it
+	 * the way an append would.
+	 */
+	for (i = 0; i < istate->nr; i++) {
+		if (strcmp(istate->e[i].path, e->path))
+			continue;
+		if (!slot) {
+			slot = &istate->e[i];
+			free(slot->path);
+			*slot = *e;
+			slot->path = xstrdup(e->path);
+			continue;
+		}
+		free(istate->e[i].path);
+		memmove(istate->e + i, istate->e + i + 1,
+			(istate->nr - i - 1) * sizeof(*istate->e));
+		istate->nr--;
+		i--;
+	}
+	if (slot)
+		return;
 	index_push(istate, e);
 }
 
 void index_remove(struct index_state *istate, const char *path)
 {
-	size_t i;
-	for (i = 0; i < istate->nr; i++) {
-		if (!strcmp(istate->e[i].path, path)) {
-			free(istate->e[i].path);
-			memmove(istate->e + i, istate->e + i + 1,
-				(istate->nr - i - 1) * sizeof(*istate->e));
-			istate->nr--;
-			return;
+	size_t i = 0;
+
+	while (i < istate->nr) {
+		if (strcmp(istate->e[i].path, path)) {
+			i++;
+			continue;
 		}
+		free(istate->e[i].path);
+		memmove(istate->e + i, istate->e + i + 1,
+			(istate->nr - i - 1) * sizeof(*istate->e));
+		istate->nr--;
 	}
+}
+
+int index_has_unmerged(const struct index_state *istate)
+{
+	size_t i;
+	for (i = 0; i < istate->nr; i++)
+		if (istate->e[i].stage)
+			return 1;
+	return 0;
+}
+
+static int path_cmp(const void *a, const void *b)
+{
+	return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+char **index_unmerged_paths(const struct index_state *istate, size_t *nr)
+{
+	char **v;
+	size_t i, n = 0;
+
+	*nr = 0;
+	if (!index_has_unmerged(istate))
+		return NULL;
+
+	v = xmalloc((istate->nr + 1) * sizeof(*v));
+	for (i = 0; i < istate->nr; i++) {
+		size_t k;
+		int seen = 0;
+
+		if (!istate->e[i].stage)
+			continue;
+		for (k = 0; k < n; k++)
+			if (!strcmp(v[k], istate->e[i].path)) {
+				seen = 1;
+				break;
+			}
+		if (!seen)
+			v[n++] = istate->e[i].path;   /* borrowed, not copied */
+	}
+	qsort(v, n, sizeof(*v), path_cmp);
+	v[n] = NULL;
+	*nr = n;
+	return v;
+}
+
+void index_paths_free(char **v)
+{
+	free(v);        /* the strings belong to the index they came from */
 }
 
 /* ------------------------------------------------------------------ */
@@ -182,13 +291,17 @@ void index_read(struct index_state *istate, const char *path)
 		memcpy(e.oid.raw, p + 40, GP_SHA1_RAWSZ);
 		flags = get_be16(p + 60);
 		namelen = (u16)(flags & 0x0fff);
-		e.flags = flags & (u16)~0x0fff;
+		/*
+		 * Only the assume-valid bit is carried through.  Bits 12-13 are
+		 * the merge stage, which has a field of its own from here on, and
+		 * the extended bit says a second flags word follows the path --
+		 * one gitprompt cannot write back, so it must not claim it.
+		 */
+		e.flags = flags & (u16)0x8000;
+		e.stage = (u16)((flags >> 12) & 3);
 		entlen = IDX_ENTRY_FIXED + namelen;
 		entlen = (entlen + 8) & ~(size_t)7;    /* pad to 8 */
 		e.path = xstrndup((const char *)p + IDX_ENTRY_FIXED, namelen);
-		/* the file may hold a stage > 0 from git; the low bits carry
-		 * the stage, and anything but stage 0 is not ours to use */
-		e.flags |= (u16)(flags & 0x3000);
 		index_push(istate, &e);
 		free(e.path);
 		p += entlen;
@@ -199,12 +312,17 @@ void index_read(struct index_state *istate, const char *path)
 /* ------------------------------------------------------------------ */
 /* write                                                               */
 
+/* path first, then stage: an unmerged path's three entries go out together,
+ * lowest stage first, which is the order git insists on */
 static int entry_path_cmp(const void *a, const void *b)
 {
 	const struct index_entry *x = a;
 	const struct index_entry *y = b;
+	int c = strcmp(x->path, y->path);
 
-	return strcmp(x->path, y->path);
+	if (c)
+		return c;
+	return x->stage - y->stage;
 }
 
 void index_write(const struct index_state *istate, const char *path)
@@ -253,6 +371,7 @@ void index_write(const struct index_state *istate, const char *path)
 		buf_add(&b, e->oid.raw, GP_SHA1_RAWSZ);
 
 		flags = (u16)(e->flags & (u16)~0x0fff);
+		flags |= (u16)((e->stage & 3) << 12);
 		flags |= (u16)(namelen < 0x0fff ? namelen : 0x0fff);
 		put_be16(&b, flags);
 

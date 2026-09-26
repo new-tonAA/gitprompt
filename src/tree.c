@@ -42,6 +42,10 @@ static int build_tree(struct repo *r, struct index_state *ist,
 		const char *rest;
 		const char *slash;
 
+		/* an unmerged stage is one side of a conflict, not a file; the
+		 * caller has already refused to write a tree from one */
+		if (ist->e[i].stage)
+			continue;
 		if (strncmp(path, prefix, plen))
 			continue;
 		rest = path + plen;
@@ -97,6 +101,15 @@ static int build_tree(struct repo *r, struct index_state *ist,
 int write_tree_from_index(struct repo *r, const struct index_state *istate,
 			  oid_t *out)
 {
+	/*
+	 * An unmerged path has no one content a tree could hold, so there is
+	 * nothing honest to write: git refuses here too.
+	 */
+	if (index_has_unmerged(istate)) {
+		gp_error("cannot write a tree from an index with unmerged paths\n"
+			 "hint: resolve them with 'gitprompt add' first");
+		return -1;
+	}
 	/* build_tree only reads the entries, but the helper takes a mutable
 	 * pointer; the cast keeps the public signature const-correct */
 	return build_tree(r, (struct index_state *)istate, "", out);

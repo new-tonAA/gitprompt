@@ -641,8 +641,38 @@ static int merge_base(struct repo *r, const oid_t *a, const oid_t *b, oid_t *out
 struct merge_result {
 	int conflicts;
 	size_t files_changed;
-	struct strlist conflict_paths;
 };
+
+/*
+ * Record a conflicted path the way git does: as index entries above stage 0
+ * -- 1 for the merge base, 2 for our side, 3 for theirs.  A stage is left out
+ * when that side has no version of the file, so a path one side deleted gets
+ * two entries rather than three.  Any stage-0 entry the path had goes: an
+ * unmerged path has stages and nothing else.
+ */
+static void merge_mark_unmerged(struct index_state *merged, const char *path,
+				const struct index_entry *base,
+				const struct index_entry *ours,
+				const struct index_entry *theirs)
+{
+	const struct index_entry *src[4];
+	unsigned stage;
+
+	index_remove(merged, path);
+	src[1] = base;
+	src[2] = ours;
+	src[3] = theirs;
+	for (stage = 1; stage <= 3; stage++) {
+		struct index_entry e;
+
+		if (!src[stage])
+			continue;
+		e = *src[stage];
+		e.path = (char *)path;
+		e.stage = (u16)stage;
+		index_add(merged, &e);
+	}
+}
 
 static void merge_write(struct repo *r, const char *path, const void *data,
 			size_t len)
@@ -715,39 +745,39 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		}
 
 		{
-			struct buf theirs_only, mine, merged;
+			struct buf theirs_only, mine, content;
 
 			buf_init(&theirs_only);
-			buf_init(&merged);
+			buf_init(&content);
 			buf_init(&mine);
 			odb_read(&r->odb, &ti.e[i].oid, NULL, &theirs_only);
 
 			if (o) {
 				odb_read(&r->odb, &o->oid, NULL, &mine);
-				buf_addstr(&merged, "<<<<<<< ours\n");
-				buf_add(&merged, mine.b, mine.len);
-				if (merged.len && merged.b[merged.len - 1] != '\n')
-					buf_addch(&merged, '\n');
-				buf_addstr(&merged, "=======\n");
+				buf_addstr(&content, "<<<<<<< ours\n");
+				buf_add(&content, mine.b, mine.len);
+				if (content.len && content.b[content.len - 1] != '\n')
+					buf_addch(&content, '\n');
+				buf_addstr(&content, "=======\n");
 			} else {
 				printf("CONFLICT (modify/delete): %s deleted by "
 				       "us, modified by them\n", ti.e[i].path);
 			}
-			buf_add(&merged, theirs_only.b, theirs_only.len);
-			if (merged.len && merged.b[merged.len - 1] != '\n')
-				buf_addch(&merged, '\n');
+			buf_add(&content, theirs_only.b, theirs_only.len);
+			if (content.len && content.b[content.len - 1] != '\n')
+				buf_addch(&content, '\n');
 			if (o)
-				buf_addstr(&merged, ">>>>>>> theirs\n");
+				buf_addstr(&content, ">>>>>>> theirs\n");
 
-			merge_write(r, ti.e[i].path, merged.b, merged.len);
+			merge_write(r, ti.e[i].path, content.b, content.len);
 			if (o)
 				printf("CONFLICT (content): %s\n", ti.e[i].path);
 			res->conflicts++;
-			strlist_push(&res->conflict_paths, ti.e[i].path);
+			merge_mark_unmerged(merged, ti.e[i].path, b, o, &ti.e[i]);
 
 			buf_release(&mine);
 			buf_release(&theirs_only);
-			buf_release(&merged);
+			buf_release(&content);
 		}
 	}
 
@@ -759,7 +789,7 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		if (b && !oid_equal(&b->oid, &oi.e[i].oid)) {
 			printf("CONFLICT (modify/delete): %s\n", oi.e[i].path);
 			res->conflicts++;
-			strlist_push(&res->conflict_paths, oi.e[i].path);
+			merge_mark_unmerged(merged, oi.e[i].path, b, &oi.e[i], NULL);
 			continue;
 		}
 		if (b) {
@@ -845,89 +875,6 @@ void merge_state_clear(struct repo *r)
 	path = repo_git_path(r, "MERGE_MSG");
 	remove(path);
 	free(path);
-	path = repo_git_path(r, "MERGE_CONFLICTS");
-	remove(path);
-	free(path);
-}
-
-/*
- * The paths a merge left in conflict, one per line.  git records this in the
- * index by giving each conflicted path three entries; gitprompt's index is a
- * plain path-to-object map, so the list lives beside MERGE_HEAD instead.  A
- * path leaves the list when it is staged, which is the same thing `git add`
- * does to resolve it.
- */
-static void merge_conflicts_read(struct repo *r, struct strlist *out)
-{
-	char *path = repo_git_path(r, "MERGE_CONFLICTS");
-	struct buf b;
-	size_t i = 0;
-
-	buf_init(&b);
-	if (read_file(path, &b) == 0)
-		while (i < b.len) {
-			size_t start = i;
-			while (i < b.len && b.b[i] != '\n')
-				i++;
-			if (i > start)
-				strlist_push(out, xstrndup((const char *)b.b + start,
-							   i - start));
-			if (i < b.len)
-				i++;
-		}
-	buf_release(&b);
-	free(path);
-}
-
-static void merge_conflicts_write(struct repo *r, const struct strlist *paths)
-{
-	char *path;
-	struct buf b;
-	size_t i;
-
-	path = repo_git_path(r, "MERGE_CONFLICTS");
-	if (!paths->nr) {
-		remove(path);
-		free(path);
-		return;
-	}
-	buf_init(&b);
-	for (i = 0; i < paths->nr; i++)
-		buf_addf(&b, "%s\n", paths->v[i]);
-	write_file(path, b.b, b.len);
-	buf_release(&b);
-	free(path);
-}
-
-/* the conflicted paths, as a NULL-terminated array safe to hand to another file */
-char **merge_conflicts_list(struct repo *r, size_t *nr)
-{
-	struct strlist l = { NULL, 0, 0 };
-	char **out;
-	size_t i;
-
-	merge_conflicts_read(r, &l);
-	*nr = l.nr;
-	if (!l.nr) {
-		free(l.v);
-		return NULL;
-	}
-	out = xcalloc(l.nr + 1, sizeof(*out));
-	for (i = 0; i < l.nr; i++)
-		out[i] = l.v[i];       /* the strings move into the new array */
-	free(l.v);
-	return out;
-}
-
-void merge_conflicts_free(char **v)
-{
-	size_t i;
-
-	if (!v)
-		return;
-	for (i = 0; v[i]; i++)
-		free(v[i]);
-	free(v);
 }
 
 /* the message a merge left behind, so a bare `commit` can conclude it */
@@ -939,27 +886,6 @@ int merge_message(struct repo *r, struct buf *out)
 	rc = read_file(path, out);
 	free(path);
 	return rc == 0 && out->len;
-}
-
-/* staging a path is how a conflict is declared resolved, exactly as in git */
-void merge_conflicts_resolve(struct repo *r, const char *path)
-{
-	struct strlist keep = { NULL, 0, 0 };
-	struct strlist cur = { NULL, 0, 0 };
-	size_t i;
-
-	merge_conflicts_read(r, &cur);
-	for (i = 0; i < cur.nr; i++)
-		if (strcmp(cur.v[i], path))
-			strlist_push(&keep, cur.v[i]);
-	/* only rewrite the file when something actually changed, so that
-	 * staging an unrelated path does not disturb an unfinished merge.
-	 * MERGE_HEAD stays: the commit that concludes the merge needs it to
-	 * record the second parent, and --abort needs it to undo the merge. */
-	if (keep.nr != cur.nr)
-		merge_conflicts_write(r, &keep);
-	strlist_release(&keep);
-	strlist_release(&cur);
 }
 
 /* the text a merge is named by: an explicit -m wins, else the revision the
@@ -1100,8 +1026,8 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 
 		/*
 		 * The merged result belongs in the index whether or not the
-		 * merge is finished now: the half-merged paths stay as ours, so
-		 * a `gitprompt add` of a resolved file has something to replace.
+		 * merge is finished now, and a conflicted path is in it as its
+		 * unmerged stages.
 		 */
 		index_write(&mindex, repo_index_path(r));
 
@@ -1109,18 +1035,15 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 			/* leave MERGE_HEAD behind so --abort can undo this, and
 			 * so the concluding commit records both parents */
 			merge_state_write(r, &target, merge_subject(&o));
-			merge_conflicts_write(r, &res.conflict_paths);
 			gp_error("Automatic merge failed; %d conflict(s) left in "
 				 "the work tree.\n"
 				 "hint: resolve them, then 'gitprompt add' and "
 				 "'gitprompt commit', or throw the merge away with "
 				 "'gitprompt merge --abort'", res.conflicts);
-			strlist_release(&res.conflict_paths);
 			index_release(&mindex);
 			commit_release(&tc);
 			return 1;
 		}
-		strlist_release(&res.conflict_paths);
 		if (opts_flag(&o, "--no-commit")) {
 			/* staged but not recorded: MERGE_HEAD is what tells the
 			 * next `commit` to give the result two parents */

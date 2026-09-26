@@ -206,6 +206,26 @@ expect "the cached diff shows the change" "+dirty" gp diff --cached
 expect "diff --stat summarises" "a.txt" gp diff --cached --stat
 gp commit -m "change a file" >/dev/null 2>&1
 
+# rm and mv: both change the index, and mv touches the work tree too
+printf 'movable\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+expect_status "mv renames a tracked file" 0 gp mv moved.txt renamed.txt
+expect_absent "mv moves the file in the work tree" moved.txt
+expect "mv stages the new path" "renamed.txt" gp ls-files
+if gp ls-files | grep -q 'moved.txt'; then
+	bad "mv drops the old path from the index" "still listed"
+else
+	ok "mv drops the old path from the index"
+fi
+expect_status "rm removes a tracked file" 0 gp rm renamed.txt
+expect_absent "rm removes the file from the work tree" renamed.txt
+if gp ls-files | grep -q 'renamed.txt'; then
+	bad "rm drops the path from the index" "still listed"
+else
+	ok "rm drops the path from the index"
+fi
+expect_status "rm refuses a path it does not track" 1 gp rm no-such-file.txt
+
 # ------------------------------------------------------------------
 say "reconstruction"
 
@@ -278,21 +298,49 @@ expect "the conflict does not commit itself" "main changes f" gp log --oneline
 # the unfinished merge is a state on disk, as in git
 expect_file "the merge is recorded in MERGE_HEAD" .gitprompt/MERGE_HEAD
 expect "status names the unmerged paths" "You have unmerged paths." gp status
-expect "status --short marks the path UU" "UU f.txt" gp status --short
+# both branches added f.txt, so there is no base version: git's letters are AA
+expect "status --short marks the path AA" "AA f.txt" gp status --short
+stages_of() { gp ls-files -s "$1" | awk '{print $3}' | tr -d '\r' | sort | tr '\n' ','; }
+if [ "$(stages_of f.txt)" = "2,3," ]; then
+	ok "the conflict is the index's unmerged stages"
+else
+	bad "the conflict is the index's unmerged stages" "stages $(stages_of f.txt)"
+fi
+if command -v git >/dev/null 2>&1; then
+	git --git-dir="$repo/.gitprompt" ls-files --stage f.txt 2>/dev/null |
+		awk '{print $3}' | tr -d '\r' | sort > "$work/git-stages"
+	gp ls-files -s f.txt | awk '{print $3}' | tr -d '\r' | sort > "$work/gp-stages"
+	if cmp -s "$work/gp-stages" "$work/git-stages"; then
+		ok "git sees the same stages in our index"
+	else
+		bad "git sees the same stages in our index" \
+			"git says [$(tr '\n' ',' < "$work/git-stages")]"
+	fi
+fi
+expect_status "write-tree refuses an unmerged index" 128 gp write-tree
+expect_status "diff --cached refuses an unmerged index" 1 gp diff --cached
 expect_status "commit refuses while a path is unmerged" 1 gp commit -m "too soon"
 expect "the refusal names the reason" "unmerged paths" gp commit -m "too soon"
+expect "the refusal lists the path with its letters" "AA f.txt" \
+	gp commit -m "too soon"
 expect_status "a second merge refuses while one is unfinished" 128 gp merge main
 expect "the second merge names the reason" "not concluded your merge" gp merge main
 
 # stage the resolution, then commit it: the result must have two parents
 printf 'reconciled\n' > f.txt
 gp add f.txt >/dev/null 2>&1
-if gp status --short | grep -q '^UU'; then
-	bad "staging the path resolves it" "status still shows UU"
+if gp status --short | grep -qE '^(UU|AA|DU|UD|AU|UA|DD)'; then
+	bad "staging the path resolves it" "status still shows an unmerged path"
 else
 	ok "staging the path resolves it"
 fi
-expect_absent "resolving drops the conflict list" .gitprompt/MERGE_CONFLICTS
+if [ "$(stages_of f.txt)" = "0," ]; then
+	ok "staging leaves one stage-0 entry"
+else
+	bad "staging leaves one stage-0 entry" "stages $(stages_of f.txt)"
+fi
+expect_absent "the conflict was never a file of its own" \
+	.gitprompt/MERGE_CONFLICTS
 expect_file "MERGE_HEAD outlives the resolution" .gitprompt/MERGE_HEAD
 expect "the merge is concluded by a commit" "merge side" gp commit -m "merge side"
 expect_absent "the merge state is gone once committed" .gitprompt/MERGE_HEAD
@@ -341,6 +389,30 @@ expect "the refusal names the reason" "not possible to fast-forward" \
 expect_absent "a refused merge leaves no merge state" .gitprompt/MERGE_HEAD
 expect "an up-to-date ff-only merge is not a refusal" "up to date" \
 	gp merge --ff-only main
+
+# a side that deletes what the other side changed keeps only two stages:
+# there is no version of the file on the deleting side to record
+printf 'base\n' > j.txt
+gp add j.txt >/dev/null 2>&1
+gp commit -m "main adds j" >/dev/null 2>&1
+gp switch -c delmod >/dev/null 2>&1
+gp rm j.txt >/dev/null 2>&1
+gp commit -m "delmod deletes j" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'changed\n' > j.txt
+gp add j.txt >/dev/null 2>&1
+gp commit -m "main changes j" >/dev/null 2>&1
+expect "deleting on one side and changing on the other conflicts" "CONFLICT" \
+	gp merge delmod
+expect "status --short marks it UD" "UD j.txt" gp status --short
+if [ "$(stages_of j.txt)" = "1,2," ]; then
+	ok "the deleted side leaves two stages"
+else
+	bad "the deleted side leaves two stages" "stages $(stages_of j.txt)"
+fi
+expect "our version is still in the work tree" "changed" cat j.txt
+gp merge --abort >/dev/null 2>&1
+expect "the abort of that merge leaves a clean tree" "nothing to commit" gp status
 
 # --no-commit stages a merge without recording it, then commit finishes it
 gp switch -c clean1 >/dev/null 2>&1
@@ -685,6 +757,51 @@ if command -v git >/dev/null 2>&1; then
 			"$work/directclone/prompts/0001-write-a-tokenizer-first.md"
 	else
 		skip "git clone of a .gitprompt store (git wants a bare-repo layout; the reset --hard test above covers the same ground)"
+	fi
+
+	# the other direction of the same claim: a conflict git wrote is one
+	# gitprompt reads, stages and all.  Its own repository, so that an
+	# unfinished merge cannot colour anything before or after this.
+	gmerge=$work/gitmerge
+	rm -rf "$gmerge"
+	mkdir -p "$gmerge"
+	(
+		cd "$gmerge" || exit 1
+		gp init . >/dev/null 2>&1
+		printf 'base\n' > k.txt
+		gp add k.txt >/dev/null 2>&1
+		gp commit -m base >/dev/null 2>&1
+		gp switch -c side >/dev/null 2>&1
+		printf 'theirs\n' > k.txt
+		gp add k.txt >/dev/null 2>&1
+		gp commit -m theirs >/dev/null 2>&1
+		gp checkout main >/dev/null 2>&1
+		printf 'ours\n' > k.txt
+		gp add k.txt >/dev/null 2>&1
+		gp commit -m ours >/dev/null 2>&1
+		git --git-dir=.gitprompt --work-tree=. merge side >/dev/null 2>&1
+		git --git-dir=.gitprompt ls-files -u 2>/dev/null | awk '{print $3}' |
+			tr -d '\r' | sort > "$work/git-made-stages"
+		gp ls-files -s k.txt | awk '{print $3}' | tr -d '\r' | sort \
+			> "$work/gp-read-stages"
+	)
+	merge_head=$gmerge/.gitprompt/MERGE_HEAD
+	if [ ! -e "$merge_head" ]; then
+		bad "gitprompt reads a conflict git made" \
+			"git's merge left no MERGE_HEAD"
+	else
+		expect "gitprompt marks git's conflict UU" "UU k.txt" \
+			sh -c "cd '$gmerge' && '$GP' status --short"
+		if cmp -s "$work/git-made-stages" "$work/gp-read-stages"; then
+			ok "gitprompt reads the stages of a conflict git made"
+		else
+			bad "gitprompt reads the stages of a conflict git made" \
+				"git wrote [$(tr '\n' ',' < "$work/git-made-stages")] gitprompt read [$(tr '\n' ',' < "$work/gp-read-stages")]"
+		fi
+		expect "gitprompt reads git's merge state" "both modified" \
+			sh -c "cd '$gmerge' && '$GP' status"
+		expect_status "gitprompt refuses to commit git's conflict" 1 \
+			sh -c "cd '$gmerge' && '$GP' commit -m too-soon"
 	fi
 else
 	skip "the whole git interoperability section (git is not on PATH)"

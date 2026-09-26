@@ -173,7 +173,8 @@ That is the property the storage format exists to preserve.
 names are git's, and the behaviour is meant to match:
 
 - **start** — `init`, `clone`, `config`
-- **record prompts** — `session`, `prompt`, `capture`, `outcome`, `add`, `commit`
+- **record prompts** — `session`, `prompt`, `capture`, `outcome`, `add`, `rm`,
+  `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`, `tag`,
@@ -209,13 +210,6 @@ one that says no:
 - **`serve` and the `gp://` transport.** There is no HTTP server. `gitprompt
   serve` prints `not implemented` and exits non-zero rather than pretending.
   Use the delegated transports above.
-- **Unmerged index stages.** git records a conflict by giving the path three
-  index entries. gitprompt's index is a plain path-to-object map, so conflicted
-  paths are recorded in `.gitprompt/MERGE_CONFLICTS` instead. The observable
-  behaviour is the same — `UU` in `status --short`, "You have unmerged paths.",
-  `commit` refusing, `merge --abort` restoring the tree, the concluding commit
-  carrying two parents — but `git` reading the same index would not see the
-  conflict.
 - **Merge options other than the basics.** `--no-commit`, `--ff-only` and
   `--abort` work. `--no-ff`, `--squash`, `-X` strategies and rename detection
   do not exist.
@@ -233,7 +227,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **224 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **247 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, local remotes, packed object stores, and git interoperability —
@@ -241,6 +235,16 @@ the last being the section that matters most, since a gitprompt repository is
 meant to be an ordinary git repository. As part of it, `git verify-pack` checks
 the pack `gc` writes against git's own index, and `git ls-files` checks the
 index gitprompt wrote against git's own reader.
+
+A merge conflict is where that claim is tested hardest, because a conflict is
+not only in the objects: it is in the index. gitprompt records one the way git
+does — the path's base, our version and their version as index stages 1, 2 and
+3 — so `git ls-files -u` inside a gitprompt store lists the same stages for the
+same paths that `gitprompt status` reports, the letters `UU`/`AA`/`DU`/`UD` come
+off which stages are present, and resolving is staging the path, which drops
+them. The suite asserts that agreement with git directly, in both directions:
+git's own conflicted index is read back by gitprompt, and git's reader sees the
+one gitprompt wrote.
 
 The pack reader is exercised against packs git wrote, not only against the ones
 `gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas

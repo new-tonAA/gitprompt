@@ -145,31 +145,38 @@ or control characters, and may not end in `/` or `.`.
 ## 3. The index
 
 `.gitprompt/index`, in git's binary index version 2 format — `DIRC`, a version,
-a count, then one fixed-size record per path:
+a count, then one fixed-size record per entry:
 
 ```
 ctime seconds, ctime ns, mtime seconds, mtime ns   (4 bytes each, big-endian)
 device, inode, mode, uid, gid, size                (4 bytes each)
 20 raw bytes of the object id
-2 bytes of flags: the low 12 bits hold the path length
+2 bytes of flags: bits 0-11 the path length, bits 12-13 the merge stage,
+                  bit 15 assume-valid
 the path, NUL-terminated, the record padded with NULs to a multiple of 8 bytes
 ```
 
 then the whole buffer's SHA-1. All integers big-endian.
 
-Records are written sorted by path, bytewise, whatever order they were staged
-in: git refuses to read an index whose entries are not in path order
-("unordered stage entries"), and paths arrive in staging order, not sorted
-order. With no stage bits in play, plain byte order is git's order.
+Records are written sorted by path, bytewise, and within one path by stage,
+whatever order they were staged in: git refuses to read an index whose entries
+are not in path order ("unordered stage entries"), and paths arrive in staging
+order, not sorted order.
 
 The file is at `.gitprompt/index` rather than `.git/index`, so a gitprompt
 repository and a git repository can share a working tree.
 
-**Unmerged stages are not used.** git represents a conflict by storing three
-entries for one path, distinguished by the stage bits in the flags. gitprompt's
-index is a plain path-to-object map with no stage field, so a merge in progress
-is recorded in `MERGE_CONFLICTS` instead (see §6). A path's conflicted state is
-therefore invisible to `git` reading the same index.
+**Unmerged stages are the record of a conflict**, exactly as in git. A merge
+that conflicts leaves no stage-0 entry for the path; it leaves stage 1 as the
+merge base, stage 2 as our version and stage 3 as theirs, and leaves out any
+side that has no version of the file at all — a path one side deleted gets two
+entries, not three. `gitprompt status` reads the letters `UU`/`AA`/`DU`/`UD`
+straight off which stages are present, and so does `git` reading the same
+index: `git ls-files -u` and `git status --short` report the same conflict
+gitprompt does. Staging a path writes its stage-0 entry and drops the others,
+which is how a conflict is declared resolved; until that happens
+`gitprompt commit` refuses, and `gitprompt write-tree` and `gitprompt diff
+--cached` have no tree to write from and refuse too.
 
 ## 4. Prompt files
 
@@ -248,7 +255,6 @@ Inside `.gitprompt/`:
 | `gitprompt-seq` | the last prompt sequence number handed out |
 | `MERGE_HEAD` | the id of the revision being merged in; present only during an unfinished merge |
 | `MERGE_MSG` | the message the concluding commit should default to |
-| `MERGE_CONFLICTS` | the paths left in conflict, one per line |
 
 `MERGE_HEAD` is what makes an unfinished merge a fact on disk rather than a
 matter of memory: `merge --abort` uses it to restore the tree, the commit that
@@ -257,11 +263,11 @@ refuses while it exists. It is written by `merge` on both the conflict path and
 the `--no-commit` path, and removed by a successful concluding commit and by
 `--abort`.
 
-`MERGE_CONFLICTS` is gitprompt's substitute for the index's three unmerged
-stages. A path leaves the file when it is staged, which is the same thing `git
-add` does to declare a conflict resolved, and `MERGE_HEAD` deliberately outlives
-it: the resolution is staged, but the merge is not finished until it is
-committed.
+Which paths are still in conflict is not a file here but the index itself (see
+§3): they are the paths with entries above stage 0. A path stops being one when
+it is staged, which is the same thing `git add` does to declare a conflict
+resolved, and `MERGE_HEAD` deliberately outlives that: the resolution is staged,
+but the merge is not finished until it is committed.
 
 ## 7. What a gitprompt repository looks like to git
 
@@ -275,5 +281,6 @@ $ git --git-dir=.gitprompt show HEAD:prompts/0001-write-a-tokenizer-first.md
 
 All of it works, unmodified, because there is nothing special to read: the
 prompts are blobs in trees at mode `100644` and the history is ordinary commits.
-The only thing git cannot see is the state in §6, which lives outside the object
-store.
+A conflicted index is git's too — `git ls-files -u` in a gitprompt store lists
+the same stages, for the same paths, that `gitprompt status` reports — and a
+merge stopped half-way is the `MERGE_HEAD` git itself would have left (§6).

@@ -200,6 +200,10 @@ const struct command commands[] = {
 	  "outcome <prompt-id> <text>\n   outcome --last <text>" },
 	{ "add",        cmd_add,        "Add file contents to the index",
 	  "add [-A] [-u] [-n] [--] <path>..." },
+	{ "rm",         cmd_rm,         "Remove files from the work tree and the index",
+	  "rm [--cached] <path>..." },
+	{ "mv",         cmd_mv,         "Move or rename a file, and update the index",
+	  "mv <source> <destination>" },
 	{ "commit",     cmd_commit,     "Record the staged changes",
 	  "commit [-m MSG] [-a] [--amend] [--allow-empty]" },
 

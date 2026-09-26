@@ -320,6 +320,11 @@ size_t pack_drop_redundant(struct odb *o, const oid_t *seen, size_t nr_seen,
 /* ------------------------------------------------------------------ */
 /* index (git's index v2, byte for byte)                               */
 
+/*
+ * `stage` is git's merge stage: 0 for an ordinary entry, 1 for the merge
+ * base, 2 for ours and 3 for theirs.  A path is "unmerged" when the index
+ * holds any entry for it above stage 0, and then it has no stage-0 entry.
+ */
 struct index_entry {
 	u32 ctime_sec, ctime_nsec;
 	u32 mtime_sec, mtime_nsec;
@@ -327,6 +332,7 @@ struct index_entry {
 	oid_t oid;
 	char *path;
 	u16 flags;
+	u16 stage;
 };
 
 struct index_state {
@@ -337,12 +343,34 @@ struct index_state {
 void index_release(struct index_state *istate);
 void index_read(struct index_state *istate, const char *path);
 void index_write(const struct index_state *istate, const char *path);
+/*
+ * The entry for a path: stage 0 if it has one, else the first entry the path
+ * has -- ours for a conflicted path, since merge records stage 2 first.  The
+ * callers asking "is this path tracked" get the same answer either way.
+ */
 struct index_entry *index_get(const struct index_state *istate,
 			      const char *path);
+/* one exact stage, or NULL */
+struct index_entry *index_get_stage(const struct index_state *istate,
+				    const char *path, unsigned stage);
+/*
+ * Add an entry.  A stage-0 entry replaces every entry the path had, stages
+ * included -- staging a path is how a conflict is declared resolved -- while
+ * an entry with a stage takes a slot of its own beside the others.
+ */
 void index_add(struct index_state *istate, const struct index_entry *e);
+/* drop every entry for the path, all stages of it */
 void index_remove(struct index_state *istate, const char *path);
 void index_clear(struct index_state *istate);
 void index_fill_stat(struct index_entry *e, const char *fullpath);
+
+int index_has_unmerged(const struct index_state *istate);
+/*
+ * The paths with entries above stage 0, each once, sorted.  A NULL-terminated
+ * array, freed with index_paths_free.
+ */
+char **index_unmerged_paths(const struct index_state *istate, size_t *nr);
+void index_paths_free(char **v);
 
 /* ------------------------------------------------------------------ */
 /* refs                                                                */
@@ -663,13 +691,13 @@ void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
 void write_blob_to_worktree(struct repo *r, const char *relpath, const oid_t *oid);
 void restore_all_from_index(struct repo *r, const struct index_state *ist);
 
-/* an unfinished merge: MERGE_HEAD points at the revision being merged in */
+/*
+ * An unfinished merge: MERGE_HEAD points at the revision being merged in,
+ * and the paths still in conflict are the ones the index holds above stage 0.
+ */
 int merge_in_progress(struct repo *r, oid_t *other);
 void merge_state_write(struct repo *r, const oid_t *other, const char *subject);
 void merge_state_clear(struct repo *r);
-char **merge_conflicts_list(struct repo *r, size_t *nr);
-void merge_conflicts_free(char **v);
-void merge_conflicts_resolve(struct repo *r, const char *path);
 int merge_message(struct repo *r, struct buf *out);
 
 #endif /* GP_H */
