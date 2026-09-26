@@ -443,6 +443,26 @@ char *repo_current_session(struct repo *r);
 int repo_set_current_session(struct repo *r, const char *id);
 
 /* ------------------------------------------------------------------ */
+/* the three-way content merge                                         */
+
+/* which side wins a hunk both sides changed; MERGE_FAVOR_NONE conflicts */
+enum merge_favor {
+	MERGE_FAVOR_NONE = 0,
+	MERGE_FAVOR_OURS,
+	MERGE_FAVOR_THEIRS,
+};
+
+/*
+ * Merge two versions of a base line by line.  Returns 0 when nothing had to be
+ * decided and 1 when a hunk conflicted, in which case `out` holds the text with
+ * conflict markers in it -- and with a `favor` set no hunk is ever left to the
+ * reader, so the result is always clean.
+ */
+int merge3(const struct buf *base, const struct buf *ours,
+	   const struct buf *theirs, enum merge_favor favor,
+	   const char *label_ours, const char *label_theirs, struct buf *out);
+
+/* ------------------------------------------------------------------ */
 /* the working tree                                                    */
 
 int write_tree_from_index(struct repo *r, const struct index_state *istate,

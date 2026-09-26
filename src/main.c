@@ -47,7 +47,7 @@ static int takes_a_value(const char *const *takes_value, int ntakes,
  * option turns a working command into a broken one -- the worse mistake.
  */
 static const char *const known_options[] = {
-	"-A", "-B", "-F", "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-l",
+	"-A", "-B", "-F", "-X", "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-l",
 	"-m", "-n", "-o", "-p", "-q", "-r", "-s", "-t", "-u", "-v", "-w",
 	"--abort", "--all", "--allow-empty", "--amend", "--author", "--bare",
 	"--batch", "--build-options", "--cached", "--create", "--delete",
@@ -55,11 +55,12 @@ static const char *const known_options[] = {
 	"--get", "--global", "--hard", "--help", "--initial-branch", "--json",
 	"--last", "--layout", "--list", "--list-sessions", "--max-count",
 	"--message", "--mixed", "--model",
-	"--move", "--name-only", "--no-commit", "--no-stage", "--oneline",
+	"--move", "--name-only", "--no-commit", "--no-ff", "--no-stage", "--oneline",
 	"--output", "--parent", "--pathspec-from-file", "--port", "--prune",
 	"--quiet", "--session", "--set", "--set-upstream", "--short",
-	"--single-branch", "--soft", "--source", "--stage", "--staged",
-	"--stat", "--stdin", "--strict", "--tags", "--title", "--unset",
+	"--single-branch", "--soft", "--source", "--squash", "--stage", "--staged",
+	"--stat", "--stdin", "--strategy-option", "--strict", "--tags", "--title",
+	"--unset",
 	"--update", "--verbose", "--version",
 };
 
@@ -236,7 +237,8 @@ const struct command commands[] = {
 	{ "switch",     cmd_switch,     "Switch branches",
 	  "switch [-c <name>] [<branch>]" },
 	{ "merge",      cmd_merge,      "Join another history into this one",
-	  "merge [--no-commit] [--ff-only] [--abort] [<rev>]" },
+	  "merge [--no-commit] [--ff-only] [--no-ff] [--squash] [-X ours|theirs]\n"
+	  "   merge --abort" },
 	{ "tag",        cmd_tag,        "Create, list or delete tags",
 	  "tag [-d] [-l] [<name> [<rev>]]" },
 	{ "reset",      cmd_reset,      "Move HEAD and the index",

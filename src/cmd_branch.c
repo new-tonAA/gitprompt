@@ -691,7 +691,8 @@ static void merge_write(struct repo *r, const char *path, const void *data,
 
 static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 			const oid_t *theirs, struct merge_result *res,
-			struct index_state *merged)
+			struct index_state *merged, enum merge_favor favor,
+			const char *label)
 {
 	struct index_state bi, oi, ti;
 	size_t i;
@@ -745,38 +746,62 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		}
 
 		{
-			struct buf theirs_only, mine, content;
+			struct buf ours_text, theirs_text, base_text, content;
+			int conflicted;
 
-			buf_init(&theirs_only);
+			buf_init(&ours_text);
+			buf_init(&theirs_text);
+			buf_init(&base_text);
 			buf_init(&content);
-			buf_init(&mine);
-			odb_read(&r->odb, &ti.e[i].oid, NULL, &theirs_only);
+			odb_read(&r->odb, &ti.e[i].oid, NULL, &theirs_text);
 
 			if (o) {
-				odb_read(&r->odb, &o->oid, NULL, &mine);
-				buf_addstr(&content, "<<<<<<< ours\n");
-				buf_add(&content, mine.b, mine.len);
-				if (content.len && content.b[content.len - 1] != '\n')
-					buf_addch(&content, '\n');
-				buf_addstr(&content, "=======\n");
+				/* both sides changed the file: merge the contents,
+				 * which is a conflict only where they overlap */
+				if (b)
+					odb_read(&r->odb, &b->oid, NULL, &base_text);
+				odb_read(&r->odb, &o->oid, NULL, &ours_text);
+				printf("Auto-merging %s\n", ti.e[i].path);
+				conflicted = merge3(&base_text, &ours_text,
+						    &theirs_text, favor, "HEAD", label,
+						    &content);
+				if (conflicted)
+					printf("CONFLICT (%s): Merge conflict in %s\n",
+					       b ? "content" : "add/add",
+					       ti.e[i].path);
 			} else {
-				printf("CONFLICT (modify/delete): %s deleted by "
-				       "us, modified by them\n", ti.e[i].path);
+				printf("CONFLICT (modify/delete): %s deleted in "
+				       "HEAD and modified in %s.  Version %s of "
+				       "%s left in tree.\n", ti.e[i].path, label,
+				       label, ti.e[i].path);
+				buf_add(&content, theirs_text.b, theirs_text.len);
+				conflicted = 1;
 			}
-			buf_add(&content, theirs_only.b, theirs_only.len);
-			if (content.len && content.b[content.len - 1] != '\n')
-				buf_addch(&content, '\n');
-			if (o)
-				buf_addstr(&content, ">>>>>>> theirs\n");
+
+			buf_release(&ours_text);
+			buf_release(&base_text);
+			buf_release(&theirs_text);
 
 			merge_write(r, ti.e[i].path, content.b, content.len);
-			if (o)
-				printf("CONFLICT (content): %s\n", ti.e[i].path);
-			res->conflicts++;
-			merge_mark_unmerged(merged, ti.e[i].path, b, o, &ti.e[i]);
+			if (!conflicted) {
+				/*
+				 * The merged text is a new object; the entry that
+				 * records it is ours, so the mode and the stat block
+				 * stay ours and only the id moves.
+				 */
+				struct index_entry e = *o;
 
-			buf_release(&mine);
-			buf_release(&theirs_only);
+				odb_write(&r->odb, OBJ_BLOB, content.b, content.len,
+					  &e.oid);
+				e.path = ti.e[i].path;
+				e.stage = 0;
+				index_add(merged, &e);
+				res->files_changed++;
+			} else {
+				res->conflicts++;
+				merge_mark_unmerged(merged, ti.e[i].path, b, o,
+						    &ti.e[i]);
+			}
 			buf_release(&content);
 		}
 	}
@@ -787,7 +812,9 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		if (index_get(&ti, oi.e[i].path))
 			continue;
 		if (b && !oid_equal(&b->oid, &oi.e[i].oid)) {
-			printf("CONFLICT (modify/delete): %s\n", oi.e[i].path);
+			printf("CONFLICT (modify/delete): %s deleted in %s and "
+			       "modified in HEAD.  Version HEAD of %s left in "
+			       "tree.\n", oi.e[i].path, label, oi.e[i].path);
 			res->conflicts++;
 			merge_mark_unmerged(merged, oi.e[i].path, b, &oi.e[i], NULL);
 			continue;
@@ -904,12 +931,38 @@ static const char *merge_subject(const struct opts *o)
 
 int cmd_merge(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-m", "--message" };
+	static const char *const takes[] = { "-m", "--message", "-X",
+					     "--strategy-option" };
 	struct opts o;
 	oid_t target, head, head_tree, target_tree, base, base_tree;
 	struct commit tc = COMMIT_INIT;
+	enum merge_favor favor = MERGE_FAVOR_NONE;
+	const char *label;
+	int squash, no_ff;
 
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, takes, 4);
+
+	squash = opts_flag(&o, "--squash");
+	no_ff = opts_flag(&o, "--no-ff");
+	{
+		const char *x = opts_value(&o, "-X") ? opts_value(&o, "-X")
+				     : opts_value(&o, "--strategy-option");
+
+		if (x) {
+			if (!strcmp(x, "ours"))
+				favor = MERGE_FAVOR_OURS;
+			else if (!strcmp(x, "theirs"))
+				favor = MERGE_FAVOR_THEIRS;
+			else {
+				gp_error("merge: unknown strategy option '%s'\n"
+					 "hint: the ones there are are 'ours' and "
+					 "'theirs'", x);
+				return 1;
+			}
+		}
+	}
+	if (no_ff && opts_flag(&o, "--ff-only"))
+		gp_die("You cannot combine --no-ff with --ff-only.");
 
 	if (opts_flag(&o, "--abort")) {
 		oid_t other;
@@ -944,10 +997,35 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 			       "'gitprompt merge --abort'");
 	}
 
+	/*
+	 * A merge onto an unmerged index has no side to merge from: the stages
+	 * are a question the last merge asked and nobody has answered.  git
+	 * refuses for the same reason, and so that `--squash` -- which leaves
+	 * no MERGE_HEAD to notice -- is not a way to pile one merge on another.
+	 */
+	{
+		struct index_state ist;
+
+		memset(&ist, 0, sizeof ist);
+		index_read(&ist, repo_index_path(r));
+		if (index_has_unmerged(&ist)) {
+			gp_error("Merging is not possible because you have unmerged "
+				 "files.\n"
+				 "hint: fix them up in the work tree, and then use "
+				 "'gitprompt add/rm <file>'\n"
+				 "hint: as appropriate to mark resolution and make "
+				 "a commit.");
+			index_release(&ist);
+			gp_die("Exiting because of an unresolved conflict.");
+		}
+		index_release(&ist);
+	}
+
 	if (refs_head(&r->refs, &head) < 0)
 		gp_die("merge: HEAD has no commits yet");
-	if (resolve_rev(r, opts_arg(&o, 0), &target) < 0)
-		gp_die("merge: unknown revision: %s", opts_arg(&o, 0));
+	label = opts_arg(&o, 0);
+	if (resolve_rev(r, label, &target) < 0)
+		gp_die("merge: unknown revision: %s", label);
 	if (commit_peel(r, &target, OBJ_COMMIT, &target) < 0)
 		gp_die("merge: not a commit");
 
@@ -976,8 +1054,12 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 		return 0;
 	}
 
-	/* fast-forward: move the ref and check the tree out, no new commit */
-	if (is_ancestor(r, &head, &target)) {
+	/*
+	 * Fast-forward: move the ref and check the tree out, no new commit.
+	 * --no-ff asks for a merge commit anyway, and --squash wants the work
+	 * staged without HEAD moving, so both go on to the three-way merge.
+	 */
+	if (!no_ff && !squash && is_ancestor(r, &head, &target)) {
 		char *ref = refs_head_target(&r->refs);
 		if (ref) {
 			refs_write(&r->refs, ref, &target);
@@ -1022,7 +1104,8 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 		struct index_state mindex;
 		memset(&res, 0, sizeof res);
 		memset(&mindex, 0, sizeof mindex);
-		merge_trees(r, &base_tree, &head_tree, &target_tree, &res, &mindex);
+		merge_trees(r, &base_tree, &head_tree, &target_tree, &res, &mindex,
+			    favor, label);
 
 		/*
 		 * The merged result belongs in the index whether or not the
@@ -1032,17 +1115,37 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 		index_write(&mindex, repo_index_path(r));
 
 		if (res.conflicts) {
-			/* leave MERGE_HEAD behind so --abort can undo this, and
-			 * so the concluding commit records both parents */
-			merge_state_write(r, &target, merge_subject(&o));
-			gp_error("Automatic merge failed; %d conflict(s) left in "
-				 "the work tree.\n"
+			/*
+			 * Leave MERGE_HEAD behind so --abort can undo this, and
+			 * so the concluding commit records both parents.  A
+			 * squashed merge leaves none: it is not a merge to
+			 * finish, only its changes.
+			 */
+			if (squash)
+				printf("Squash commit -- not updating HEAD\n");
+			else
+				merge_state_write(r, &target, merge_subject(&o));
+			gp_error("Automatic merge failed; fix conflicts and then "
+				 "commit the result.\n"
 				 "hint: resolve them, then 'gitprompt add' and "
-				 "'gitprompt commit', or throw the merge away with "
-				 "'gitprompt merge --abort'", res.conflicts);
+				 "'gitprompt commit'%s", squash ? "" :
+				 ", or throw the merge away with "
+				 "'gitprompt merge --abort'");
 			index_release(&mindex);
 			commit_release(&tc);
 			return 1;
+		}
+		if (squash) {
+			/*
+			 * Staged and not recorded: no MERGE_HEAD, so the commit
+			 * that follows has one parent, and HEAD has not moved.
+			 */
+			printf("Squash commit -- not updating HEAD\n"
+			       "Automatic merge went well; stopped before "
+			       "committing as requested\n");
+			index_release(&mindex);
+			commit_release(&tc);
+			return 0;
 		}
 		if (opts_flag(&o, "--no-commit")) {
 			/* staged but not recorded: MERGE_HEAD is what tells the

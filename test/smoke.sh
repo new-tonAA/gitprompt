@@ -291,8 +291,8 @@ printf 'from main\n' > f.txt
 gp add f.txt >/dev/null 2>&1
 gp commit -m "main changes f" >/dev/null 2>&1
 expect "a conflicting merge reports a conflict" "CONFLICT" gp merge side
-expect "the conflict is marked in the file" "<<<<<<< ours" cat f.txt
-expect "the conflict names the other side" ">>>>>>> theirs" cat f.txt
+expect "the conflict is marked in the file" "<<<<<<< HEAD" cat f.txt
+expect "the conflict names the other side" ">>>>>>> side" cat f.txt
 expect "the conflict does not commit itself" "main changes f" gp log --oneline
 
 # the unfinished merge is a state on disk, as in git
@@ -445,6 +445,216 @@ expect "merging an already-merged branch says so" "up to date" gp merge clean1
 # the three-way merge has to reach the index, not only the work tree
 expect "the merged tree records their file" "h1.txt" gp ls-tree HEAD
 expect "the merged tree records our file" "h2.txt" gp ls-tree HEAD
+
+# ------------------------------------------------------------------
+say "merging the contents of one file"
+
+# Each case below gets its own repository so that an unfinished merge here
+# cannot colour anything above or below, and so the checks can assert on the
+# bytes of a file rather than on a phrase in a message.
+expect_same() {   # expect_same <description> <got-file> <wanted-file>
+	if cmp -s "$2" "$3"; then
+		ok "$1"
+	else
+		bad "$1" "got [$(tr '\n' '/' < "$2" 2>/dev/null)] \
+wanted [$(tr '\n' '/' < "$3" 2>/dev/null)]"
+	fi
+}
+mergecase() {   # mergecase <directory>: a fresh repository to build a case in
+	rm -rf "$1"
+	mkdir -p "$1" || exit 2
+	cd "$1" || exit 2
+	gp init . >/dev/null 2>&1
+}
+
+# two sides editing different lines of one file: a merge that only chose a
+# whole file would throw one side's edit away, so both have to arrive
+mergecase "$work/merge-content"
+printf 'one\ntwo\nthree\nfour\nfive\n' > c.txt
+gp add c.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'one\ntwo\nTHREE\nfour\nfive\n' > c.txt
+gp add c.txt >/dev/null 2>&1
+gp commit -m "side changes the third line" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'one\ntwo\nthree\nfour\nFIVE\n' > c.txt
+gp add c.txt >/dev/null 2>&1
+gp commit -m "main changes the last line" >/dev/null 2>&1
+expect_status "edits to different lines merge without a conflict" 0 gp merge side
+printf 'one\ntwo\nTHREE\nfour\nFIVE\n' > "$work/want-content"
+expect_same "the merged file carries both sides' edits" c.txt "$work/want-content"
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 2 ]; then
+	ok "the clean merge is recorded with two parents"
+else
+	bad "the clean merge is recorded with two parents" "found $nparents"
+fi
+
+# a conflict is only over the lines that differ: the line both sides agree on
+# is not in dispute, so it goes outside the markers rather than into both
+# halves of the conflict -- which is what git prints, byte for byte
+mergecase "$work/merge-trim"
+printf 'a\nb\nc\n' > t.txt
+gp add t.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'a\nX\nZ\n' > t.txt
+gp add t.txt >/dev/null 2>&1
+gp commit -m "side changes the second line and the last" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'a\nX\nc\n' > t.txt
+gp add t.txt >/dev/null 2>&1
+gp commit -m "main changes the second line" >/dev/null 2>&1
+expect "the last line still conflicts" "CONFLICT" gp merge side
+printf 'a\nX\n<<<<<<< HEAD\nc\n=======\nZ\n>>>>>>> side\n' > "$work/want-trim"
+expect_same "the line the two sides agree on sits outside the markers" \
+	t.txt "$work/want-trim"
+gp merge --abort >/dev/null 2>&1
+
+# -X ours and -X theirs settle a conflict for one side instead of stopping
+mergecase "$work/merge-favor"
+printf 'base\n' > x.txt
+gp add x.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'theirs\n' > x.txt
+gp add x.txt >/dev/null 2>&1
+gp commit -m "side rewrites x" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'ours\n' > x.txt
+gp add x.txt >/dev/null 2>&1
+gp commit -m "main rewrites x" >/dev/null 2>&1
+expect_status "-X ours merges without stopping" 0 gp merge -X ours side
+printf 'ours\n' > "$work/want-ours"
+expect_same "-X ours keeps our side of the conflict" x.txt "$work/want-ours"
+if grep -q '<<<<<<<' x.txt; then
+	bad "-X ours leaves no markers behind" "x.txt still has a marker"
+else
+	ok "-X ours leaves no markers behind"
+fi
+
+# the same conflict again, on a file of its own and the other way round
+gp switch -c side2 >/dev/null 2>&1
+printf 'theirs\n' > z.txt
+gp add z.txt >/dev/null 2>&1
+gp commit -m "side2 adds z" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'ours\n' > z.txt
+gp add z.txt >/dev/null 2>&1
+gp commit -m "main adds z" >/dev/null 2>&1
+expect_status "-X theirs merges without stopping" 0 gp merge -X theirs side2
+printf 'theirs\n' > "$work/want-theirs"
+expect_same "-X theirs keeps their side of the conflict" z.txt "$work/want-theirs"
+expect_status "an unknown -X is refused" 1 gp merge -X bananas side2
+expect "the refusal names the option" "unknown strategy option 'bananas'" \
+	gp merge -X bananas side2
+
+# --no-ff makes a merge commit even where the branch could have moved up to
+# their tip instead, so the fact of the merge is in the history
+mergecase "$work/merge-noff"
+printf 'start\n' > n.txt
+gp add n.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'start\nside\n' > n.txt
+gp add n.txt >/dev/null 2>&1
+gp commit -m "side appends" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+expect_status "--no-ff merges where a fast-forward was possible" 0 \
+	gp merge --no-ff side
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 2 ]; then
+	ok "the --no-ff merge is a commit of its own"
+else
+	bad "the --no-ff merge is a commit of its own" "found $nparents"
+fi
+printf 'start\nside\n' > "$work/want-noff"
+expect_same "the --no-ff merge still has their work" n.txt "$work/want-noff"
+
+# --squash stages the merge and leaves HEAD where it was, so the two sides
+# become one ordinary commit rather than a commit with two parents
+mergecase "$work/merge-squash"
+printf 'one\ntwo\nthree\n' > s.txt
+gp add s.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'one\ntwo\nTHREE\n' > s.txt
+printf 'added by side\n' > s2.txt
+gp add s.txt s2.txt >/dev/null 2>&1
+gp commit -m "side adds s2" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'ONE\ntwo\nthree\n' > s.txt
+gp add s.txt >/dev/null 2>&1
+gp commit -m "main edits s" >/dev/null 2>&1
+expect_status "--squash stages a merge without committing it" 0 \
+	gp merge --squash side
+if gp log --oneline | grep -q "side adds s2"; then
+	bad "--squash leaves the history alone" "their commit is in the log"
+else
+	ok "--squash leaves the history alone"
+fi
+expect_absent "--squash writes no merge state" .gitprompt/MERGE_HEAD
+expect "the squashed change is in the index" "s2.txt" gp ls-files
+expect_file "the squashed change is in the work tree" s2.txt
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 1 ]; then
+	ok "--squash leaves HEAD on our side of the fork"
+else
+	bad "--squash leaves HEAD on our side of the fork" "found $nparents"
+fi
+expect_status "committing finishes the squash" 0 gp commit -m "squash their work in"
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 1 ]; then
+	ok "the squashed result is an ordinary commit"
+else
+	bad "the squashed result is an ordinary commit" "found $nparents"
+fi
+printf 'ONE\ntwo\nTHREE\n' > "$work/want-squash"
+expect_same "the squash kept their edit and ours" s.txt "$work/want-squash"
+
+# a squash that conflicts leaves an unmerged index with no MERGE_HEAD, and a
+# merge cannot start from there: the stages are a question still unanswered
+mergecase "$work/merge-squash-conflict"
+printf 'base\n' > u.txt
+gp add u.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+printf 'theirs\n' > u.txt
+gp add u.txt >/dev/null 2>&1
+gp commit -m "side rewrites u" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'ours\n' > u.txt
+gp add u.txt >/dev/null 2>&1
+gp commit -m "main rewrites u" >/dev/null 2>&1
+expect_status "a squashed merge conflicts like any other" 1 gp merge --squash side
+expect_absent "a conflicted squash writes no merge state" .gitprompt/MERGE_HEAD
+expect "the conflict is marked in the file" "<<<<<<< HEAD" cat u.txt
+stages=$(gp ls-files -s u.txt | awk '{print $3}' | tr -d '\r' | sort | tr '\n' ',')
+if [ "$stages" = "1,2,3," ]; then
+	ok "a conflicted squash leaves the stages"
+else
+	bad "a conflicted squash leaves the stages" "stages $stages"
+fi
+
+expect_status "a merge onto an unmerged index is refused" 128 gp merge side
+expect "the refusal says the merge cannot start" "Merging is not possible" \
+	gp merge side
+expect "the refusal names the unresolved conflict" "unresolved conflict" \
+	gp merge side
+printf 'resolved\n' > u.txt
+gp add u.txt >/dev/null 2>&1
+expect_status "committing the resolution succeeds" 0 gp commit -m "resolve it"
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 1 ]; then
+	ok "the resolved squash commits with one parent"
+else
+	bad "the resolved squash commits with one parent" "found $nparents"
+fi
+printf 'resolved\n' > "$work/want-resolved"
+expect_same "the resolved file is what was committed" u.txt "$work/want-resolved"
+
+cd "$repo" || exit 2
 
 gp tag v1.0 >/dev/null 2>&1
 expect "the tag is listed" "v1.0" gp tag -l

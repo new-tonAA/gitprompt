@@ -210,9 +210,8 @@ one that says no:
 - **`serve` and the `gp://` transport.** There is no HTTP server. `gitprompt
   serve` prints `not implemented` and exits non-zero rather than pretending.
   Use the delegated transports above.
-- **Merge options other than the basics.** `--no-commit`, `--ff-only` and
-  `--abort` work. `--no-ff`, `--squash`, `-X` strategies and rename detection
-  do not exist.
+- **Rename detection.** A rename is a delete and an add. Merging a path that
+  one side renamed and the other side changed does not follow the rename.
 - **An editor.** `commit` needs `-m` or `-F`, except when concluding a merge,
   where `MERGE_MSG` supplies the message.
 - **Unknown options are rejected** with `unknown option '--bogus'` and exit 1.
@@ -227,7 +226,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **247 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **281 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, local remotes, packed object stores, and git interoperability —
@@ -245,6 +244,30 @@ off which stages are present, and resolving is staging the path, which drops
 them. The suite asserts that agreement with git directly, in both directions:
 git's own conflicted index is read back by gitprompt, and git's reader sees the
 one gitprompt wrote.
+
+What goes into those stages is a line-wise three-way merge, not a choice between
+whole files. Two sides that edit different lines of one file keep both edits;
+edits that meet conflict, and the file is marked the way git marks it — the
+lines the two sides agree on are left outside the markers rather than repeated
+in both halves, either half may come out empty, and the labels are `HEAD` and
+the branch being merged in. `--no-ff` records a merge commit where a
+fast-forward was possible, `--squash` stages the merge without moving `HEAD` or
+writing `MERGE_HEAD`, and `-X ours|theirs` settles a conflicting region for one
+side instead of stopping. The suite pins those bytes down exactly rather than
+checking the exit status alone: in the trimming case the whole conflicted file
+is spelled out and compared, and those are the bytes `git merge-file` prints for
+the same three inputs.
+
+One caveat, since it is not visible from the exit status: the alignment is not
+byte-for-byte git's. Where a file repeats a line, one edit can be described
+equally well as a change to the first copy or to the second, and the two
+descriptions disagree about whether a nearby edit overlaps. gitprompt keeps the
+alignment its longest-common-subsequence search finds, so on such a file the two
+can disagree about whether to conflict at all — gitprompt may report a conflict
+where git merges cleanly, or merge cleanly where git conflicts. Neither
+direction loses an edit: a clean merge is still both sides' changes applied, and
+a conflict is still both sides' text. It takes a repeated line with an edit
+beside it for the two to part company.
 
 The pack reader is exercised against packs git wrote, not only against the ones
 `gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
