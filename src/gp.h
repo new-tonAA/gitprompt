@@ -626,8 +626,13 @@ struct opts {
 	int nf;                 /* number of flags seen */
 	struct { const char *name; const char *value; } flags[64];
 };
+/*
+ * `allows` is the NULL-terminated list of option names this command accepts;
+ * a name ending in '=' takes a value.  Anything else in argv is refused, so
+ * the list is the whole of what the command understands.
+ */
 void opts_init(struct opts *o, int argc, char **argv,
-	       const char *const *takes_value, int ntakes);
+	       const char *const *allows);
 int opts_flag(const struct opts *o, const char *name);
 const char *opts_value(const struct opts *o, const char *name);
 const char *opts_arg(const struct opts *o, int i);

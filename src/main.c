@@ -25,58 +25,74 @@ static void opts_add(struct opts *o, const char *name, const char *value)
 	o->nf++;
 }
 
-static int takes_a_value(const char *const *takes_value, int ntakes,
-			 const char *name)
+/*
+ * The options a command accepts, as a NULL-terminated list of names, passed by
+ * the command to opts_init itself.  A name ending in '=' takes a value, which
+ * is what the caller used to pass as a second array -- one list instead of two,
+ * and no way for the two to disagree about the same option.
+ *
+ * The list belongs to the command rather than to the program.  A program-wide
+ * list could only catch names no command has; `gitprompt log --amend` was
+ * accepted and ignored, which is the worse half of the problem the check
+ * exists for: an option that belongs to a different command should not look as
+ * though it took effect here.
+ */
+static int entry_matches(const char *entry, const char *name)
 {
-	int i;
-	for (i = 0; i < ntakes; i++)
-		if (!strcmp(takes_value[i], name))
+	size_t n = strlen(entry);
+
+	if (n && entry[n - 1] == '=')
+		n--;
+	return strlen(name) == n && !strncmp(entry, name, n);
+}
+
+static int takes_a_value(const char *const *allows, const char *name)
+{
+	size_t i;
+
+	for (i = 0; allows[i]; i++)
+		if (allows[i][0] && allows[i][strlen(allows[i]) - 1] == '=' &&
+		    entry_matches(allows[i], name))
+			return 1;
+	return 0;
+}
+
+static int option_is_known(const char *const *allows, const char *name)
+{
+	size_t i;
+
+	for (i = 0; allows[i]; i++)
+		if (entry_matches(allows[i], name))
 			return 1;
 	return 0;
 }
 
 /*
- * Every option name gitprompt accepts anywhere.  Anything else is a typo, and
- * saying so beats running a quietly different command: `--onelin` should not
- * be the same as `--oneline`, and `--ff-only` on the wrong command should not
- * look as though it took effect.
- *
- * The list is program-wide rather than per-command, so `gitprompt log --amend`
- * is accepted and ignored.  A per-command table would catch that too, but it
- * needs every command to declare its own list, and one list that is missing an
- * option turns a working command into a broken one -- the worse mistake.
+ * Naming what the command does take, rather than only what it does not, is
+ * what makes the refusal useful: an option from git that gitprompt has not
+ * implemented and one that belongs to a different command look the same
+ * otherwise, and the reader has to go to the help to find out which it was.
  */
-static const char *const known_options[] = {
-	"-A", "-B", "-F", "-X", "-a", "-b", "-c", "-d", "-e", "-f", "-g", "-l",
-	"-m", "-n", "-o", "-p", "-q", "-r", "-s", "-t", "-u", "-v", "-w",
-	"--abort", "--all", "--allow-empty", "--amend", "--author", "--bare",
-	"--batch", "--build-options", "--cached", "--create", "--delete",
-	"--depth", "--dir", "--dry-run", "--edit", "--ff-only", "--force",
-	"--format", "--get", "--global", "--hard", "--help", "--initial-branch",
-	"--json", "--last", "--layout", "--list", "--list-sessions", "--max-count",
-	"--message", "--mixed", "--model",
-	"--move", "--name-only", "--no-commit", "--no-edit", "--no-ff",
-	"--no-stage", "--oneline",
-	"--output", "--parent", "--pathspec-from-file", "--port", "--prune",
-	"--quiet", "--session", "--set", "--set-upstream", "--short",
-	"--single-branch", "--soft", "--source", "--squash", "--stage", "--staged",
-	"--stat", "--stdin", "--strategy-option", "--strict", "--tags", "--title",
-	"--unset", "--update", "--verbose", "--version",
-};
-
-static int option_is_known(const char *name)
+static void reject_unknown_option(const char *const *allows, const char *name)
 {
+	struct buf hint = BUF_INIT;
 	size_t i;
 
-	for (i = 0; i < sizeof known_options / sizeof known_options[0]; i++)
-		if (!strcmp(known_options[i], name))
-			return 1;
-	return 0;
-}
-
-static void reject_unknown_option(const char *name)
-{
 	gp_error("unknown option '%s'", name);
+	for (i = 0; allows[i]; i++) {
+		size_t n = strlen(allows[i]);
+		int value = n && allows[i][n - 1] == '=';
+
+		if (value)
+			n--;
+		buf_addf(&hint, "%s%.*s%s", i ? ", " : "", (int)n, allows[i],
+			 value ? " <value>" : "");
+	}
+	if (hint.len)
+		fprintf(stderr, "hint: this command takes %s\n", buf_cstr(&hint));
+	else
+		fprintf(stderr, "hint: this command takes no options\n");
+	buf_release(&hint);
 	exit(1);
 }
 
@@ -87,11 +103,14 @@ static void reject_unknown_option(const char *name)
  * Everything after a bare "--" is positional.
  */
 void opts_init(struct opts *o, int argc, char **argv,
-	       const char *const *takes_value, int ntakes)
+	       const char *const *allows)
 {
+	static const char *const none[] = { NULL };
 	int i;
 	int only_positional = 0;
 
+	if (!allows)
+		allows = none;
 	memset(o, 0, sizeof *o);
 	o->args = xcalloc((size_t)argc + 1, sizeof(char *));
 
@@ -111,15 +130,15 @@ void opts_init(struct opts *o, int argc, char **argv,
 			char *eq = strchr(name, '=');
 			if (eq) {
 				*eq = '\0';
-				if (!option_is_known(name))
-					reject_unknown_option(name);
+				if (!option_is_known(allows, name))
+					reject_unknown_option(allows, name);
 				opts_add(o, name, eq + 1);
-			} else if (takes_a_value(takes_value, ntakes, name) &&
+			} else if (takes_a_value(allows, name) &&
 				   i + 1 < argc) {
 				opts_add(o, name, argv[++i]);
 			} else {
-				if (!option_is_known(name))
-					reject_unknown_option(name);
+				if (!option_is_known(allows, name))
+					reject_unknown_option(allows, name);
 				opts_add(o, name, NULL);
 			}
 			continue;
@@ -132,9 +151,9 @@ void opts_init(struct opts *o, int argc, char **argv,
 				shortname[0] = '-';
 				shortname[1] = a[k];
 				shortname[2] = '\0';
-				if (!option_is_known(shortname))
-					reject_unknown_option(shortname);
-				if (takes_a_value(takes_value, ntakes, shortname)) {
+				if (!option_is_known(allows, shortname))
+					reject_unknown_option(allows, shortname);
+				if (takes_a_value(allows, shortname)) {
 					if (a[k + 1]) {
 						opts_add(o, xstrdup(shortname), a + k + 1);
 					} else if (i + 1 < argc) {
@@ -184,7 +203,7 @@ int opts_count(const struct opts *o)
 const struct command commands[] = {
 	/* start a working area */
 	{ "init",       cmd_init,       "Create an empty gitprompt repository",
-	  "init [--bare] [<dir>]" },
+	  "init [--bare] [-b <name>] [<dir>]" },
 	{ "clone",      cmd_clone,      "Clone a prompt repository into a new directory",
 	  "clone <url> [<dir>]" },
 	{ "config",     cmd_config,     "Get and set repository or global options",
@@ -194,20 +213,22 @@ const struct command commands[] = {
 	{ "session",    cmd_session,    "Begin, end and inspect prompting sessions",
 	  "session <start|end|list|show|use|current> [...]" },
 	{ "prompt",     cmd_prompt,     "Record one prompt",
-	  "prompt [-m TEXT] [-F FILE] [-t TAG]... [--model M] [-s SESSION]" },
+	  "prompt [-m TEXT] [-F FILE] [-t TAG]... [--model M] [--parent ID]"
+	  " [-s SESSION] [--no-stage]" },
 	{ "capture",    cmd_capture,    "Record a prompt read from stdin",
-	  "capture [--model M] [-t TAG]..." },
+	  "capture [-t TAG]... [--model M] [--parent ID] [-s SESSION]"
+	  " [--no-stage]" },
 	{ "outcome",    cmd_outcome,    "Attach a note about what a prompt produced",
 	  "outcome <prompt-id> <text>\n   outcome --last <text>" },
 	{ "add",        cmd_add,        "Add file contents to the index",
-	  "add [-A] [-u] [-n] [--] <path>..." },
+	  "add [-A] [-u] [-n] [--pathspec-from-file F] [--] <path>..." },
 	{ "rm",         cmd_rm,         "Remove files from the work tree and the index",
 	  "rm [--cached] <path>..." },
 	{ "mv",         cmd_mv,         "Move or rename a file, and update the index",
 	  "mv <source> <destination>" },
 	{ "commit",     cmd_commit,     "Record the staged changes",
 	  "commit [-m MSG] [-F FILE] [-e] [--no-edit] [-a] [--amend]"
-	  " [--allow-empty]" },
+	  " [--allow-empty] [-q]" },
 
 	/* reconstruct a project */
 	{ "replay",     cmd_replay,     "Reconstruct the prompt history as one document",
@@ -232,26 +253,26 @@ const struct command commands[] = {
 
 	/* grow, mark and tweak */
 	{ "branch",     cmd_branch,     "List, create or delete branches",
-	  "branch [-d] [-m] [-a] [<name> [<start>]]" },
+	  "branch [-d <name>] [-m <new>] [-v] [-a] [<name> [<start>]]" },
 	{ "checkout",   cmd_checkout,   "Switch branches or restore files",
-	  "checkout [-b <name>] [-f] [<rev>|-- <path>...]" },
+	  "checkout [-b <name>] [-B <name>] [-f] [<rev>|-- <path>...]" },
 	{ "switch",     cmd_switch,     "Switch branches",
-	  "switch [-c <name>] [<branch>]" },
+	  "switch [-c <name>] [-f] [<branch>]" },
 	{ "merge",      cmd_merge,      "Join another history into this one",
-	  "merge [--no-commit] [--ff-only] [--no-ff] [--squash] [-X ours|theirs]\n"
+	  "merge [-m MSG] [--no-commit] [--ff-only] [--no-ff] [--squash] [-X ours|theirs]\n"
 	  "   merge --abort" },
 	{ "tag",        cmd_tag,        "Create, list or delete tags",
-	  "tag [-d] [-l] [<name> [<rev>]]" },
+	  "tag [-d <name>] [-m MSG] [-l] [<name> [<rev>]]" },
 	{ "reset",      cmd_reset,      "Move HEAD and the index",
 	  "reset [--soft|--mixed|--hard] [<rev>]" },
 	{ "describe",   cmd_describe,   "Name a commit by its nearest tag",
-	  "describe [<rev>]" },
+	  "describe [--tags] [<rev>]" },
 
 	/* collaborate */
 	{ "remote",     cmd_remote,     "Manage the set of remotes",
 	  "remote [-v] [add|remove|set-url|rename] ..." },
 	{ "push",       cmd_push,       "Update remote refs along with objects",
-	  "push [-u] [<remote>] [<refspec>...]" },
+	  "push [-u] [-f] [--tags] [<remote>] [<refspec>...]" },
 	{ "fetch",      cmd_fetch,      "Download objects and refs from a remote",
 	  "fetch [<remote>] [<refspec>...]" },
 	{ "pull",       cmd_pull,       "Fetch and merge in one step",
@@ -265,7 +286,7 @@ const struct command commands[] = {
 	{ "cat-file",         cmd_cat_file,         "Show an object's type, size or contents",
 	  "cat-file (-t|-s|-p|-e) <object>" },
 	{ "ls-tree",          cmd_ls_tree,          "List the contents of a tree",
-	  "ls-tree [-r] [<tree>]" },
+	  "ls-tree [-r] [--name-only] [<tree>]" },
 	{ "write-tree",       cmd_write_tree,       "Create a tree from the index",
 	  "write-tree" },
 	{ "commit-tree",      cmd_commit_tree,      "Create a commit object",
@@ -291,13 +312,13 @@ const struct command commands[] = {
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects",
-	  "gc [--prune] [--dry-run] [-q]" },
+	  "gc [-n] [--dry-run]" },
 	{ "fsck",       cmd_fsck,       "Check the repository for corruption",
-	  "fsck [--strict] [-q]" },
+	  "fsck [-v] [--verbose]" },
 	{ "help",       cmd_help,       "Show help for a command or topic",
 	  "help [<command>]" },
 	{ "version",    cmd_version,    "Show the version",
-	  "version [--build-options]" },
+	  "version" },
 };
 
 const size_t commands_nr = sizeof commands / sizeof commands[0];

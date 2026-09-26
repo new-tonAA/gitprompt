@@ -36,7 +36,6 @@ static int slurp_input(const char *file, struct buf *out)
 
 int cmd_init(struct repo *unused, int argc, char **argv)
 {
-	static const char *const takes[] = { "-b", "--initial-branch" };
 	struct opts o;
 	const char *dir;
 	const char *branch;
@@ -46,7 +45,8 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 	char cwd[4096];
 
 	(void)unused;
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--bare", "-b=", "--initial-branch=", NULL });
 	bare = opts_flag(&o, "--bare");
 	dir = opts_arg(&o, 0);
 
@@ -145,12 +145,13 @@ static void list_one(const char *k, const char *v, void *ud)
 
 int cmd_config(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--get", "--set" };
 	struct opts o;
 	int global;
 	const char *key, *value;
 
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--global", "-g", "--list", "-l", "--unset", "--get",
+		"--set", NULL });
 	global = opts_flag(&o, "--global") || opts_flag(&o, "-g");
 
 	if (opts_flag(&o, "--list") || opts_flag(&o, "-l")) {
@@ -166,6 +167,10 @@ int cmd_config(struct repo *r, int argc, char **argv)
 		return 1;
 	}
 	value = opts_arg(&o, 1);
+	if (!value && opts_flag(&o, "--set")) {
+		gp_error("config --set: expected a value");
+		return 1;
+	}
 
 	if (opts_flag(&o, "--unset")) {
 		if (repo_config_unset(r, key) < 0) {
@@ -200,13 +205,13 @@ int cmd_config(struct repo *r, int argc, char **argv)
 
 int cmd_hash_object(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-t" };
 	struct opts o;
 	enum obj_type type = OBJ_BLOB;
 	struct odb *odb;
 	int write_it, i, rc = 0;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-t=", "-w", "--stdin", NULL });
 	write_it = opts_flag(&o, "-w");
 	if (opts_value(&o, "-t")) {
 		type = obj_type_from_name(opts_value(&o, "-t"));
@@ -288,14 +293,14 @@ static void print_tree_pretty(struct repo *r, const oid_t *oid)
 
 int cmd_cat_file(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--batch" };
 	struct opts o;
 	const char *what = NULL;
 	oid_t oid;
 	enum obj_type type;
 	struct buf b;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-t", "-s", "-p", "-e", NULL });
 	if (opts_flag(&o, "-t")) what = "type";
 	else if (opts_flag(&o, "-s")) what = "size";
 	else if (opts_flag(&o, "-p")) what = "pretty";
@@ -365,7 +370,8 @@ int cmd_ls_tree(struct repo *r, int argc, char **argv)
 	struct lst_ctx c = { 0, 0 };
 	oid_t tree;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-r", "--name-only", NULL });
 	c.recursive = opts_flag(&o, "-r");
 	c.name_only = opts_flag(&o, "--name-only");
 
@@ -413,7 +419,7 @@ int cmd_write_tree(struct repo *r, int argc, char **argv)
 	oid_t tree;
 	char hex[GP_SHA1_HEXSZ + 1];
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	memset(&ist, 0, sizeof ist);
 	index_read(&ist, repo_index_path(r));
 	if (write_tree_from_index(r, &ist, &tree) < 0) {
@@ -428,7 +434,6 @@ int cmd_write_tree(struct repo *r, int argc, char **argv)
 
 int cmd_commit_tree(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-p", "-m", "-F" };
 	struct opts o;
 	struct commit c = COMMIT_INIT;
 	struct buf ident, msg, treebuf;
@@ -436,7 +441,8 @@ int cmd_commit_tree(struct repo *r, int argc, char **argv)
 	char hex[GP_SHA1_HEXSZ + 1];
 	int i;
 
-	opts_init(&o, argc, argv, takes, 3);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-p=", "-m=", "-F=", NULL });
 	if (!opts_arg(&o, 0))
 		gp_die("commit-tree: expected a tree\nusage: gitprompt commit-tree "
 		       "<tree> [-p <parent>]... [-m <msg>]");
@@ -501,7 +507,7 @@ int cmd_rev_parse(struct repo *r, int argc, char **argv)
 	int i, rc = 0;
 	int short_form;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "--short", NULL });
 	short_form = opts_flag(&o, "--short");
 
 	if (!o.nargs) {
@@ -536,7 +542,7 @@ int cmd_update_ref(struct repo *r, int argc, char **argv)
 	oid_t newoid, oldoid;
 	int had_old;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	name = opts_arg(&o, 0);
 	newrev = opts_arg(&o, 1);
 	oldrev = opts_arg(&o, 2);
@@ -565,7 +571,7 @@ int cmd_symbolic_ref(struct repo *r, int argc, char **argv)
 	struct opts o;
 	const char *name, *target;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	name = opts_arg(&o, 0);
 	target = opts_arg(&o, 1);
 	if (!name)
@@ -654,12 +660,11 @@ static void fer_one(const char *name, const oid_t *oid, void *ud)
 
 int cmd_for_each_ref(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--format" };
 	struct opts o;
 	const char *prefix;
 	char *p;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, NULL);
 	prefix = opts_arg(&o, 0);
 	if (!prefix)
 		prefix = "refs/";
@@ -685,7 +690,8 @@ int cmd_ls_files(struct repo *r, int argc, char **argv)
 	size_t i;
 	int show_stage;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-s", "--stage", NULL });
 	show_stage = opts_flag(&o, "-s") || opts_flag(&o, "--stage");
 
 	memset(&ist, 0, sizeof ist);
@@ -717,7 +723,7 @@ int cmd_count_objects(struct repo *r, int argc, char **argv)
 	struct opts o;
 	size_t n;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "-v", NULL });
 	n = odb_count(&r->odb);
 	if (opts_flag(&o, "-v")) {
 		size_t packed = odb_count_packed(&r->odb);
@@ -772,7 +778,7 @@ int cmd_verify_objects(struct repo *r, int argc, char **argv)
 	struct opts o;
 	struct verify_ctx c = { NULL, 0, 0 };
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	c.r = r;
 	/* both forms: a hash checked only where it is loose would say nothing
 	 * about the objects a fetch left packed */
@@ -785,7 +791,7 @@ int cmd_check_ref_format(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	(void)r;
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	if (!opts_arg(&o, 0))
 		gp_die("check-ref-format: expected a name");
 	return refs_check_name(opts_arg(&o, 0)) == 0 ? 0 : 1;

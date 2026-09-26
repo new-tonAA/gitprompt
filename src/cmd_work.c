@@ -214,11 +214,11 @@ static void worktree_paths(struct repo *r, struct slist *out)
 	slist_sort_unique(out);
 }
 
-static void add_pathspecs(int argc, char **argv, const char *const *takes,
-			  int ntakes, struct opts *o, struct slist *specs)
+static void add_pathspecs(int argc, char **argv, const char *const *allows,
+			  struct opts *o, struct slist *specs)
 {
 	int i;
-	opts_init(o, argc, argv, takes, ntakes);
+	opts_init(o, argc, argv, allows);
 	for (i = 0; i < o->nargs; i++) {
 		struct buf n;
 		buf_init(&n);
@@ -234,7 +234,6 @@ static void add_pathspecs(int argc, char **argv, const char *const *takes,
 
 int cmd_add(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--pathspec-from-file" };
 	struct opts o;
 	struct slist specs = { NULL, 0, 0 };
 	struct index_state ist;
@@ -242,7 +241,9 @@ int cmd_add(struct repo *r, int argc, char **argv)
 	size_t i;
 	int dry_run, update_only, all;
 
-	add_pathspecs(argc, argv, takes, 1, &o, &specs);
+	add_pathspecs(argc, argv, (const char *const[]){
+		"-A", "--all", "-u", "--update", "-n", "--dry-run",
+		"--pathspec-from-file=", NULL }, &o, &specs);
 	dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
 	update_only = opts_flag(&o, "-u") || opts_flag(&o, "--update");
 	all = opts_flag(&o, "-A") || opts_flag(&o, "--all");
@@ -326,7 +327,8 @@ int cmd_rm(struct repo *r, int argc, char **argv)
 	struct slist specs = { NULL, 0, 0 };
 	int cached, i, rc = 0;
 
-	add_pathspecs(argc, argv, NULL, 0, &o, &specs);
+	add_pathspecs(argc, argv,
+		      (const char *const[]){ "--cached", NULL }, &o, &specs);
 	cached = opts_flag(&o, "--cached");
 
 	if (!specs.nr) {
@@ -380,7 +382,7 @@ int cmd_mv(struct repo *r, int argc, char **argv)
 	struct buf from, to;
 	char *ffull, *tfull, *tdir;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	if (!opts_arg(&o, 0) || !opts_arg(&o, 1)) {
 		gp_error("mv: expected <source> <destination>");
 		return 1;
@@ -533,7 +535,7 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	size_t nconf = 0;
 	char **conf;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "-s", "--short", NULL });
 	short_fmt = opts_flag(&o, "-s") || opts_flag(&o, "--short");
 
 	memset(&ist, 0, sizeof ist);
@@ -951,13 +953,14 @@ static int existing_message(struct repo *r, int amend, struct buf *out)
 
 int cmd_commit(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-m", "-F", "--author" };
 	struct opts o;
 	struct buf msg;
 	const char *m;
 	int amend, edit = 0;
 
-	opts_init(&o, argc, argv, takes, 3);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-m=", "-F=", "-e", "--edit", "--no-edit", "-a", "--all",
+		"--amend", "--allow-empty", "-q", NULL });
 	amend = opts_flag(&o, "--amend");
 
 	if (opts_flag(&o, "-a") || opts_flag(&o, "--all")) {
@@ -1238,14 +1241,14 @@ static void log_one(const oid_t *oid, const struct commit *c, void *ud)
 
 int cmd_log(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-n", "--max-count" };
 	struct opts o;
 	struct oid_array tips = OID_ARRAY_INIT;
 	struct log_ctx ctx;
 	oid_t start;
 	const char *n;
 
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--oneline", "-n=", "--max-count=", NULL });
 	memset(&ctx, 0, sizeof ctx);
 	ctx.oneline = opts_flag(&o, "--oneline");
 	ctx.show_session = 1;
@@ -1285,7 +1288,8 @@ int cmd_show(struct repo *r, int argc, char **argv)
 	oid_t oid;
 	enum obj_type t;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv,
+		   (const char *const[]){ "--stat", NULL });
 	if (!opts_arg(&o, 0)) {
 		gp_error("show: expected a revision");
 		return 1;
@@ -1302,6 +1306,7 @@ int cmd_show(struct repo *r, int argc, char **argv)
 		struct buf diff;
 		oid_t old_tree, new_tree;
 		int have_old = 0;
+		int stat_only = opts_flag(&o, "--stat");
 
 		read_commit(r, &oid, &c);
 		oid_hex(&oid, hex);
@@ -1345,7 +1350,8 @@ int cmd_show(struct repo *r, int argc, char **argv)
 		new_tree = c.tree;
 
 		buf_init(&diff);
-		diff_trees(r, have_old ? &old_tree : NULL, &new_tree, &diff, 0);
+		diff_trees(r, have_old ? &old_tree : NULL, &new_tree, &diff,
+			   stat_only);
 		fwrite(diff.b, 1, diff.len, stdout);
 		buf_release(&diff);
 		commit_release(&c);
@@ -1770,7 +1776,8 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 	oid_t old_tree, new_tree;
 	int have_old = 0, have_new = 0;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--cached", "--staged", "--stat", NULL });
 	cached = opts_flag(&o, "--cached") || opts_flag(&o, "--staged");
 	stat_only = opts_flag(&o, "--stat");
 
@@ -1874,7 +1881,8 @@ int cmd_reset(struct repo *r, int argc, char **argv)
 	char *branch_ref;
 	int mode;               /* 0 soft, 1 mixed, 2 hard */
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--soft", "--mixed", "--hard", NULL });
 	mode = opts_flag(&o, "--soft") ? 0
 	     : opts_flag(&o, "--hard") ? 2
 				       : 1;
@@ -1930,7 +1938,7 @@ int cmd_reflog(struct repo *r, int argc, char **argv)
 	struct buf b;
 	const char *p, *end;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	name = opts_arg(&o, 0);
 	if (!name)
 		name = "HEAD";
@@ -2030,14 +2038,13 @@ static void describe_cb(const oid_t *oid, const struct commit *c, void *ud)
 
 int cmd_describe(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--tags" };
 	struct opts o;
 	oid_t target;
 	struct oid_array tips = OID_ARRAY_INIT;
 	struct tag_scan ts;
 	struct describe_ctx d;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, (const char *const[]){ "--tags", NULL });
 
 	if (opts_arg(&o, 0)) {
 		if (resolve_rev(r, opts_arg(&o, 0), &target) < 0)

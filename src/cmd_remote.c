@@ -549,7 +549,8 @@ int cmd_remote(struct repo *r, int argc, char **argv)
 	const char *sub;
 	int verbose;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-v", "--verbose", NULL });
 	verbose = opts_flag(&o, "-v") || opts_flag(&o, "--verbose");
 	sub = opts_arg(&o, 0);
 
@@ -767,7 +768,8 @@ int cmd_push(struct repo *r, int argc, char **argv)
 	size_t i;
 	int rc = 0;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-u", "--set-upstream", "-f", "--force", "--tags", NULL });
 	set_upstream = opts_flag(&o, "-u") || opts_flag(&o, "--set-upstream");
 	force = opts_flag(&o, "-f") || opts_flag(&o, "--force");
 
@@ -1009,14 +1011,13 @@ out:
 
 int cmd_fetch(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--depth" };
 	struct opts o;
 	char *name = NULL, *url = NULL;
 	struct fetch_collect fc;
 	size_t i;
 	int updated = 0;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, NULL);
 	if (resolve_remote(r, opts_arg(&o, 0), &name, &url) < 0) {
 		gp_error("fetch: no remote given and none configured\n"
 			 "hint: gitprompt remote add origin <url>");
@@ -1150,7 +1151,7 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 	int rc = 0;
 
 	(void)r;
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	url = opts_arg(&o, 0);
 	if (!url) {
 		gp_error("clone: expected a url\nusage: gitprompt clone <url> [<dir>]");
@@ -1324,7 +1325,7 @@ int cmd_pull(struct repo *r, int argc, char **argv)
 	oid_t fetched = null_oid;
 	int got = 0;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	remote_arg = opts_arg(&o, 0);
 	branch_arg = opts_arg(&o, 1);
 
@@ -1401,11 +1402,11 @@ int cmd_pull(struct repo *r, int argc, char **argv)
 
 int cmd_serve(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--port", "--dir" };
 	struct opts o;
 
 	(void)r;
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--port=", "--dir=", NULL });
 
 	gp_error("serve: gitprompt's own transport (gp://) is not implemented in "
 		 "this build.\n"

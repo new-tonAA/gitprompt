@@ -185,8 +185,6 @@ static void collect_tags(const struct opts *o, const char ***out, size_t *nr)
 
 int cmd_prompt(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-m", "-F", "-s", "--session",
-					     "--model", "--parent", "-t", "--tag" };
 	struct opts o;
 	struct buf body;
 	struct prompt_input in;
@@ -194,7 +192,9 @@ int cmd_prompt(struct repo *r, int argc, char **argv)
 	size_t nr_tags = 0;
 	int rc;
 
-	opts_init(&o, argc, argv, takes, 8);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-m=", "-F=", "-t=", "--tag=", "-s=", "--session=",
+		"--model=", "--parent=", "--no-stage", NULL });
 	memset(&in, 0, sizeof in);
 
 	buf_init(&body);
@@ -236,8 +236,6 @@ int cmd_prompt(struct repo *r, int argc, char **argv)
 
 int cmd_capture(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-s", "--session", "--model",
-					     "--parent", "-t", "--tag" };
 	struct opts o;
 	struct buf body;
 	struct prompt_input in;
@@ -245,7 +243,9 @@ int cmd_capture(struct repo *r, int argc, char **argv)
 	size_t nr_tags = 0;
 	int rc;
 
-	opts_init(&o, argc, argv, takes, 6);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-t=", "--tag=", "-s=", "--session=", "--model=",
+		"--parent=", "--no-stage", NULL });
 	memset(&in, 0, sizeof in);
 
 	buf_init(&body);
@@ -333,7 +333,7 @@ int cmd_outcome(struct repo *r, int argc, char **argv)
 	char *id = NULL;
 	int last, first_text;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "--last", NULL });
 	last = opts_flag(&o, "--last");
 
 	if (last) {
@@ -431,12 +431,12 @@ static int write_session(struct repo *r, const struct session *s)
 
 static int session_start(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-t", "--title" };
 	struct opts o;
 	struct session s;
 	struct buf b, who;
 
-	opts_init(&o, argc, argv, takes, 2);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-t=", "--title=", NULL });
 	memset(&s, 0, sizeof s);
 
 	s.id = new_session_id();
@@ -676,8 +676,6 @@ int cmd_session(struct repo *r, int argc, char **argv)
 
 int cmd_replay(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--format", "-o", "--output",
-					     "--layout" };
 	struct opts o;
 	struct prompt_list pl;
 	struct session_groups sg;
@@ -685,7 +683,9 @@ int cmd_replay(struct repo *r, int argc, char **argv)
 	const char *fmt;
 	int stat_only;
 
-	opts_init(&o, argc, argv, takes, 4);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--format=", "-o=", "--output=", "--layout=", "--stat",
+		"--list-sessions", NULL });
 	fmt = opts_value(&o, "--format");
 	if (!fmt)
 		fmt = "md";
@@ -759,7 +759,7 @@ int cmd_timeline(struct repo *r, int argc, char **argv)
 	struct session_groups sg;
 	size_t i, j;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	/* an optional ref, as replay has: the history as it stood then */
 	if (o.nargs > 0) {
 		memset(&pl, 0, sizeof pl);
@@ -802,7 +802,7 @@ int cmd_log_prompt(struct repo *r, int argc, char **argv)
 	size_t i;
 	int oneline;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "--oneline", NULL });
 	oneline = opts_flag(&o, "--oneline");
 
 	collect_prompts(r, &pl);
@@ -896,7 +896,7 @@ int cmd_stats(struct repo *r, int argc, char **argv)
 	struct oid_array tips = OID_ARRAY_INIT;
 	oid_t head;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){ "--json", NULL });
 	memset(&st, 0, sizeof st);
 	st.objects = odb_count(&r->odb);
 

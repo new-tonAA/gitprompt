@@ -129,12 +129,13 @@ static void branch_list_cb(const char *name, const oid_t *oid, void *ud)
 
 int cmd_branch(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-d", "--delete", "-m", "--move" };
 	struct opts o;
 	char *cur = current_branch(r);
 	const char *del, *move;
 
-	opts_init(&o, argc, argv, takes, 4);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-d=", "--delete=", "-m=", "--move=", "-l", "--list",
+		"-v", "--verbose", "-a", "--all", NULL });
 	del = opts_value(&o, "-d") ? opts_value(&o, "-d")
 				   : opts_value(&o, "--delete");
 	move = opts_value(&o, "-m") ? opts_value(&o, "-m")
@@ -421,11 +422,11 @@ static int switch_to(struct repo *r, const char *rev, int force)
 
 int cmd_checkout(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-b", "-B", "--source" };
 	struct opts o;
 	int i;
 
-	opts_init(&o, argc, argv, takes, 3);
+	opts_init(&o, argc, argv,
+		   (const char *const[]){ "-b=", "-B=", "-f", NULL });
 
 	/* -b <name>: create the branch at HEAD and switch to it */
 	if (opts_value(&o, "-b") || opts_value(&o, "-B")) {
@@ -547,12 +548,11 @@ void restore_all_from_index(struct repo *r, const struct index_state *ist)
 
 int cmd_switch(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-c", "--create", "-C",
-					     "--force-create" };
 	struct opts o;
 	const char *create;
 
-	opts_init(&o, argc, argv, takes, 4);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-c=", "--create=", "-f", NULL });
 	create = opts_value(&o, "-c") ? opts_value(&o, "-c")
 				      : opts_value(&o, "--create");
 
@@ -931,8 +931,6 @@ static const char *merge_subject(const struct opts *o)
 
 int cmd_merge(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-m", "--message", "-X",
-					     "--strategy-option" };
 	struct opts o;
 	oid_t target, head, head_tree, target_tree, base, base_tree;
 	struct commit tc = COMMIT_INIT;
@@ -940,7 +938,9 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 	const char *label;
 	int squash, no_ff;
 
-	opts_init(&o, argc, argv, takes, 4);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-m=", "--message=", "-X=", "--strategy-option=", "--squash",
+		"--no-ff", "--ff-only", "--no-commit", "--abort", NULL });
 
 	squash = opts_flag(&o, "--squash");
 	no_ff = opts_flag(&o, "--no-ff");
@@ -1220,11 +1220,11 @@ static void tag_list_cb(const char *name, const oid_t *oid, void *ud)
 
 int cmd_tag(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "-d", "--delete", "-m" };
 	struct opts o;
 	const char *del;
 
-	opts_init(&o, argc, argv, takes, 3);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-d=", "--delete=", "-m=", "-l", "--list", NULL });
 	del = opts_value(&o, "-d") ? opts_value(&o, "-d")
 				   : opts_value(&o, "--delete");
 

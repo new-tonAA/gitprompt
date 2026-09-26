@@ -387,7 +387,8 @@ int cmd_fsck(struct repo *r, int argc, char **argv)
 	struct dangling_ctx d;
 	int verbose;
 
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-v", "--verbose", NULL });
 	verbose = opts_flag(&o, "-v") || opts_flag(&o, "--verbose");
 
 	memset(&f, 0, sizeof f);
@@ -549,13 +550,13 @@ static size_t pack_reachable(struct repo *r, const struct oid_set *seen,
 
 int cmd_gc(struct repo *r, int argc, char **argv)
 {
-	static const char *const takes[] = { "--prune" };
 	struct opts o;
 	struct fsck f;
 	struct gc_ctx g;
 	size_t total, nr_pack, freed, dropped;
 
-	opts_init(&o, argc, argv, takes, 1);
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-n", "--dry-run", NULL });
 
 	memset(&f, 0, sizeof f);
 	f.r = r;
@@ -615,7 +616,7 @@ int cmd_help(struct repo *r, int argc, char **argv)
 	size_t i;
 
 	(void)r;
-	opts_init(&o, argc, argv, NULL, 0);
+	opts_init(&o, argc, argv, NULL);
 	what = opts_arg(&o, 0);
 	if (!what) {
 		print_command_list();
@@ -634,9 +635,10 @@ int cmd_help(struct repo *r, int argc, char **argv)
 
 int cmd_version(struct repo *r, int argc, char **argv)
 {
+	struct opts o;
+
 	(void)r;
-	(void)argc;
-	(void)argv;
+	opts_init(&o, argc, argv, NULL);
 	printf("gitprompt %s\n", GP_VERSION);
 	return 0;
 }

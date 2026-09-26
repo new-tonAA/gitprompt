@@ -1193,6 +1193,69 @@ expect_status "an unknown command fails" 1 gp nosuchcommand
 expect_status "a replay of an unknown ref fails" 128 gp replay nosuchref
 
 # ------------------------------------------------------------------
+say "an option belongs to the command it was written for"
+
+# Its own repository: every check here is about the argument parser, and a
+# commit added while probing `commit` should not land in anyone else's history.
+optrepo=$work/optrepo
+mkdir -p "$optrepo" || exit 2
+cd "$optrepo" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.name "Option Tester" >/dev/null 2>&1
+gp config user.email opt@example.com >/dev/null 2>&1
+echo hello > file.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "a first commit" >/dev/null 2>&1
+
+# The list of accepted options is per command, so an option that belongs to a
+# different command is refused rather than accepted and ignored.  That is the
+# half of the check that matters: `log --amend` used to look as though it had
+# taken effect, when all it did was nothing.
+expect_status "an option from another command is refused" 1 gp log --amend
+expect "and named" "unknown option '--amend'" gp log --amend
+expect "and the refusal says what this command takes" \
+	"this command takes --oneline" gp log --amend
+expect_status "a merge option on commit is refused" 1 gp commit --ff-only
+expect "commit's refusal names commit's options" \
+	"this command takes -m <value>" gp commit --ff-only
+expect_status "a diff option on status is refused" 1 gp status --cached
+expect_status "an option no command has is refused too" 1 gp log --bogus
+
+expect_status "an option gitprompt never implemented is refused" 1 \
+	gp checkout --source HEAD
+expect_status "so is one the old table advertised but ignored" 1 gp cat-file --batch
+expect_status "and one whose value the reader ignored" 1 \
+	gp for-each-ref --format='%(refname)'
+expect_status "and one that would have changed nothing" 1 \
+	gp commit --author "A <a@b>"
+expect_status "gc's unimplemented --prune is refused" 1 gp gc --prune
+expect_status "fsck's unimplemented --strict is refused" 1 gp fsck --strict
+expect_status "fetch's unimplemented --depth is refused" 1 gp fetch --depth 1
+expect_status "push's unimplemented --prune is refused" 1 gp push --prune
+expect_status "describe takes no -m even though it can name a tag" 1 \
+	gp describe -m "a tag"
+
+expect "a command with no options says so" "this command takes no options" \
+	gp version --build-options
+expect_status "a command with no options refuses one" 1 gp version --build-options
+expect_status "mv takes no options at all" 1 gp mv --bogus file.txt other.txt
+
+# The options that are real have to keep working, or the refusal would have
+# bought correctness by breaking the commands.  A value-taking option is the
+# case worth pinning: `tag -m` swallows the message, leaving the name that
+# follows it positional, and the message turns up inside the tag object.
+expect_status "log -n still takes its value" 0 gp log -n 1
+expect_status "gc -n is accepted" 0 gp gc -n
+expect_status "fsck -v is accepted" 0 gp fsck -v
+expect_status "config --get is a flag, not a value" 0 gp config --get user.name
+expect_status "init --bare is still accepted" 0 gp init --bare "$work/optbare"
+expect_status "a value-taking option takes its value" 0 \
+	gp tag -m "an option check" opttag
+expect "and the value is what it read" "an option check" gp cat-file -p opttag
+expect_status "commit -m and -q and --allow-empty still work together" 0 \
+	gp commit -q --allow-empty -m "an option check"
+
+# ------------------------------------------------------------------
 say "a revision means that revision"
 
 # Its own repository, so nothing above depends on the extra commit.  The

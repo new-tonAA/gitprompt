@@ -212,10 +212,6 @@ one that says no:
   Use the delegated transports above.
 - **Rename detection.** A rename is a delete and an add. Merging a path that
   one side renamed and the other side changed does not follow the rename.
-- **Unknown options are rejected** with `unknown option '--bogus'` and exit 1.
-  The list of accepted options is program-wide rather than per-command, so an
-  option belonging to a *different* command is accepted and ignored. Catching
-  typos is the goal; the check is not a substitute for per-command validation.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99 with a small `#ifdef _WIN32` block for `_getcwd`/`_getpid`,
   `__USE_MINGW_ANSI_STDIO`, and putting the streams in binary mode so that a
@@ -224,12 +220,13 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **315 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **342 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
-and `--abort`, local remotes, packed object stores, and git interoperability —
-the last being the section that matters most, since a gitprompt repository is
-meant to be an ordinary git repository. As part of it, `git verify-pack` checks
+and `--abort`, the commit editor, per-command option validation, local remotes,
+packed object stores, and git interoperability — the last being the section that
+matters most, since a gitprompt repository is meant to be an ordinary git
+repository. As part of it, `git verify-pack` checks
 the pack `gc` writes against git's own index, and `git ls-files` checks the
 index gitprompt wrote against git's own reader.
 
@@ -278,6 +275,20 @@ where git merges cleanly, or merge cleanly where git conflicts. Neither
 direction loses an edit: a clean merge is still both sides' changes applied, and
 a conflict is still both sides' text. It takes a repeated line with an edit
 beside it for the two to part company.
+
+An option belongs to the command it was written for. Each command hands the
+argument parser the list of options it accepts — a name ending in `=` takes a
+value — and anything else is refused with `unknown option '--amend'` and a hint
+naming what that command does take. The distinction is the point: `gitprompt log
+--amend` used to be accepted and ignored, which is worse than an error, because
+an option that belongs to a different command looked as though it had taken
+effect. Options git has and gitprompt has not implemented are refused the same
+way rather than quietly doing nothing: `checkout --source`, `commit --author`,
+`fetch --depth`, `gc --prune`, `fsck --strict`, `cat-file --batch`,
+`for-each-ref --format`, `push --prune`, and `version --build-options` are all
+errors here, and `gitprompt help <command>` shows the list each one really
+takes. `show --stat` was the one option of that kind cheap enough to implement
+instead, and it is implemented.
 
 The pack reader is exercised against packs git wrote, not only against the ones
 `gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
