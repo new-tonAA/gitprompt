@@ -1717,11 +1717,103 @@ int diff_buffers(const char *a_label, const void *a, size_t alen,
 /* ------------------------------------------------------------------ */
 
 /* walk two trees in parallel and emit a diff per differing path */
+struct stat_totals {
+	size_t files, adds, dels;
+};
+
 struct tdiff_ctx {
 	struct repo *r;
 	struct buf *out;
 	int stat_only;
+	const struct rename_list *rl;   /* the moves to report as renames */
+	const struct index_state *old_ist;  /* where a move's old name is */
+	struct stat_totals totals;
 };
+
+/*
+ * One line of --stat: the path, the number of changed lines, and a bar for
+ * each of them.  A move names both paths, which is what tells a reader where
+ * the file went.
+ */
+static void stat_line(struct buf *out, const char *label, size_t add, size_t del)
+{
+	size_t k;
+
+	buf_addf(out, " %s | %lu", label, (unsigned long)(add + del));
+	if (add || del) {
+		buf_addch(out, ' ');
+		for (k = 0; k < add; k++)
+			buf_addch(out, '+');
+		for (k = 0; k < del; k++)
+			buf_addch(out, '-');
+	}
+	buf_addch(out, '\n');
+}
+
+/* git's line for a file whose contents are not lines */
+static void stat_binary_line(struct buf *out, const char *label,
+			     size_t old_len, size_t new_len)
+{
+	buf_addf(out, " %s | Bin %lu -> %lu bytes\n", label,
+		 (unsigned long)old_len, (unsigned long)new_len);
+}
+
+/*
+ * git's closing line for --stat.  Each of the two terms is printed when it is
+ * not zero, or when the other one is and something did change -- so a move
+ * that changed no lines reads "1 file changed, 0 insertions(+), 0
+ * deletions(-)" and a pure deletion reads "1 file changed, 1 deletion(-)".
+ */
+static void stat_summary(const struct stat_totals *t, struct buf *out)
+{
+	buf_addf(out, " %lu file%s changed", (unsigned long)t->files,
+		 t->files == 1 ? "" : "s");
+	if (t->adds || (!t->dels && t->files))
+		buf_addf(out, ", %lu insertion%s(+)", (unsigned long)t->adds,
+			 t->adds == 1 ? "" : "s");
+	if (t->dels || (!t->adds && t->files))
+		buf_addf(out, ", %lu deletion%s(-)", (unsigned long)t->dels,
+			 t->dels == 1 ? "" : "s");
+	buf_addch(out, '\n');
+}
+
+/* how many lines two texts have changed between them, for a stat line */
+static void diff_counts(const void *a, size_t alen, const void *b, size_t blen,
+			struct stat_counts *counts)
+{
+	struct dline *la = NULL, *lb = NULL;
+	struct oline *o = NULL;
+	size_t na = 0, nb = 0, n = 0;
+
+	split_lines(a ? a : "", a ? alen : 0, &la, &na);
+	split_lines(b ? b : "", b ? blen : 0, &lb, &nb);
+	lcs_diff(la, na, lb, nb, &o, &n, counts);
+	free(la);
+	free(lb);
+	free(o);
+}
+
+static int tdiff_binary(const struct buf *a, const struct buf *b)
+{
+	return looks_binary(a->b, a->len) || looks_binary(b->b, b->len);
+}
+
+static void tdiff_stat(struct tdiff_ctx *c, const char *label,
+		       const struct buf *a, const struct buf *b)
+{
+	struct stat_counts counts;
+
+	if (tdiff_binary(a, b)) {
+		stat_binary_line(c->out, label, a->len, b->len);
+		c->totals.files++;
+		return;
+	}
+	diff_counts(a->b, a->len, b->b, b->len, &counts);
+	stat_line(c->out, label, counts.add, counts.del);
+	c->totals.files++;
+	c->totals.adds += counts.add;
+	c->totals.dels += counts.del;
+}
 
 static void tdiff_emit(struct tdiff_ctx *c, const char *path,
 		       const oid_t *old_oid, u32 old_mode,
@@ -1737,6 +1829,13 @@ static void tdiff_emit(struct tdiff_ctx *c, const char *path,
 	if (new_oid)
 		odb_read(&c->r->odb, new_oid, NULL, &b);
 
+	if (c->stat_only) {
+		tdiff_stat(c, path, &a, &b);
+		buf_release(&a);
+		buf_release(&b);
+		return;
+	}
+
 	buf_addf(c->out, "diff --git a/%s b/%s\n", path, path);
 	if (old_oid && new_oid && old_mode != new_mode)
 		buf_addf(c->out, "old mode %06o\nnew mode %06o\n", old_mode,
@@ -1744,9 +1843,60 @@ static void tdiff_emit(struct tdiff_ctx *c, const char *path,
 
 	alab = old_oid ? xstrfmt("a/%s", path) : xstrdup("/dev/null");
 	blab = new_oid ? xstrfmt("b/%s", path) : xstrdup("/dev/null");
-	diff_buffers(alab, a.b, a.len, blab, b.b, b.len, c->out, c->stat_only);
+	diff_buffers(alab, a.b, a.len, blab, b.b, b.len, c->out, 0);
 	free(alab);
 	free(blab);
+	buf_release(&a);
+	buf_release(&b);
+}
+
+/*
+ * A move, as git prints it: the header names both paths, how much of the file
+ * survived, and the two names in full, followed by the change to the contents
+ * when the move carried one.
+ *
+ * The share is the share of lines the two files still have in common, which is
+ * the score the merge uses to recognise the move in the first place.  git's
+ * number is an estimate over bytes rather than lines, so the two agree on a
+ * file that moved whole, and can differ by a few points on one that was edited
+ * on the way -- which is why a file that did not change at all is the one case
+ * that prints git's own word for it, 100%.
+ */
+static void tdiff_emit_rename(struct tdiff_ctx *c, const char *from,
+			      const char *to, const oid_t *old_oid,
+			      u32 old_mode, const oid_t *new_oid, u32 new_mode)
+{
+	struct buf a, b;
+	char *label;
+
+	buf_init(&a);
+	buf_init(&b);
+	odb_read(&c->r->odb, old_oid, NULL, &a);
+	odb_read(&c->r->odb, new_oid, NULL, &b);
+
+	if (c->stat_only) {
+		label = xstrfmt("%s => %s", from, to);
+		tdiff_stat(c, label, &a, &b);
+		free(label);
+		buf_release(&a);
+		buf_release(&b);
+		return;
+	}
+
+	buf_addf(c->out, "diff --git a/%s b/%s\n", from, to);
+	buf_addf(c->out, "similarity index %d%%\n",
+		 oid_equal(old_oid, new_oid) ? 100
+					     : merge3_similarity(&a, &b));
+	buf_addf(c->out, "rename from %s\n", from);
+	buf_addf(c->out, "rename to %s\n", to);
+	if (!oid_equal(old_oid, new_oid)) {
+		char *alab = xstrfmt("a/%s", from);
+		char *blab = xstrfmt("b/%s", to);
+
+		diff_buffers(alab, a.b, a.len, blab, b.b, b.len, c->out, 0);
+		free(alab);
+		free(blab);
+	}
 	buf_release(&a);
 	buf_release(&b);
 }
@@ -1776,7 +1926,8 @@ static void tdiff_recurse(struct tdiff_ctx *c, const char *prefix,
 			char *full = xstrfmt("%s/", p);
 			if ((ot.e[i].mode & 0170000) == 0040000)
 				tdiff_recurse(c, full, &ot.e[i].oid, NULL);
-			else
+			else if (!rename_by_from(c->rl, p))
+				/* a path that moved is reported where it went */
 				tdiff_emit(c, p, &ot.e[i].oid, ot.e[i].mode, NULL, 0);
 			free(p);
 			free(full);
@@ -1784,9 +1935,17 @@ static void tdiff_recurse(struct tdiff_ctx *c, const char *prefix,
 		} else if (cmp > 0) {
 			char *p = xstrfmt("%s%s", prefix, nt.e[j].name);
 			char *full = xstrfmt("%s/", p);
+			const struct rename_pair *rp = rename_by_to(c->rl, p);
 			if ((nt.e[j].mode & 0170000) == 0040000)
 				tdiff_recurse(c, full, NULL, &nt.e[j].oid);
-			else
+			else if (rp) {
+				const struct index_entry *oe =
+					index_get(c->old_ist, rp->from);
+				if (oe)
+					tdiff_emit_rename(c, oe->path, p, &oe->oid,
+							  oe->mode, &nt.e[j].oid,
+							  nt.e[j].mode);
+			} else
 				tdiff_emit(c, p, NULL, 0, &nt.e[j].oid, nt.e[j].mode);
 			free(p);
 			free(full);
@@ -1815,10 +1974,40 @@ void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
 		struct buf *out, int stat_only)
 {
 	struct tdiff_ctx c;
+	struct index_state old_ist, new_ist;
+	struct rename_list rl;
+
+	memset(&old_ist, 0, sizeof old_ist);
+	memset(&new_ist, 0, sizeof new_ist);
+	memset(&rl, 0, sizeof rl);
+
+	/*
+	 * A move is a path one tree has and the other has not, holding the same
+	 * file: the two have to be lined up by path to see that, which is not
+	 * something the walk below can do while it is walking.  So the paths are
+	 * collected first, and the walk asks this what moved.
+	 */
+	if (old_tree && new_tree) {
+		read_tree_into_index(r, &old_ist, old_tree, "");
+		read_tree_into_index(r, &new_ist, new_tree, "");
+		renames_between(&r->odb, &old_ist, &new_ist, &rl);
+	}
+
 	c.r = r;
 	c.out = out;
 	c.stat_only = stat_only;
+	c.rl = &rl;
+	c.old_ist = &old_ist;
+	c.totals.files = c.totals.adds = c.totals.dels = 0;
+
 	tdiff_recurse(&c, "", old_tree, new_tree);
+
+	if (stat_only && c.totals.files)
+		stat_summary(&c.totals, out);
+
+	rename_list_release(&rl);
+	index_release(&old_ist);
+	index_release(&new_ist);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1830,6 +2019,7 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 	int cached, stat_only;
 	oid_t old_tree, new_tree;
 	int have_old = 0, have_new = 0;
+	struct stat_totals totals = { 0, 0, 0 };
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"--cached", "--staged", "--stat", NULL });
@@ -1898,6 +2088,32 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 				struct buf old;
 				buf_init(&old);
 				odb_read(&r->odb, &ist.e[i].oid, NULL, &old);
+				if (stat_only) {
+					struct stat_counts counts;
+
+					if (looks_binary(old.b, old.len) ||
+					    looks_binary(w.b, w.len)) {
+						stat_binary_line(&out, ist.e[i].path,
+								 old.len, w.len);
+						totals.files++;
+					} else {
+						diff_counts(old.b, old.len, w.b,
+							    w.len, &counts);
+						if (counts.add || counts.del) {
+							stat_line(&out, ist.e[i].path,
+								  counts.add,
+								  counts.del);
+							totals.files++;
+							totals.adds += counts.add;
+							totals.dels += counts.del;
+						}
+					}
+					buf_release(&old);
+					free(full);
+					buf_release(&w);
+					buf_release(&piece);
+					continue;
+				}
 				buf_addf(&piece, "diff --git a/%s b/%s\n",
 					 ist.e[i].path, ist.e[i].path);
 				{
@@ -1905,7 +2121,7 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 					char *blab = xstrfmt("b/%s", ist.e[i].path);
 					changed = diff_buffers(alab, old.b, old.len,
 							       blab, w.b, w.len,
-							       &piece, stat_only);
+							       &piece, 0);
 					free(alab);
 					free(blab);
 				}
@@ -1918,6 +2134,8 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 			buf_release(&piece);
 		}
 		index_release(&ist);
+		if (stat_only && totals.files)
+			stat_summary(&totals, &out);
 	}
 
 	fwrite(out.b, 1, out.len, stdout);

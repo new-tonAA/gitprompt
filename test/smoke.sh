@@ -945,6 +945,99 @@ fi
 expect "a staged delete is padded to git's column" \
 	"deleted:    gone.txt" gp status
 
+# `diff` owes a reader the same thing a merge and `status` do: a move printed
+# as the move it was, not as a deletion beside an unrelated addition.  The
+# header is git's -- the two names on the `diff --git` line, the score, and the
+# pair of `rename` lines -- and the hunks follow only when the contents moved
+# as well.
+mergecase "$work/diff-rename"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp mv a.txt b.txt >/dev/null 2>&1
+cat > "$work/want-rename" <<'EOF'
+diff --git a/a.txt b/b.txt
+similarity index 100%
+rename from a.txt
+rename to b.txt
+EOF
+gp diff --cached | tr -d '\r' > "$work/got-rename"
+expect_same "a move is reported as a move, not as a delete and an add" \
+	"$work/got-rename" "$work/want-rename"
+cat > "$work/want-rename-stat" <<'EOF'
+ a.txt => b.txt | 0
+ 1 file changed, 0 insertions(+), 0 deletions(-)
+EOF
+gp diff --cached --stat | tr -d '\r' > "$work/got-rename-stat"
+expect_same "a move that changed no lines is one file changed, nothing added" \
+	"$work/got-rename-stat" "$work/want-rename-stat"
+
+# the file moved and was edited, so the same header carries the hunks under it
+# -- and the score is the share of lines the two copies still have in common,
+# which is not the same estimate git's byte score arrives at
+printf 'one\ntwo\nthree\nfour\n' > b.txt
+gp add b.txt >/dev/null 2>&1
+expect "a move that was edited still reports the move" "rename from a.txt" \
+	gp diff --cached
+expect "a move that was edited reports a score" "similarity index " \
+	gp diff --cached
+expect "and the hunks for the edit follow the header" "+four" gp diff --cached
+expect "the move is one file changed, with the edit counted" \
+	"1 file changed, 1 insertion(+)" gp diff --cached --stat
+
+# where the old name sat does not matter: the pair of paths is reported whole
+mergecase "$work/diff-rename-deep"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+mkdir -p deep/down
+gp mv a.txt deep/down/b.txt >/dev/null 2>&1
+printf 'one\ntwo\nthree\nfour\n' > deep/down/b.txt
+gp add -A >/dev/null 2>&1
+expect "a move into a subdirectory names both paths in full" \
+	"rename to deep/down/b.txt" gp diff --cached
+
+# a rewrite that kept too little of the file is not a move, the same line
+# being the one a merge and `status` draw
+mergecase "$work/diff-rename-not"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp mv a.txt b.txt >/dev/null 2>&1
+printf 'x\ny\nz\nw\n' > b.txt
+gp add b.txt >/dev/null 2>&1
+moved=$(gp diff --cached | tr -d '\r')
+case "$moved" in
+*"rename from"*)
+	bad "a move rewritten past the threshold is not reported as a move" \
+		"found a rename in [$moved]"
+	;;
+*)	ok "a move rewritten past the threshold is not reported as a move" ;;
+esac
+expect "the old name is reported as deleted instead" "+++ /dev/null" \
+	gp diff --cached
+expect "and the new name as an addition" "--- /dev/null" gp diff --cached
+
+# a move in the work tree that was never staged is not in the index under
+# either name, so neither the index nor the tree has a move to report
+mergecase "$work/diff-rename-worktree"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp mv a.txt b.txt >/dev/null 2>&1
+gp commit -m "the move" >/dev/null 2>&1
+printf 'one\ntwo\nthree\nfour\n' > b.txt
+wtdiff=$(gp diff | tr -d '\r')
+case "$wtdiff" in
+*"rename from"*)
+	bad "a work-tree edit to a moved file is a change to it" \
+		"found a rename in [$wtdiff]"
+	;;
+*)	ok "a work-tree edit to a moved file is a change to it" ;;
+esac
+expect "and it is a change to the name the index has" \
+	"diff --git a/b.txt b/b.txt" gp diff
+
 # ------------------------------------------------------------------
 say "writing the commit message in an editor"
 

@@ -66,6 +66,17 @@ const struct rename_pair *rename_by_from(const struct rename_list *rl,
 	return NULL;
 }
 
+const struct rename_pair *rename_by_to(const struct rename_list *rl,
+				       const char *to)
+{
+	size_t i;
+
+	for (i = 0; i < rl->nr; i++)
+		if (!strcmp(rl->e[i].to, to))
+			return &rl->e[i];
+	return NULL;
+}
+
 static void rename_add(struct rename_list *rl, const char *from,
 		       const char *to)
 {

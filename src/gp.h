@@ -766,6 +766,8 @@ void renames_between(struct odb *odb, struct index_state *base,
 		     struct index_state *side, struct rename_list *out);
 const struct rename_pair *rename_by_from(const struct rename_list *rl,
 					 const char *from);
+const struct rename_pair *rename_by_to(const struct rename_list *rl,
+				       const char *to);
 void rename_list_release(struct rename_list *rl);
 
 /*
