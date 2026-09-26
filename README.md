@@ -208,9 +208,17 @@ unable to read back its own fetched history.
 Stated plainly, because a tool that quietly does the wrong thing is worse than
 one that says no:
 
-- **Renames in `diff`.** A move is recognised where a merge has to follow one,
-  and `status` reports a staged one as `renamed: a -> b`. `diff` does not look
-  for them: a move is printed as a deletion and an addition.
+- **Byte-for-byte `diff` output.** A move is reported as a move, and the changes
+  are the changes git reports, but the text around them is not git's. No `index`
+  line is printed, nor a `deleted file mode` or `new file mode` one; a hunk that
+  empties one side is notated `-1,0` where git writes `-0,0`; and `--stat`
+  neither widens its path column to fit the longest path in the block nor scales
+  its bar to the terminal, so a change of a thousand lines draws a thousand
+  marks. A reader skimming a diff sees the same changes; a script that parses one
+  should be pointed at git instead. The `similarity index` a rename reports is the
+  share of lines the two files still have in common rather than git's byte
+  estimate, so the number can read differently from git's even where the
+  judgement behind it does not.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
@@ -220,38 +228,58 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **399 checks, 0 failures**. `test/smoke.sh` covers
-the object model, sessions and prompts, committing, reconstruction (ordering and
-session boundaries), branches, tags, history editing, merges including conflicts
-and `--abort`, merges that follow a file that moved, `status` on a staged move,
-the commit editor, per-command option validation, local remotes, serving over
-`gp://`, packed object stores, and git interoperability — the last being the
-section that matters most, since a gitprompt repository is meant to be an
-ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
-writes against git's own index, and `git ls-files` checks the index gitprompt
-wrote against git's own reader.
+The end-to-end suite passes: **411 checks, 0 failures**.
 
-A merge follows a rename. A path one side no longer has and the other side has
+```console
+$ make test
+```
+
+`test/smoke.sh` covers the object model, sessions and prompts, committing,
+reconstruction (ordering and session boundaries), branches, tags, history
+editing, merges including conflicts and `--abort`, merges that follow a file that
+moved, `status` and `diff` on a move, the commit editor, per-command option
+validation, local remotes, serving over `gp://`, packed object stores, and git
+interoperability — the last being the section that matters most, since a
+gitprompt repository is meant to be an ordinary git repository. As part of it,
+`git verify-pack` checks the pack `gc` writes against git's own index, and
+`git ls-files` checks the index gitprompt wrote against git's own reader.
+
+### Following a file that moved
+
+Three places look for a move — a merge that has to follow one, `status` at the
+index, and `diff` between two trees — and all three look the same way, so they
+agree about what moved.
+
+The judgement itself: a path one side no longer has and the other side has
 gained is the same file when it holds the same object, and failing that when
-enough of its text is still the same: half the lines, the line git draws, which
-is what catches a file that was moved *and* edited. The pairing is one to one,
-so two copies of one file are not two renames of the original, and the path
-against path search is capped at a thousand pairs the way git's
-`diff.renameLimit` is, past which the contents are not read. With the move
-recognised the merge happens under the new name, contents and all — a three-way
-merge of the file when both sides edited it. Where a move cannot be followed it
-comes back unmerged with git's own stages, so `status` prints git's letters:
-`DU`/`UD` when a move met a deletion, `DD`/`AU`/`UA` when both sides gave the
-file a different name.
+enough of its text is still the same — half the lines, the line git draws, which
+is what catches a file that was moved *and* edited. The pairing is one to one, so
+two copies of one file are not two renames of the original, and the search is
+capped at a thousand pairs the way git's `diff.renameLimit` is, past which the
+contents are not read.
 
-`status` reports a move of its own, where the index has one: a staged move is
-`renamed: a -> b` in the long report and `R  a -> b` in `--short`, both as git
-prints them, and one staged path can be a delete beside an add only when it is.
-A move in the work tree that was never staged is not one — the index knows the
-old name and not the new — which is also what git says. The words in the long
-report are padded to the column git pads them to, so a reader comparing the two
-by eye sees the same thing, and the staged section is printed before the
-unstaged one whatever order the paths sort in.
+With the move recognised the merge happens under the new name, contents and all
+— a three-way merge of the file when both sides edited it. Where a move cannot be
+followed it comes back unmerged with git's own stages, so `status` prints git's
+letters: `DU`/`UD` when a move met a deletion, `DD`/`AU`/`UA` when both sides
+gave the file a different name.
+
+`status` reports a move where the index has one: a staged move is `renamed: a ->
+b` in the long report and `R  a -> b` in `--short`, both as git prints them. A
+move in the work tree that was never staged is not one — the index knows the old
+name and not the new — which is also what git says. The words in the long report
+are padded to the column git pads them to, and the staged section is printed
+before the unstaged one whatever order the paths sort in.
+
+`diff` reports the move in git's shape: the `diff --git` line names both paths, a
+`similarity index` says how much of the file survived, and `rename from`/`rename
+to` spell the pair out. The hunks follow only when the move carried a change, and
+`--stat` writes the move as `a.txt => b.txt` — one that changed no lines being a
+file changed with nothing added or removed. The score is the share of lines the
+two copies have in common — the same measure the merge uses to decide the move
+happened at all.
+
+### The commit message, when there is no `-m`
 
 A commit with no `-m` and no `-F` opens an editor, looked for the way git looks
 for one: `GIT_EDITOR`, then `core.editor`, then `VISUAL`, then `EDITOR`. The
@@ -265,15 +293,17 @@ The suite hands `commit` editors it writes itself: one that replaces the buffer,
 one that appends to it, one that fails, and none at all, and asserts on the
 message that ends up in the commit rather than on the exit status.
 
-A merge conflict is where that claim is tested hardest, because a conflict is
-not only in the objects: it is in the index. gitprompt records one the way git
-does — the path's base, our version and their version as index stages 1, 2 and
-3 — so `git ls-files -u` inside a gitprompt store lists the same stages for the
-same paths that `gitprompt status` reports, the letters `UU`/`AA`/`DU`/`UD` come
-off which stages are present, and resolving is staging the path, which drops
-them. The suite asserts that agreement with git directly, in both directions:
-git's own conflicted index is read back by gitprompt, and git's reader sees the
-one gitprompt wrote.
+### A merge is three-way, line by line
+
+A merge conflict is where the agreement with git is tested hardest, because a
+conflict is not only in the objects: it is in the index. gitprompt records one
+the way git does — the path's base, our version and their version as index
+stages 1, 2 and 3 — so `git ls-files -u` inside a gitprompt store lists the same
+stages for the same paths that `gitprompt status` reports, the letters
+`UU`/`AA`/`DU`/`UD` come off which stages are present, and resolving is staging
+the path, which drops them. The suite asserts that agreement with git directly,
+in both directions: git's own conflicted index is read back by gitprompt, and
+git's reader sees the one gitprompt wrote.
 
 What goes into those stages is a line-wise three-way merge, not a choice between
 whole files. Two sides that edit different lines of one file keep both edits;
@@ -299,19 +329,22 @@ direction loses an edit: a clean merge is still both sides' changes applied, and
 a conflict is still both sides' text. It takes a repeated line with an edit
 beside it for the two to part company.
 
-An option belongs to the command it was written for. Each command hands the
-argument parser the list of options it accepts — a name ending in `=` takes a
-value — and anything else is refused with `unknown option '--amend'` and a hint
-naming what that command does take. The distinction is the point: `gitprompt log
---amend` used to be accepted and ignored, which is worse than an error, because
-an option that belongs to a different command looked as though it had taken
-effect. Options git has and gitprompt has not implemented are refused the same
-way rather than quietly doing nothing: `checkout --source`, `commit --author`,
-`fetch --depth`, `gc --prune`, `fsck --strict`, `cat-file --batch`,
-`for-each-ref --format`, `push --prune`, and `version --build-options` are all
-errors here, and `gitprompt help <command>` shows the list each one really
-takes. `show --stat` was the one option of that kind cheap enough to implement
-instead, and it is implemented.
+### An option belongs to its command
+
+Each command hands the argument parser the list of options it accepts, and
+anything else is refused with `unknown option '--amend'` and a hint naming what
+that command does take; a name ending in `=` is one that takes a value. The
+distinction is the point: `gitprompt log --amend` used to be accepted and
+ignored, which is worse than an error, because an option that belongs to a
+different command looked as though it had taken effect. Options git has and
+gitprompt has not implemented are refused the same way rather than quietly doing
+nothing: `checkout --source`, `commit --author`, `fetch --depth`, `gc --prune`,
+`fsck --strict`, `cat-file --batch`, `for-each-ref --format`, `push --prune`,
+and `version --build-options` are all errors here; `gitprompt help <command>`
+shows the list each one really takes. `show --stat` was the one option of that
+kind cheap enough to implement instead, and it is implemented.
+
+### The store
 
 The pack reader is exercised against packs git wrote, not only against the ones
 `gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
@@ -327,6 +360,8 @@ loose copy to fall back on; and every reader — `replay`, `timeline`,
 `log-prompt`, `stats` — is run against a packed store, since wanting an object's
 contents without its type is a different path through the store from wanting
 both.
+
+### Serving the store
 
 `serve` is the one transport that is gitprompt's own, and it is deliberately not
 git's wire protocol. It does not have to be: the store is already a git object
@@ -347,15 +382,13 @@ repository being served is usually one whose owner is still using it, and a
 server that had answered a request before a `gc` would otherwise go on offering
 the loose objects that `gc` had just removed.
 
+### Offline, and on this machine
+
 The suite runs offline, so the transports it covers are the local ones: a path on
 disk, and `gp://` on loopback with a server it starts itself. `push`, `fetch`,
 `pull` and `clone` against an `https://` remote have been exercised by hand
 against a repository on GitHub; anything added there is worth running the same
 way before it is trusted.
-
-```console
-$ make test
-```
 
 One caveat about the machine this was developed on: Windows Smart App Control
 blocks newly linked unsigned executables machine-wide, so `gitprompt.exe` cannot
