@@ -208,9 +208,9 @@ unable to read back its own fetched history.
 Stated plainly, because a tool that quietly does the wrong thing is worse than
 one that says no:
 
-- **Renames outside a merge.** A move is recognised where a merge has to follow
-  one. `status` and `diff` do not look for them: a staged move is reported as a
-  deletion beside an addition, where git would say `renamed: a -> b`.
+- **Renames in `diff`.** A move is recognised where a merge has to follow one,
+  and `status` reports a staged one as `renamed: a -> b`. `diff` does not look
+  for them: a move is printed as a deletion and an addition.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
@@ -220,15 +220,16 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **390 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **399 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
-and `--abort`, merges that follow a file that moved, the commit editor,
-per-command option validation, local remotes, serving over `gp://`, packed object
-stores, and git interoperability — the last being the section that matters most,
-since a gitprompt repository is meant to be an ordinary git repository. As part
-of it, `git verify-pack` checks the pack `gc` writes against git's own index, and
-`git ls-files` checks the index gitprompt wrote against git's own reader.
+and `--abort`, merges that follow a file that moved, `status` on a staged move,
+the commit editor, per-command option validation, local remotes, serving over
+`gp://`, packed object stores, and git interoperability — the last being the
+section that matters most, since a gitprompt repository is meant to be an
+ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
+writes against git's own index, and `git ls-files` checks the index gitprompt
+wrote against git's own reader.
 
 A merge follows a rename. A path one side no longer has and the other side has
 gained is the same file when it holds the same object, and failing that when
@@ -242,6 +243,15 @@ merge of the file when both sides edited it. Where a move cannot be followed it
 comes back unmerged with git's own stages, so `status` prints git's letters:
 `DU`/`UD` when a move met a deletion, `DD`/`AU`/`UA` when both sides gave the
 file a different name.
+
+`status` reports a move of its own, where the index has one: a staged move is
+`renamed: a -> b` in the long report and `R  a -> b` in `--short`, both as git
+prints them, and one staged path can be a delete beside an add only when it is.
+A move in the work tree that was never staged is not one — the index knows the
+old name and not the new — which is also what git says. The words in the long
+report are padded to the column git pads them to, so a reader comparing the two
+by eye sees the same thing, and the staged section is printed before the
+unstaged one whatever order the paths sort in.
 
 A commit with no `-m` and no `-F` opens an editor, looked for the way git looks
 for one: `GIT_EDITOR`, then `core.editor`, then `VISUAL`, then `EDITOR`. The

@@ -888,6 +888,63 @@ expect_absent "the deleted file stays deleted" gone.txt
 printf 'alpha\nnine\nten\n' > "$work/want-fresh"
 expect_same "the added file arrives whole" fresh.txt "$work/want-fresh"
 
+# `status` looks for a move as well, since it is the other place a reader is
+# owed one rather than a deletion beside an addition -- but only in the index,
+# where the move has been staged.  A file moved in the work tree and never
+# added is not in the index under either name, and git reads that as a
+# deletion and an untracked file.
+mergecase "$work/status-rename"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp mv a.txt b.txt >/dev/null 2>&1
+expect_out "a staged move is a rename in the short report" \
+	"R  a.txt -> b.txt" gp status --short
+expect "a staged move is a rename in the report" \
+	"renamed:    a.txt -> b.txt" gp status
+printf 'one\ntwo\nthree\nfour\n' > b.txt
+gp add b.txt >/dev/null 2>&1
+expect_out "a staged move that was also edited is still a rename" \
+	"R  a.txt -> b.txt" gp status --short
+
+# the same rewrite that a merge would not follow is not a rename here either,
+# since the line between the two is the same one
+printf 'x\ny\nz\nw\n' > b.txt
+gp add b.txt >/dev/null 2>&1
+expect "a move rewritten past the threshold is a deletion" \
+	"D  a.txt" gp status --short
+expect "and the path it appeared at is an addition" "A  b.txt" gp status --short
+
+mergecase "$work/status-unstaged-move"
+printf 'one\ntwo\nthree\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+mv a.txt b.txt
+expect "an unstaged move leaves the old name deleted" " D a.txt" gp status --short
+expect "an unstaged move leaves the new name untracked" "?? b.txt" gp status --short
+
+# the two sections do not interleave however the paths sort, and the word in
+# them is padded to the column git pads it to
+mergecase "$work/status-sections"
+printf 'one\n' > z.txt
+printf 'two\n' > gone.txt
+printf 'three\n' > a.txt
+gp add z.txt gone.txt a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+printf 'ONE\n' > z.txt
+gp add z.txt >/dev/null 2>&1
+gp rm gone.txt >/dev/null 2>&1
+printf 'THREE\n' > a.txt
+sections=$(gp status | tr -d '\r' | grep 'Changes ' | tr '\n' '|')
+if [ "$sections" = "Changes to be committed:|Changes not staged for commit:|" ]; then
+	ok "the staged section is printed first, as git prints it"
+else
+	bad "the staged section is printed first, as git prints it" \
+		"got [$sections]"
+fi
+expect "a staged delete is padded to git's column" \
+	"deleted:    gone.txt" gp status
+
 # ------------------------------------------------------------------
 say "writing the commit message in an editor"
 

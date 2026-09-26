@@ -473,6 +473,7 @@ int cmd_mv(struct repo *r, int argc, char **argv)
 
 struct status_row {
 	const char *path;
+	const char *renamed_from;   /* set on 'R' rows: where the file was */
 	char x, y;
 	const char *what;
 };
@@ -486,7 +487,8 @@ static int row_cmp(const void *a, const void *b)
 /*
  * git's two letters and the words the long form uses for an unmerged path,
  * from which of the three stages the index holds: it is a switch over the
- * stages present, and each combination has a name of its own.
+ * stages present, and each combination has a name of its own.  The word
+ * carries its colon because the long form pads it to a column of its own.
  */
 static void unmerged_desc(const struct index_state *ist, const char *path,
 			  char *x, char *y, const char **what)
@@ -497,28 +499,28 @@ static void unmerged_desc(const struct index_state *ist, const char *path,
 
 	switch (mask) {
 	case 1:         /* base only: both sides deleted it */
-		*x = 'D'; *y = 'D'; *what = "both deleted";
+		*x = 'D'; *y = 'D'; *what = "both deleted:";
 		break;
 	case 2:         /* ours only: we added it, they never had it */
-		*x = 'A'; *y = 'U'; *what = "added by us";
+		*x = 'A'; *y = 'U'; *what = "added by us:";
 		break;
 	case 3:         /* base and ours: they deleted what we changed */
-		*x = 'U'; *y = 'D'; *what = "deleted by them";
+		*x = 'U'; *y = 'D'; *what = "deleted by them:";
 		break;
 	case 4:         /* theirs only: they added it */
-		*x = 'U'; *y = 'A'; *what = "added by them";
+		*x = 'U'; *y = 'A'; *what = "added by them:";
 		break;
 	case 5:         /* base and theirs: we deleted what they changed */
-		*x = 'D'; *y = 'U'; *what = "deleted by us";
+		*x = 'D'; *y = 'U'; *what = "deleted by us:";
 		break;
 	case 6:         /* ours and theirs, no base: both added it */
-		*x = 'A'; *y = 'A'; *what = "both added";
+		*x = 'A'; *y = 'A'; *what = "both added:";
 		break;
 	case 7:         /* all three: both changed it */
-		*x = 'U'; *y = 'U'; *what = "both modified";
+		*x = 'U'; *y = 'U'; *what = "both modified:";
 		break;
 	default:
-		*x = 'U'; *y = 'U'; *what = "unmerged";
+		*x = 'U'; *y = 'U'; *what = "unmerged:";
 		break;
 	}
 }
@@ -574,6 +576,42 @@ int cmd_status(struct repo *r, int argc, char **argv)
 			rows[nrows].path = head_ist.e[i].path;
 			nrows++;
 		}
+	}
+
+	/*
+	 * A path the index has lost and a path it has gained holding the same
+	 * file is one file that moved, which git reports as a rename rather than
+	 * as a deletion beside an addition.  Only a move that was staged is one:
+	 * a file moved in the work tree but never added is not in the index under
+	 * either name, and git reads that as a deletion and an untracked file.
+	 */
+	{
+		struct rename_list rl;
+		size_t k;
+
+		renames_between(&r->odb, &head_ist, &ist, &rl);
+		for (k = 0; k < rl.nr; k++) {
+			size_t d = nrows, a = nrows, j;
+
+			for (j = 0; j < nrows; j++) {
+				if (rows[j].x == 'D' &&
+				    !strcmp(rows[j].path, rl.e[k].from))
+					d = j;
+				else if (rows[j].x == 'A' &&
+					 !strcmp(rows[j].path, rl.e[k].to))
+					a = j;
+			}
+			if (d == nrows || a == nrows)
+				continue;
+			/* both names are the index's own, and outlive the rows */
+			rows[d].x = 'R';
+			rows[d].renamed_from = rows[d].path;
+			rows[d].path = rows[a].path;
+			memmove(&rows[a], &rows[a + 1],
+				(nrows - a - 1) * sizeof(*rows));
+			nrows--;
+		}
+		rename_list_release(&rl);
 	}
 
 	/* work tree against index: what is unstaged */
@@ -656,8 +694,14 @@ int cmd_status(struct repo *r, int argc, char **argv)
 		qsort(rows, nrows, sizeof(*rows), row_cmp);
 
 	if (short_fmt) {
-		for (i = 0; i < nrows; i++)
-			printf("%c%c %s\n", rows[i].x, rows[i].y, rows[i].path);
+		for (i = 0; i < nrows; i++) {
+			if (rows[i].x == 'R')
+				printf("R%c %s -> %s\n", rows[i].y,
+				       rows[i].renamed_from, rows[i].path);
+			else
+				printf("%c%c %s\n", rows[i].x, rows[i].y,
+				       rows[i].path);
+		}
 		free(rows);
 		index_release(&ist);
 		index_release(&head_ist);
@@ -690,30 +734,41 @@ int cmd_status(struct repo *r, int argc, char **argv)
 	}
 
 	{
-		int section = 0;
-		for (i = 0; i < nrows; i++) {
-			/* `what` is set on unmerged rows and nowhere else; their
-			 * letters can be any of UU/AA/DU/UD */
-			if (rows[i].what || rows[i].x == '?')
-				continue;
-			if (rows[i].x == ' ') {
-				if (section != 2) {
-					printf("\nChanges not staged for commit:\n");
-					section = 2;
+		/*
+		 * git prints the staged changes and then the unstaged ones, each
+		 * in path order, rather than following the one sort order: a path
+		 * with both is named in both sections, and the sections do not
+		 * interleave.  The word is padded to git's column either way.
+		 */
+		int staged, printed;
+
+		for (staged = 1; staged >= 0; staged--) {
+			printed = 0;
+			for (i = 0; i < nrows; i++) {
+				/* `what` is set on unmerged rows and nowhere else;
+				 * their letters can be any of UU/AA/DU/UD */
+				if (rows[i].what || rows[i].x == '?')
+					continue;
+				if ((rows[i].x != ' ') != (staged == 1))
+					continue;
+				if (!printed) {
+					printf("\n%s:\n", staged
+						? "Changes to be committed"
+						: "Changes not staged for commit");
+					printed = 1;
 				}
-				printf("\t%s:   %s\n",
-				       rows[i].y == 'D' ? "deleted" : "modified",
-				       rows[i].path);
-			} else {
-				if (section != 1) {
-					printf("\nChanges to be committed:\n");
-					section = 1;
+				if (staged && rows[i].x == 'R') {
+					printf("\t%-11s %s -> %s\n", "renamed:",
+					       rows[i].renamed_from, rows[i].path);
+					continue;
 				}
-				printf("\t%s:   %s\n",
-				       rows[i].x == 'A' ? "new file"
+				printf("\t%-11s %s\n",
+				       rows[i].x == 'A' ? "new file:"
 							: rows[i].x == 'D'
-								  ? "deleted"
-								  : "modified",
+								  ? "deleted:"
+						: rows[i].x == ' ' && rows[i].y == 'D'
+								  ? "deleted:"
+								  : "modified:",
 				       rows[i].path);
 			}
 		}
@@ -741,7 +796,7 @@ int cmd_status(struct repo *r, int argc, char **argv)
 				printf("\nUnmerged paths:\n");
 				printed = 1;
 			}
-			printf("\t%s:   %s\n", rows[i].what, rows[i].path);
+			printf("\t%-16s %s\n", rows[i].what, rows[i].path);
 		}
 	}
 
