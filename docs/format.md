@@ -69,7 +69,6 @@ only `merge` writes a second one.
 | `refs/heads/<name>` | a branch |
 | `refs/tags/<name>` | a tag (may point at a tag object or straight at a commit) |
 | `refs/remotes/<remote>/<name>` | the last known position of a remote branch |
-| `refs/sessions/<id>` | a ref per prompting session, pointing at its last commit |
 | `HEAD` | `ref: refs/heads/main`, or a raw id when detached |
 | `logs/<ref>` | the reflog for that ref |
 | `packed-refs` | read, never written |

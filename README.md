@@ -35,6 +35,75 @@ The store is `.gitprompt/` rather than `.git/`, so a gitprompt repository and a
 git repository can sit in the same working tree without either noticing the
 other.
 
+## How the files are managed
+
+A repository is a working tree plus a store. The prompts sit in the working
+tree, next to the project they describe, and the store holds their history:
+
+```
+my-project/
+  .gitprompt/                       the store -- an ordinary git repository
+    HEAD  config  index
+    objects/                        loose objects, written as git writes them
+    refs/heads/  refs/tags/  refs/remotes/
+    logs/                           reflogs
+    SESSION                         the session prompts are being written to
+  prompts/
+    0001-write-a-tokenizer-first.md
+    0002-add-bpe-encoding.md
+    sessions/
+      s_1790354733_42fkw2.md
+  README.md  src/  ...              the project the prompts describe
+```
+
+Every prompt is `prompts/<NNNN>-<slug>.md`. `NNNN` is a repository-wide counter,
+zero-padded -- not a commit count and not a per-session number. **It is what
+makes the order recoverable:** a prompt file read on its own, without its commit
+and without any other file, still says where in the sequence it belongs. The
+slug is the first 40 characters of the prompt text, lowercased with runs of
+non-alphanumerics collapsed to `-`, so a directory listing is readable without
+opening anything.
+
+The file is a frontmatter block and a body:
+
+```
+---
+id: p_xxxxxxxx
+session: s_1790354733_42fkw2
+seq: 1
+timestamp: 2026-09-26T00:45:33+08:00
+author: Your Name <you@example.com>
+model: claude-sonnet-5
+tags: [validation, frontend]
+outcome: Fields render; validation misses empty input.
+---
+Build a login page with email and password fields.
+```
+
+A session is its own file, `prompts/sessions/<id>.md`, frontmatter and no body --
+the title, when it started, when it ended, and any notes. It is a file rather
+than a field repeated on every prompt so that a session boundary is a fact of
+the storage, not something a reader has to infer from timestamps:
+
+```
+---
+id: s_1790354733_42fkw2
+title: Scaffold the login page
+started_at: 2026-09-26T00:31:02+08:00
+ended_at: 2026-09-26T01:14:47+08:00
+author: Your Name <you@example.com>
+---
+```
+
+So an agent handed only the checkout can reconstruct the run: `NNNN` and `seq`
+fix the order, `session` places each prompt in a session, and the session file
+says when that session began and ended. Everything else -- who wrote what, when,
+and what came before -- is ordinary git history, which is why `git log` and
+`gitprompt log` tell the same story.
+
+`docs/format.md` is the byte-level version of this: the object encodings, the
+index, the refs, and the state files a merge leaves behind.
+
 ## Build
 
 Needs a C99 compiler, `make`, and nothing else. zlib is vendored under
