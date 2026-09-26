@@ -54,10 +54,25 @@ static int oid_cmp(const void *a, const void *b)
 	return memcmp(a, b, sizeof(oid_t));
 }
 
+/*
+ * Sort the set, and drop the duplicates.  Membership is a binary search, so
+ * it only means anything once this has run: while the set is being built the
+ * search can miss an entry that is there, and the same object can be added
+ * twice.  Every producer calls this once the walk is over, and after that the
+ * set really is one -- which the count of objects to pack depends on.
+ */
 static void oid_set_sort(struct oid_set *s)
 {
+	size_t i, w = 0;
+
 	if (s->nr > 1)
 		qsort(s->e, s->nr, sizeof(*s->e), oid_cmp);
+	for (i = 0; i < s->nr; i++) {
+		if (w > 0 && oid_cmp(&s->e[w - 1], &s->e[i]) == 0)
+			continue;
+		s->e[w++] = s->e[i];
+	}
+	s->nr = w;
 }
 
 static int oid_set_has(const struct oid_set *s, const oid_t *oid)
@@ -383,7 +398,8 @@ int cmd_fsck(struct repo *r, int argc, char **argv)
 	d.nr = 0;
 	d.show = verbose;
 
-	odb_foreach_loose(&r->odb, dangling_one, &d);
+	/* an object nobody can reach is dangling whichever form it is in */
+	odb_foreach(&r->odb, dangling_one, &d);
 
 	if (verbose || f.errors)
 		printf("%d ref(s), %d commit(s), %d tree(s) checked\n", f.refs,
@@ -464,13 +480,80 @@ static int gc_one(const oid_t *oid, void *ud)
 	return 0;
 }
 
+/*
+ * Put the reachable objects into one pack, drop the loose copies that pack
+ * duplicates, and delete the older packs it supersedes.
+ *
+ * Reachable, not everything: an unreachable object is one gc is supposed to
+ * be able to leave alone for its grace period, and packing it would mean
+ * keeping it forever.
+ *
+ * The whole reachable set is written every time, not only the objects that are
+ * not in a pack yet.  Writing only the new ones would leave a pack per gc, and
+ * a store packed daily would end up with as many packs as it had days.  One
+ * pack holding everything is what git settles to, and it is what makes the
+ * second gc of an unchanged store rewrite the same file under the same name
+ * rather than add to a pile.
+ *
+ * Returns how many objects went into the pack; *freed gets the loose files
+ * that became duplicates, *dropped the packs that were superseded.
+ */
+static size_t pack_reachable(struct repo *r, const struct oid_set *seen,
+			     int dry_run, size_t *freed, size_t *dropped)
+{
+	char *packdir, *keep = NULL;
+	u8 sha[GP_SHA1_RAWSZ];
+	size_t i, nr = seen->nr;
+
+	*freed = *dropped = 0;
+	if (!nr)
+		return 0;
+	if (dry_run) {
+		*dropped = pack_drop_redundant(&r->odb, seen->e, nr, NULL, 1);
+		return nr;
+	}
+
+	packdir = xstrfmt("%s/pack", r->odb.dir);
+	if (pack_write(&r->odb, seen->e, nr, packdir, sha) < 0) {
+		/* the loose objects are all still there, so this is not fatal */
+		gp_error("gc: nothing was packed; the objects are untouched");
+		free(packdir);
+		return 0;
+	}
+	{
+		oid_t id;
+		char hex[GP_SHA1_HEXSZ + 1];
+
+		memcpy(id.raw, sha, GP_SHA1_RAWSZ);
+		oid_hex(&id, hex);
+		keep = xstrfmt("%s/pack-%s.pack", packdir, hex);
+	}
+	free(packdir);
+
+	/* the pack just written is not in the cached list yet, so nothing that
+	 * is looked at here is the one that must survive */
+	*dropped = pack_drop_redundant(&r->odb, seen->e, nr, keep, 0);
+	free(keep);
+
+	/*
+	 * Reload: the cache still lists the packs that were just deleted, and
+	 * does not yet list the one that was just written.
+	 */
+	pack_release_all(&r->odb);
+	pack_load_all(&r->odb);
+	for (i = 0; i < nr; i++)
+		if (odb_forget_loose(&r->odb, &seen->e[i]) == 0)
+			(*freed)++;
+	return nr;
+}
+
 int cmd_gc(struct repo *r, int argc, char **argv)
 {
 	static const char *const takes[] = { "--prune" };
 	struct opts o;
 	struct fsck f;
 	struct gc_ctx g;
-	size_t total;
+	size_t total, nr_pack, freed, dropped;
 
 	opts_init(&o, argc, argv, takes, 1);
 
@@ -486,6 +569,8 @@ int cmd_gc(struct repo *r, int argc, char **argv)
 	total = odb_count(&r->odb);
 	odb_foreach_loose(&r->odb, gc_one, &g);
 
+	nr_pack = pack_reachable(r, &f.seen, g.dry_run, &freed, &dropped);
+
 	/* gc must not report fsck's findings; it only wanted the reach set */
 	f.errors = 0;
 
@@ -495,6 +580,16 @@ int cmd_gc(struct repo *r, int argc, char **argv)
 		printf("Kept %lu unreachable object(s) younger than %d days\n",
 		       (unsigned long)g.recent, GC_GRACE_SECONDS / (24 * 60 * 60));
 	printf("Kept %lu reachable object(s)\n", (unsigned long)g.kept);
+	if (nr_pack)
+		printf("%s %lu object(s) into a pack\n",
+		       g.dry_run ? "Would pack" : "Packed",
+		       (unsigned long)nr_pack);
+	if (freed)
+		printf("Removed %lu loose duplicate(s)\n", (unsigned long)freed);
+	if (dropped)
+		printf("%s %lu superseded pack(s)\n",
+		       g.dry_run ? "Would remove" : "Removed",
+		       (unsigned long)dropped);
 
 	oid_set_release(&f.seen);
 	return 0;

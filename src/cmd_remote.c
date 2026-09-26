@@ -273,55 +273,56 @@ static int git_available(void)
 /* loose-object copying, for local remotes                             */
 
 struct copy_ctx {
-	const char *src_objects;
-	const char *dst_objects;
+	struct odb *from;
+	struct odb *to;
 	size_t copied, skipped;
 	int failed;
 };
 
+/*
+ * Read one object out of the source and write it loose into the target.  The
+ * object is read rather than its file copied, so it does not matter which
+ * form the source holds it in: a store the git binary has fetched into keeps
+ * its objects packed, and copying loose files alone would have transferred
+ * nothing out of one.
+ */
 static int copy_one_object(const oid_t *oid, void *ud)
 {
 	struct copy_ctx *c = ud;
-	char hex[GP_SHA1_HEXSZ + 1];
-	char *src, *dst, *dir, *slash;
+	struct buf data = BUF_INIT;
+	enum obj_type t;
+	oid_t written;
 
-	oid_hex(oid, hex);
-	src = xstrfmt("%s/%c%c/%s", c->src_objects, hex[0], hex[1], hex + 2);
-	dst = xstrfmt("%s/%c%c/%s", c->dst_objects, hex[0], hex[1], hex + 2);
-
-	if (is_file(dst)) {
+	if (odb_exists(c->to, oid)) {
 		c->skipped++;
-	} else {
-		dir = xstrdup(dst);
-		slash = strrchr(dir, '/');
-		if (slash) {
-			*slash = '\0';
-			mkdir_p(dir);
-		}
-		free(dir);
-		if (copy_file(src, dst) < 0)
-			c->failed++;
-		else
-			c->copied++;
+		return 0;
 	}
-	free(src);
-	free(dst);
+	if (odb_read(c->from, oid, &t, &data) < 0) {
+		c->failed++;
+		buf_release(&data);
+		return 0;
+	}
+	if (odb_write(c->to, t, data.b, data.len, &written) < 0)
+		c->failed++;
+	else
+		c->copied++;
+	buf_release(&data);
 	return 0;
 }
 
 /*
- * Copy every loose object across.  gitprompt never packs, so the loose
- * store is the whole store and this is a complete transfer.  Objects
- * already present are left alone.
+ * Copy every object across, loose and packed alike.  Objects already present
+ * are left alone.
  */
 static void copy_all_objects(struct odb *from, struct odb *to, size_t *copied,
 			     size_t *skipped)
 {
 	struct copy_ctx c;
-	c.src_objects = from->dir;
-	c.dst_objects = to->dir;
+
+	c.from = from;
+	c.to = to;
 	c.copied = c.skipped = c.failed = 0;
-	odb_foreach_loose(from, copy_one_object, &c);
+	odb_foreach(from, copy_one_object, &c);
 	if (copied)
 		*copied = c.copied;
 	if (skipped)

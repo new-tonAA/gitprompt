@@ -8,6 +8,11 @@
 
 #include <ctype.h>
 
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
+
 /* ------------------------------------------------------------------ */
 /* option parsing                                                      */
 
@@ -336,6 +341,19 @@ int main(int argc, char **argv)
 	struct repo repo;
 	struct repo *rp = NULL;
 	int rc;
+
+	/*
+	 * Windows would otherwise turn every '\n' written to a stream into
+	 * "\r\n", including the ones inside generated prompt files and the
+	 * documents `replay` writes -- carriage returns that no git object, no
+	 * diff and no other implementation expects to find.  git puts its own
+	 * streams in binary mode for the same reason.
+	 */
+#ifdef _WIN32
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+	_setmode(_fileno(stderr), _O_BINARY);
+#endif
 
 	if (argc < 2)
 		die_usage();

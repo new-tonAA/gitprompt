@@ -420,8 +420,121 @@ expect_status "fsck is clean on the clone" 0 gp fsck
 
 cd "$repo" || exit 2
 expect_status "fsck is clean" 0 gp fsck
-expect "gc reports what it did" "Pruned" gp gc
+gc_out=$(gp gc)
+case "$gc_out" in
+*Pruned*) ok "gc reports what it did" ;;
+*) bad "gc reports what it did" "$gc_out" ;;
+esac
+case "$gc_out" in
+*"into a pack"*) ok "gc packs the reachable objects" ;;
+*) bad "gc packs the reachable objects" "$gc_out" ;;
+esac
 expect "gc --dry-run reports without pruning" "Would prune" gp gc --dry-run
+
+# ------------------------------------------------------------------
+say "a packed object store"
+
+# gc packs what the refs reach, which is the shape a store takes after the git
+# binary has fetched into it -- and the case a reader that only knows loose
+# objects gets wrong, because then it cannot read back its own store.
+pack_idx=$(ls "$repo"/.gitprompt/objects/pack/*.idx 2>/dev/null | head -1)
+if [ -n "$pack_idx" ]; then
+	ok "gc leaves a pack behind"
+else
+	bad "gc leaves a pack behind" "no .idx under .gitprompt/objects/pack"
+fi
+if gp count-objects -v | grep -q '^in-pack: [1-9]'; then
+	ok "the pack holds the reachable objects"
+else
+	bad "the pack holds the reachable objects" "$(gp count-objects -v)"
+fi
+
+# every object the walk reached is in the pack: gc's own count of what it
+# kept reachable is the index's count of what is in it
+kept=$(printf '%s\n' "$gc_out" | sed -n 's/^Kept \([0-9][0-9]*\) reachable object(s)$/\1/p')
+inpack=$(gp count-objects -v | sed -n 's/^in-pack: //p')
+if [ -n "$kept" ] && [ "$kept" = "$inpack" ]; then
+	ok "everything reachable is in the pack"
+else
+	bad "everything reachable is in the pack" "kept=${kept:-?} in-pack=${inpack:-?}"
+fi
+
+# and what is still loose is exactly what gc protected: an unreachable
+# object younger than the grace period, which packing would have kept
+# forever
+grace=$(printf '%s\n' "$gc_out" | sed -n 's/^Kept \([0-9][0-9]*\) unreachable object(s) younger.*$/\1/p')
+loose=$(gp count-objects | sed -n 's/ objects$//p')
+if [ "${grace:-0}" = "$loose" ]; then
+	ok "what stays loose is what the grace period protects"
+else
+	bad "what stays loose is what the grace period protects" \
+		"grace=${grace:-0} loose=$loose"
+fi
+
+if gp verify-objects | grep -q '^Checked 0'; then
+	bad "verify-objects checks the packed objects" "Checked 0"
+else
+	ok "verify-objects checks the packed objects"
+fi
+
+# Every reader has to cope with a packed store, not only the ones that ask for
+# an object's type as well as its contents.  replay, timeline, log-prompt and
+# stats want the contents alone, and that path has to reach the pack too.
+expect "replay reads the packed store" "write a tokenizer first" gp replay
+expect "timeline reads the packed store" "write a tokenizer first" gp timeline
+expect "log-prompt reads the packed store" "write a tokenizer first" gp log-prompt
+expect "stats reads the packed store" "prompts:" gp stats
+expect "replay --format=json reads the packed store" "write a tokenizer first" \
+	gp replay --format=json
+
+# A second gc of an unchanged store writes the same pack under the same name.
+# It must not treat the pack it has just written as one it has superseded and
+# delete it: the loose copies are forgotten right afterwards, so that would
+# take every object in the store with it.
+pack_again=$(gp gc)
+inpack_again=$(gp count-objects -v | sed -n 's/^in-pack: //p')
+packs_after=$(gp count-objects -v | sed -n 's/^packs: //p')
+if [ "${inpack_again:-x}" = "${inpack:-y}" ] && [ "${packs_after:-0}" = 1 ]; then
+	ok "a second gc keeps the pack and every object"
+else
+	bad "a second gc keeps the pack and every object" \
+		"packs=${packs_after:-?} was=$inpack now=${inpack_again:-?}"
+fi
+expect_status "the store is still readable after a second gc" 0 gp fsck
+
+# A commit made after a gc leaves the old pack wholly reachable, so the new
+# pack supersedes it.  One pack is the steady state; a store packed daily
+# should not end up with one pack per day.
+gp prompt -m "a prompt recorded after the first gc" >/dev/null
+gp add -A >/dev/null
+gp commit -m "a commit after the first gc" >/dev/null
+gc_third=$(gp gc)
+packs_after=$(gp count-objects -v | sed -n 's/^packs: //p')
+case "$gc_third" in
+*"1 superseded pack(s)"*) superseded=yes ;;
+*) superseded=no ;;
+esac
+if [ "${packs_after:-0}" = 1 ] && [ "$superseded" = yes ]; then
+	ok "gc supersedes the pack it replaced"
+else
+	bad "gc supersedes the pack it replaced" \
+		"packs=${packs_after:-?} out=$(printf '%s' "$gc_third" | tr '\n' ' ')"
+fi
+expect_status "the store is still readable after a superseding gc" 0 gp fsck
+expect "the commit made after the gc is in the log" \
+	"a commit after the first gc" gp log --oneline
+
+# the local transport reads objects rather than copying loose files, so a
+# packed repository clones like any other
+cd "$work" || exit 2
+expect "clone reads a packed store" "Cloning" gp clone "$repo" packedclone
+expect_file "the clone of a packed store has the prompts" \
+	packedclone/prompts/0001-write-a-tokenizer-first.md
+cd "$work/packedclone" || exit 2
+expect_status "fsck is clean on the clone of a packed store" 0 gp fsck
+expect "the clone of a packed store has the same log" \
+	"record the first prompts" gp log --oneline
+cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
 say "git interoperability"
@@ -439,11 +552,69 @@ if command -v git >/dev/null 2>&1; then
 		git --git-dir="$gpdir" show HEAD:prompts/0001-write-a-tokenizer-first.md
 	expect "git reads the session file" "build a parser" \
 		git --git-dir="$gpdir" show "HEAD:prompts/sessions/$sid.md"
+	# git refuses an index whose entries are not in path order, and staging
+	# appends, so this is the sort index_write does rather than the order
+	# the paths were added in
+	expect_status "git reads our index" 0 git --git-dir="$gpdir" ls-files
+	gp ls-files > "$work/gp-lsfiles" 2>&1
+	# git ends its lines with CRLF on Windows, which says nothing about the
+	# order or the paths, so compare with the carriage returns taken out
+	git --git-dir="$gpdir" ls-files 2>&1 | tr -d '\r' > "$work/git-lsfiles"
+	if cmp -s "$work/gp-lsfiles" "$work/git-lsfiles"; then
+		ok "git and gitprompt list the same staged paths"
+	else
+		bad "git and gitprompt list the same staged paths" \
+			"$(diff "$work/gp-lsfiles" "$work/git-lsfiles" 2>&1 | head -4)"
+	fi
 	# a clean fsck says nothing at all: the exit status is the whole result
 	expect_status "git verifies our object store" 0 \
 		git --git-dir="$gpdir" fsck --no-dangling --no-progress
+
+	# and it can check the pack gc wrote, object by object, against its
+	# own index: the format is git's, not a lookalike
+	bad_packs=
+	for idx in "$gpdir"/objects/pack/*.idx; do
+		[ -e "$idx" ] || continue
+		git verify-pack -v "$idx" >/dev/null 2>&1 || bad_packs="$bad_packs $idx"
+	done
+	if [ -z "$bad_packs" ]; then
+		ok "git verifies every pack gc wrote"
+	else
+		bad "git verifies every pack gc wrote" "unverifiable:$bad_packs"
+	fi
 	expect_status "git can walk our whole history" 0 \
 		git --git-dir="$gpdir" rev-list --all --quiet
+
+	# A pack holding an object the refs no longer reach has to survive gc.
+	# A fetch leaves objects packed and with no loose copy beside them, so
+	# deleting a pack like this would lose the object outright -- there
+	# would be nothing left to read it from.
+	cruft=$work/cruftpack
+	rm -rf "$cruft"
+	(cd "$work" && gp init cruftpack >/dev/null) || exit 2
+	cd "$cruft" || exit 2
+	gp prompt -m "a prompt that stays reachable" >/dev/null
+	gp add -A >/dev/null && gp commit -m kept >/dev/null
+	gp prompt -m "a prompt that is abandoned" >/dev/null
+	gp add -A >/dev/null && gp commit -m abandoned >/dev/null
+	doomed=$(gp rev-parse HEAD)
+	git --git-dir="$cruft/.gitprompt" rev-list --objects "$doomed" |
+		git --git-dir="$cruft/.gitprompt" pack-objects \
+			"$cruft/.gitprompt/objects/pack/pack" >/dev/null
+	# pack the abandoned commit, then take the loose copies away, which is
+	# the state a fetch leaves behind
+	for d in "$cruft"/.gitprompt/objects/??; do
+		[ -d "$d" ] && rm -rf "$d"
+	done
+	gp reset --hard HEAD~1 >/dev/null 2>&1
+	gp gc >/dev/null 2>&1
+	if [ "$(gp cat-file -p "$doomed" 2>/dev/null | head -1 | cut -d' ' -f1)" = tree ]; then
+		ok "gc keeps a pack holding an unreachable object"
+	else
+		bad "gc keeps a pack holding an unreachable object" \
+			"the abandoned commit is no longer readable"
+	fi
+	cd "$repo" || exit 2
 
 	# Ancestry suffixes, against git as the reference.  These were dead code
 	# until they were fixed: the suffix was searched for in the name *after*

@@ -30,6 +30,8 @@ That is why the rest of the design needs no special cases:
 - `git --git-dir=.gitprompt push origin main` works.
 - `git reset --hard` in a directory whose `.git` is a copy of `.gitprompt`
   materialises the whole project, prompts included.
+- `git gc` repacks the store, and `gitprompt` reads the packs it leaves: loose
+  and packed objects both, deltas and all.
 
 The store is `.gitprompt/` rather than `.git/`, so a gitprompt repository and a
 git repository can sit in the same working tree without either noticing the
@@ -45,6 +47,7 @@ my-project/
   .gitprompt/                       the store -- an ordinary git repository
     HEAD  config  index
     objects/                        loose objects, written as git writes them
+    objects/pack/                   packs, read and written as git writes them
     refs/heads/  refs/tags/  refs/remotes/
     logs/                           reflogs
     SESSION                         the session prompts are being written to
@@ -185,13 +188,18 @@ names are git's, and the behaviour is meant to match:
 
 | URL form | how it works |
 | --- | --- |
-| `/path/to/repo`, `../repo`, `file:///path` | handled natively: loose objects are copied and the other repository's refs are written directly |
+| `/path/to/repo`, `../repo`, `file:///path` | handled natively: every object is read out of the source and written into the target, and the other repository's refs are written directly |
 | `https://`, `git://`, `ssh://` | delegated to the `git` binary, as `git --git-dir=.gitprompt push <url> <refspec>` |
 
 The delegation is not a workaround. It is correct precisely because
 `.gitprompt` is a real git object store: git fetches and pushes it as it would
 any other repository, and authentication, proxies and credential helpers come
 along for free.
+
+It is also why packfiles are read. A `git fetch` does not leave loose objects
+behind above a small threshold: it leaves a pack, with the objects inside it
+delta-compressed against each other. A store with no pack reader would be
+unable to read back its own fetched history.
 
 ## What is not implemented
 
@@ -208,8 +216,6 @@ one that says no:
   `commit` refusing, `merge --abort` restoring the tree, the concluding commit
   carrying two parents — but `git` reading the same index would not see the
   conflict.
-- **Packfiles.** Objects are written loose and stay loose. `gc` prunes
-  unreachable objects; it does not pack.
 - **Merge options other than the basics.** `--no-commit`, `--ff-only` and
   `--abort` work. `--no-ff`, `--squash`, `-X` strategies and rename detection
   do not exist.
@@ -220,17 +226,36 @@ one that says no:
   option belonging to a *different* command is accepted and ignored. Catching
   typos is the goal; the check is not a substitute for per-command validation.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
-  plain C99 with a small `#ifdef _WIN32` block for `_getcwd`/`_getpid` and
-  `__USE_MINGW_ANSI_STDIO`; it has not been built on Unix.
+  plain C99 with a small `#ifdef _WIN32` block for `_getcwd`/`_getpid`,
+  `__USE_MINGW_ANSI_STDIO`, and putting the streams in binary mode so that a
+  newline written out is a newline and not a carriage return before it; it has
+  not been built on Unix.
 
 ## Status
 
-The end-to-end suite passes: **200 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **224 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
-and `--abort`, local remotes, and git interoperability — the last being the
-section that matters most, since a gitprompt repository is meant to be an
-ordinary git repository.
+and `--abort`, local remotes, packed object stores, and git interoperability —
+the last being the section that matters most, since a gitprompt repository is
+meant to be an ordinary git repository. As part of it, `git verify-pack` checks
+the pack `gc` writes against git's own index, and `git ls-files` checks the
+index gitprompt wrote against git's own reader.
+
+The pack reader is exercised against packs git wrote, not only against the ones
+`gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
+in it. Packs written by `git repack` and by `git pack-objects`, with offset
+deltas and reference deltas, chains several deep, have been read back object by
+object and re-hashed.
+
+The packed-store section also pins down when a pack may be dropped. A second
+`gc` of an unchanged store rewrites the same pack under the same name, and
+deleting that as superseded would take every object with it; a pack holding an
+object no ref reaches is kept, because an object a fetch left packed has no
+loose copy to fall back on; and every reader — `replay`, `timeline`,
+`log-prompt`, `stats` — is run against a packed store, since wanting an object's
+contents without its type is a different path through the store from wanting
+both.
 
 The suite runs offline, so it covers the local transport and leaves the carrier
 transports to git. `push`, `fetch`, `pull` and `clone` against an `https://`

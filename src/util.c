@@ -334,11 +334,33 @@ int write_file(const char *path, const void *data, size_t len)
 	return 0;
 }
 
+/*
+ * Files git writes into a store come back read-only, and Windows refuses to
+ * delete a read-only file.  Without this, `gc` could not drop the pack a
+ * `git fetch` left behind -- the deletion would fail, silently, and the store
+ * would keep the pack it had just superseded.  Clear the attribute and try
+ * once more, which is what git does in the same place.
+ */
+static int make_writable(const char *path)
+{
+#ifdef _WIN32
+	return _chmod(path, _S_IREAD | _S_IWRITE) == 0 ? 0 : -1;
+#else
+	return chmod(path, 0644) == 0 ? 0 : -1;
+#endif
+}
+
 int remove_file(const char *path)
 {
-	if (gp_unlink(path) != 0 && errno != ENOENT)
+	if (gp_unlink(path) == 0 || errno == ENOENT)
+		return 0;
+	if (errno != EACCES && errno != EPERM)
 		return -1;
-	return 0;
+	if (make_writable(path) != 0)
+		return -1;
+	if (gp_unlink(path) == 0 || errno == ENOENT)
+		return 0;
+	return -1;
 }
 
 int remove_dir_recursive(const char *path)
@@ -365,20 +387,6 @@ int remove_dir_recursive(const char *path)
 	}
 	closedir(d);
 	return gp_rmdir(path);
-}
-
-int copy_file(const char *src, const char *dst)
-{
-	struct buf b;
-	int rc;
-	buf_init(&b);
-	if (read_file(src, &b) < 0) {
-		buf_release(&b);
-		return -1;
-	}
-	rc = write_file(dst, b.b, b.len);
-	buf_release(&b);
-	return rc;
 }
 
 /*

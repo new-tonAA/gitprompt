@@ -719,10 +719,16 @@ int cmd_count_objects(struct repo *r, int argc, char **argv)
 	opts_init(&o, argc, argv, NULL, 0);
 	n = odb_count(&r->odb);
 	if (opts_flag(&o, "-v")) {
+		size_t packed = odb_count_packed(&r->odb);
+
 		printf("count: %lu\n", (unsigned long)n);
-		printf("size: 0\n");
-		printf("in-pack: 0\n");
-		printf("packs: 0\n");
+		/* git reports these in kilobytes, rounded down */
+		printf("size: %lu\n",
+		       (unsigned long)(odb_loose_size(&r->odb) / 1024));
+		printf("in-pack: %lu\n", (unsigned long)packed);
+		printf("packs: %lu\n", (unsigned long)odb_nr_packs(&r->odb));
+		printf("size-pack: %lu\n",
+		       (unsigned long)(odb_pack_size(&r->odb) / 1024));
 	} else {
 		printf("%lu objects\n", (unsigned long)n);
 	}
@@ -767,7 +773,9 @@ int cmd_verify_objects(struct repo *r, int argc, char **argv)
 
 	opts_init(&o, argc, argv, NULL, 0);
 	c.r = r;
-	odb_foreach_loose(&r->odb, verify_one, &c);
+	/* both forms: a hash checked only where it is loose would say nothing
+	 * about the objects a fetch left packed */
+	odb_foreach(&r->odb, verify_one, &c);
 	printf("Checked %d object(s)\n", c.checked);
 	return c.bad ? 1 : 0;
 }

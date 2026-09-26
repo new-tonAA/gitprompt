@@ -247,11 +247,16 @@ i64 json_obj_val_int(const struct jval *o, size_t i);
 /* ------------------------------------------------------------------ */
 /* object database                                                     */
 
+struct pack;
+
 struct odb {
 	char *dir;              /* .gitprompt/objects */
 	struct buf tmp;
+	struct pack *packs;     /* the object packs, loaded on demand */
+	size_t nr_packs, alloc_packs;
+	int packs_loaded;
 };
-#define ODB_INIT { NULL, BUF_INIT }
+#define ODB_INIT { NULL, BUF_INIT, NULL, 0, 0, 0 }
 void odb_init(struct odb *o, const char *dir);
 void odb_release(struct odb *o);
 
@@ -266,11 +271,51 @@ int odb_hash(struct odb *o, enum obj_type type, const void *data, size_t len,
 	     oid_t *out, int write_it);
 int odb_type_of(struct odb *o, const oid_t *oid, enum obj_type *type);
 size_t odb_count(struct odb *o);
+size_t odb_count_packed(struct odb *o);
+size_t odb_nr_packs(struct odb *o);
+/* what those objects occupy on disk */
+size_t odb_loose_size(struct odb *o);
+size_t odb_pack_size(struct odb *o);
 /* calls fn for every loose object; fn returns non-zero to stop */
 void odb_foreach_loose(struct odb *o,
 		       int (*fn)(const oid_t *, void *), void *data);
+/* the same over loose and packed objects alike, loose first */
+void odb_foreach(struct odb *o, int (*fn)(const oid_t *, void *), void *data);
 /* resolve an abbreviated hex prefix to a full oid */
 int odb_resolve_prefix(struct odb *o, const char *hex, oid_t *out);
+/* drop what a loose object leaves behind once its bytes are in a pack */
+int odb_forget_loose(struct odb *o, const oid_t *oid);
+
+/* ------------------------------------------------------------------ */
+/* packfiles (pack.c)                                                  */
+
+/*
+ * The store's packs are opened on first use, so a repository that has none
+ * pays for the directory scan at most once and nothing else.
+ */
+void pack_load_all(struct odb *o);
+void pack_release_all(struct odb *o);
+int pack_has(struct odb *o, const oid_t *oid);
+int pack_read_object(struct odb *o, const oid_t *oid, enum obj_type *type,
+		     struct buf *out);
+size_t pack_count_all(struct odb *o);
+size_t pack_nr(struct odb *o);
+size_t pack_disk_size(struct odb *o);
+void pack_foreach(struct odb *o, int (*fn)(const oid_t *, void *), void *data);
+int pack_resolve_prefix(struct odb *o, const char *hex, oid_t *out);
+/*
+ * Write oids as one pack and its index into `dir`, named after the pack's
+ * own checksum.  out_sha, if given, receives that checksum.
+ */
+int pack_write(struct odb *o, const oid_t *oids, size_t nr, const char *dir,
+	       u8 out_sha[GP_SHA1_RAWSZ]);
+/*
+ * Delete packs whose every object is in the sorted `seen`, which a pack just
+ * written already holds.  `keep_path` is never dropped even if it qualifies.
+ * Returns how many were (or, with dry_run, would be) removed.
+ */
+size_t pack_drop_redundant(struct odb *o, const oid_t *seen, size_t nr_seen,
+			   const char *keep_path, int dry_run);
 
 /* ------------------------------------------------------------------ */
 /* index (git's index v2, byte for byte)                               */
@@ -390,7 +435,6 @@ int mkdir_p(const char *path);
 void mkdir_one(const char *path);
 int remove_file(const char *path);
 int remove_dir_recursive(const char *path);
-int copy_file(const char *src, const char *dst);
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 void *xmalloc(size_t n);

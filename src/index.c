@@ -199,13 +199,35 @@ void index_read(struct index_state *istate, const char *path)
 /* ------------------------------------------------------------------ */
 /* write                                                               */
 
+static int entry_path_cmp(const void *a, const void *b)
+{
+	const struct index_entry *x = a;
+	const struct index_entry *y = b;
+
+	return strcmp(x->path, y->path);
+}
+
 void index_write(const struct index_state *istate, const char *path)
 {
 	struct buf b;
 	gp_sha1_ctx ctx;
 	u8 digest[GP_SHA1_RAWSZ];
+	struct index_entry *sorted;
 	size_t i;
 	char *dir;
+
+	/*
+	 * git requires the index to be sorted by path, and refuses to read one
+	 * that is not ("unordered stage entries").  Entries are appended as they
+	 * are staged, so the order they arrive in is not the order they go out
+	 * in; write a sorted copy.  The in-memory entries are left alone --
+	 * callers hold pointers into them -- and the paths are borrowed, not
+	 * copied, because nothing here outlives the buffer.
+	 */
+	sorted = xmalloc(istate->nr ? istate->nr * sizeof(*sorted) : 1);
+	if (istate->nr)
+		memcpy(sorted, istate->e, istate->nr * sizeof(*sorted));
+	qsort(sorted, istate->nr, sizeof(*sorted), entry_path_cmp);
 
 	buf_init(&b);
 	buf_add(&b, IDX_SIGNATURE, 4);
@@ -213,7 +235,7 @@ void index_write(const struct index_state *istate, const char *path)
 	put_be32(&b, (u32)istate->nr);
 
 	for (i = 0; i < istate->nr; i++) {
-		const struct index_entry *e = &istate->e[i];
+		const struct index_entry *e = &sorted[i];
 		size_t start = b.len;
 		size_t namelen = strlen(e->path);
 		u16 flags;
@@ -257,6 +279,7 @@ void index_write(const struct index_state *istate, const char *path)
 	if (write_file(path, b.b, b.len) < 0)
 		gp_error("cannot write index %s", path);
 	buf_release(&b);
+	free(sorted);
 }
 
 /* ------------------------------------------------------------------ */

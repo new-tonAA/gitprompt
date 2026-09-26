@@ -19,8 +19,64 @@ and stored zlib-deflated at
 .gitprompt/objects/<first two hex digits>/<remaining 38 hex digits>
 ```
 
-Objects are always written loose. There is no packfile support; `gc` removes
-unreachable loose objects but does not pack them.
+Objects are written loose, unless the store already has them in a pack -- an
+object is only written if neither form holds it. Reads look in the loose
+directories first and in `objects/pack` after that, because `git fetch` run
+against this store leaves its objects packed, and a reader that only knew the
+loose form could not read back what it had just fetched.
+
+`gc` packs: it writes the reachable objects into one pack, named
+`pack-<sha1 of the pack>.{pack,idx}`, then removes the loose copies the pack now
+duplicates. It writes the whole reachable set each time rather than only the
+objects that are not packed yet, so the store settles at one pack instead of
+gaining one per gc; the pack that leaves behind is deleted when every object in
+it is in the new one. A pack holding *anything* unreachable is left alone --
+those objects may be all a rewritten branch or a fetch left of them, and no
+other copy exists to read them from. Unreachable loose objects are pruned once
+they are older than two weeks, and anything younger is left alone -- packing it
+would keep it forever, which is the opposite of what a grace period is for.
+
+## 1a. Packfiles
+
+Both files git writes are read, and only version 2 of the index is written.
+
+**`.pack`** — `"PACK"`, version 2 as a 4-byte big-endian integer, the object
+count likewise, then each object's header and deflated data in offset order,
+then the SHA-1 of everything before it.
+
+An object header is a varint whose first byte carries the type in bits 4-6
+(`1` commit, `2` tree, `3` blob, `4` tag, `6` offset delta, `7` reference
+delta) and the low 4 bits of the inflated size; each continuation byte adds 7
+more bits, least significant first.
+
+A delta is two varints, the source size and the target size, then copy and
+insert commands:
+
+```
+0x80  copy: four optional little-endian offset bytes (bits 0-3) then three
+      optional little-endian size bytes (bits 4-6); a size of zero means
+      0x10000
+0x01-0x7f  insert that many literal bytes
+0x00  reserved
+```
+
+An offset delta names its base by distance back in the same pack, encoded as a
+big-endian varint where each continuation adds one; a reference delta names it
+by id, and the base may then be in any pack or loose. Chains are followed
+recursively, and a chain deeper than 200 is refused as corrupt.
+
+**`.idx`** — version 2: the magic `\xff t O c`, version 2, a 256-entry fanout
+table of cumulative big-endian counts by first id byte, the sorted 20-byte
+ids, their crc32 over the object's bytes in the pack, and their 4-byte
+offsets. An offset with its top bit set is not an offset but an index into the
+8-byte overflow table that follows. Then the pack's checksum and the index's
+own.
+
+Version 1 of the index is also read: the fanout, then `(offset, id)` pairs.
+git writes v2 today, but a repository old enough to hold a v1 index is exactly
+the kind this should not refuse. `.rev` files are ignored.
+
+
 
 The four types:
 
@@ -100,6 +156,11 @@ the path, NUL-terminated, the record padded with NULs to a multiple of 8 bytes
 ```
 
 then the whole buffer's SHA-1. All integers big-endian.
+
+Records are written sorted by path, bytewise, whatever order they were staged
+in: git refuses to read an index whose entries are not in path order
+("unordered stage entries"), and paths arrive in staging order, not sorted
+order. With no stage bits in play, plain byte order is git's order.
 
 The file is at `.gitprompt/index` rather than `.git/index`, so a gitprompt
 repository and a git repository can share a working tree.
