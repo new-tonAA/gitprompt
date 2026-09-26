@@ -3,6 +3,10 @@
 *.exe
 build/
 
+# The build links zlib statically from third_party/zlib/libz.a, so no DLL is
+# needed or produced.  One may be lying around from obtaining the library.
+*.dll
+
 # Editor and OS noise
 .vscode/
 .idea/
