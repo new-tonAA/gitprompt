@@ -689,12 +689,73 @@ static void merge_write(struct repo *r, const char *path, const void *data,
 	free(full);
 }
 
+/*
+ * A path the rename handling below has already left in conflict.  The loops
+ * that follow would otherwise read such a path as an ordinary change -- theirs
+ * arriving at the new name, ours deleted at the old one -- and quietly undo
+ * the conflict by adding it or removing it.
+ */
+static int merge_is_unmerged(const struct index_state *merged, const char *path)
+{
+	unsigned stage;
+
+	for (stage = 1; stage <= 3; stage++)
+		if (index_get_stage(merged, path, stage))
+			return 1;
+	return 0;
+}
+
+static void worktree_remove(struct repo *r, const char *path)
+{
+	char *full = xstrfmt("%s/%s", r->root, path);
+
+	remove_file(full);
+	free(full);
+}
+
+/*
+ * Record a view's entry for a path under the name it moved to.  Nothing moves
+ * when the view never had the path -- the move was the other side's, or this
+ * side made it too -- or when the view already has something at the new name,
+ * which is how a path renamed to two different places stays two paths.
+ */
+static int rename_follow(struct index_state *view, const char *from,
+			 const char *to)
+{
+	struct index_entry *e = index_get(view, from);
+	struct index_entry moved;
+
+	if (!e || index_get(view, to))
+		return 0;
+	moved = *e;
+	moved.path = (char *)to;
+	index_remove(view, from);
+	index_add(view, &moved);
+	return 1;
+}
+
+/*
+ * True when both sides moved one path, and to different places.  Such a rename
+ * is not followed at all: the two names both survive as a delete and an add,
+ * which is what a rename was before it was detected, and neither side's file
+ * is lost to the other's name for it.
+ */
+static int renamed_two_ways(const struct rename_list *a,
+			    const struct rename_list *b, const char *from)
+{
+	const struct rename_pair *pa = rename_by_from(a, from);
+	const struct rename_pair *pb = rename_by_from(b, from);
+
+	return pa && pb && strcmp(pa->to, pb->to) != 0;
+}
+
 static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 			const oid_t *theirs, struct merge_result *res,
 			struct index_state *merged, enum merge_favor favor,
 			const char *label)
 {
 	struct index_state bi, oi, ti;
+	struct rename_list rts, rus;
 	size_t i;
 
 	memset(&bi, 0, sizeof bi);
@@ -706,13 +767,132 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 	read_tree_into_index(r, &oi, ours, "");
 	read_tree_into_index(r, &ti, theirs, "");
 
+	/*
+	 * Follow the renames before merging anything, by recording the base's
+	 * entry for a path that moved under the name the moving side gave it,
+	 * inside the views the loops below read.  After the move, base, ours
+	 * and theirs all name the file the same way, and merging its contents
+	 * is the merge that was already there: an edit on the far side of a
+	 * rename lands in the renamed file instead of looking like a
+	 * modification of a file this side deleted.
+	 *
+	 * A file both sides moved to the same name needs nothing special --
+	 * the second move finds nothing left to move -- so the three-way merge
+	 * at the new name happens as it would have without the rename.  A move
+	 * that met a deletion or a second name does not follow, and is left in
+	 * conflict by the pass below; the moves made here are what that pass
+	 * needs to record the stages.
+	 */
+	renames_between(&r->odb, &bi, &ti, &rts);
+	renames_between(&r->odb, &bi, &oi, &rus);
+
+	for (i = 0; i < rts.nr; i++) {
+		const char *from = rts.e[i].from, *to = rts.e[i].to;
+
+		/* a detected rename is a path the moving side lost and this one
+		 * still has, so the base entry is always there to move */
+		rename_follow(&bi, from, to);
+		if (renamed_two_ways(&rts, &rus, from))
+			continue;
+		if (rename_follow(&oi, from, to)) {
+			/*
+			 * The work tree has to follow as well, and the loops
+			 * below cannot do it: they write a file only when their
+			 * side has something to put there, and a rename with no
+			 * edit has nothing.  What is written here is what a merge
+			 * of the contents then overwrites, when there is one.
+			 */
+			write_blob_to_worktree(r, to, &index_get(&oi, to)->oid);
+			worktree_remove(r, from);
+			res->files_changed++;
+		} else if (!index_get(&oi, to)) {
+			/* we deleted the old path: the pass below leaves the
+			 * rename and the deletion to be settled by hand */
+			continue;
+		}
+		printf("Renamed %s -> %s\n", from, to);
+	}
+
+	for (i = 0; i < rus.nr; i++) {
+		const char *from = rus.e[i].from, *to = rus.e[i].to;
+
+		if (renamed_two_ways(&rus, &rts, from))
+			continue;
+		if (!rename_follow(&bi, from, to))
+			continue;       /* the other side moved it too */
+		if (!index_get(&ti, from))
+			continue;       /* they deleted it: the pass below */
+		/*
+		 * Their copy of the old path follows ours, so an edit they made
+		 * to it is merged under the new name rather than read as a
+		 * modification of a file we deleted.
+		 */
+		rename_follow(&ti, from, to);
+		printf("Renamed %s -> %s\n", from, to);
+	}
+
 	/* start from our side and let their changes land on top of it */
 	for (i = 0; i < oi.nr; i++)
 		index_add(merged, &oi.e[i]);
 
+	/*
+	 * The two ways a move does not follow, both of which git also refuses
+	 * to settle: it met a deletion, or it met a different name for the same
+	 * file, and either way choosing would throw away a change somebody
+	 * meant to make.  The paths come back unmerged, one stage each -- which
+	 * is where the DU/UD/DD and AU/UA letters in `status` come from -- with
+	 * the versions both sides need left in the work tree.
+	 */
+	for (i = 0; i < rts.nr; i++) {
+		const char *from = rts.e[i].from, *to = rts.e[i].to;
+		struct index_entry *b = index_get(&bi, to);
+
+		if (renamed_two_ways(&rts, &rus, from)) {
+			const struct rename_pair *ours = rename_by_from(&rus, from);
+
+			printf("CONFLICT (rename/rename): %s is %s in HEAD and %s "
+			       "in %s.\n", from, ours->to, to, label);
+			/* the old path with a stage of its own, so that naming
+			 * the file once is what resolving it means */
+			merge_mark_unmerged(merged, from, b, NULL, NULL);
+			merge_mark_unmerged(merged, ours->to, NULL,
+					    index_get(&oi, ours->to), NULL);
+			merge_mark_unmerged(merged, to, NULL, NULL,
+					    index_get(&ti, to));
+			write_blob_to_worktree(r, to, &index_get(&ti, to)->oid);
+			res->conflicts++;
+			continue;
+		}
+		if (index_get(&oi, to))
+			continue;       /* followed above, or merged below */
+		printf("CONFLICT (rename/delete): %s renamed to %s in %s, but "
+		       "deleted in HEAD.  Version %s of %s left in tree.\n",
+		       from, to, label, label, to);
+		write_blob_to_worktree(r, to, &index_get(&ti, to)->oid);
+		merge_mark_unmerged(merged, to, b, NULL, index_get(&ti, to));
+		res->conflicts++;
+	}
+
+	for (i = 0; i < rus.nr; i++) {
+		const char *from = rus.e[i].from, *to = rus.e[i].to;
+
+		if (renamed_two_ways(&rus, &rts, from) || index_get(&ti, to))
+			continue;       /* reported above, or merged below */
+		printf("CONFLICT (rename/delete): %s renamed to %s in HEAD, but "
+		       "deleted in %s.  Version HEAD of %s left in tree.\n",
+		       from, to, label, to);
+		merge_mark_unmerged(merged, to, index_get(&bi, to),
+				    index_get(&oi, to), NULL);
+		res->conflicts++;
+	}
+
 	for (i = 0; i < ti.nr; i++) {
-		struct index_entry *b = base ? index_get(&bi, ti.e[i].path) : NULL;
-		struct index_entry *o = index_get(&oi, ti.e[i].path);
+		struct index_entry *b, *o;
+
+		if (merge_is_unmerged(merged, ti.e[i].path))
+			continue;
+		b = base ? index_get(&bi, ti.e[i].path) : NULL;
+		o = index_get(&oi, ti.e[i].path);
 
 		/*
 		 * Whose change this is decides whether it can be taken
@@ -808,7 +988,14 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 
 	/* deletions on their side */
 	for (i = 0; i < oi.nr; i++) {
-		struct index_entry *b = base ? index_get(&bi, oi.e[i].path) : NULL;
+		struct index_entry *b;
+
+		/* a path already left unmerged is a conflict decided above,
+		 * and this loop's reading of it -- a file we have and they do
+		 * not -- is exactly the deletion that must not be taken */
+		if (merge_is_unmerged(merged, oi.e[i].path))
+			continue;
+		b = base ? index_get(&bi, oi.e[i].path) : NULL;
 		if (index_get(&ti, oi.e[i].path))
 			continue;
 		if (b && !oid_equal(&b->oid, &oi.e[i].oid)) {
@@ -820,14 +1007,14 @@ static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 			continue;
 		}
 		if (b) {
-			char *full = xstrfmt("%s/%s", r->root, oi.e[i].path);
-			remove_file(full);
-			free(full);
+			worktree_remove(r, oi.e[i].path);
 			index_remove(merged, oi.e[i].path);
 			res->files_changed++;
 		}
 	}
 
+	rename_list_release(&rts);
+	rename_list_release(&rus);
 	index_release(&bi);
 	index_release(&oi);
 	index_release(&ti);

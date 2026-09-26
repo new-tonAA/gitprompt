@@ -208,8 +208,9 @@ unable to read back its own fetched history.
 Stated plainly, because a tool that quietly does the wrong thing is worse than
 one that says no:
 
-- **Rename detection.** A rename is a delete and an add. Merging a path that
-  one side renamed and the other side changed does not follow the rename.
+- **Renames outside a merge.** A move is recognised where a merge has to follow
+  one. `status` and `diff` do not look for them: a staged move is reported as a
+  deletion beside an addition, where git would say `renamed: a -> b`.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
@@ -219,15 +220,28 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **365 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **390 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
-and `--abort`, the commit editor, per-command option validation, local remotes,
-serving over `gp://`, packed object stores, and git interoperability — the last
-being the section that matters most, since a gitprompt repository is meant to be
-an ordinary git repository. As part of it, `git verify-pack` checks
-the pack `gc` writes against git's own index, and `git ls-files` checks the
-index gitprompt wrote against git's own reader.
+and `--abort`, merges that follow a file that moved, the commit editor,
+per-command option validation, local remotes, serving over `gp://`, packed object
+stores, and git interoperability — the last being the section that matters most,
+since a gitprompt repository is meant to be an ordinary git repository. As part
+of it, `git verify-pack` checks the pack `gc` writes against git's own index, and
+`git ls-files` checks the index gitprompt wrote against git's own reader.
+
+A merge follows a rename. A path one side no longer has and the other side has
+gained is the same file when it holds the same object, and failing that when
+enough of its text is still the same: half the lines, the line git draws, which
+is what catches a file that was moved *and* edited. The pairing is one to one,
+so two copies of one file are not two renames of the original, and the path
+against path search is capped at a thousand pairs the way git's
+`diff.renameLimit` is, past which the contents are not read. With the move
+recognised the merge happens under the new name, contents and all — a three-way
+merge of the file when both sides edited it. Where a move cannot be followed it
+comes back unmerged with git's own stages, so `status` prints git's letters:
+`DU`/`UD` when a move met a deletion, `DD`/`AU`/`UA` when both sides gave the
+file a different name.
 
 A commit with no `-m` and no `-F` opens an editor, looked for the way git looks
 for one: `GIT_EDITOR`, then `core.editor`, then `VISUAL`, then `EDITOR`. The

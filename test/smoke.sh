@@ -679,6 +679,216 @@ expect_status "check-ref-format accepts a good name" 0 gp check-ref-format refs/
 expect_status "check-ref-format rejects a bad name" 1 gp check-ref-format "refs/heads/bad name"
 
 # ------------------------------------------------------------------
+say "a file that moved"
+
+# A rename in the history is a delete and an add, and a merge that reads it
+# that way cannot follow an edit made on the far side of it: the path that
+# side changed is one this side deleted, which is a conflict rather than
+# something to merge into.  So the cases below move a file on one side and
+# change it on the other, and expect the two to meet under the new name --
+# and where a move cannot be followed, expect the same stages git leaves, so
+# that `status` says the same letters.  Each relies on `mergecase` and
+# `expect_same` from the merge section above.
+#
+# A merge here is asked for its output as well as its status, so that a case
+# which does not behave can say what it did print.  Running it through this
+# keeps the status in $mrc rather than in the $? of the test that reads it.
+mergeout() {   # mergeout <name> <command...>: run it, keep the output
+	tag=$1; shift
+	"$@" > "$work/$tag.out" 2>&1
+	mrc=$?
+}
+
+# they moved it and left the contents alone; we edited it where it used to be
+mergecase "$work/rename-follow"
+printf 'one\ntwo\nthree\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp mv moved.txt renamed.txt >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "side renames it" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'one\ntwo\nTHREE\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "main edits it" >/dev/null 2>&1
+mergeout rename-follow gp merge side
+if [ "$mrc" = 0 ]; then
+	ok "a move with no edit on the far side merges"
+else
+	bad "a move with no edit on the far side merges" \
+		"exit $mrc: $(cat "$work/rename-follow.out")"
+fi
+expect "the move is reported rather than a delete and an add" \
+	"Renamed moved.txt -> renamed.txt" cat "$work/rename-follow.out"
+printf 'one\ntwo\nTHREE\n' > "$work/want-follow"
+expect_same "our edit arrives under the new name" renamed.txt "$work/want-follow"
+expect_absent "the old name is gone from the work tree" moved.txt
+expect "the new name is in the merged tree" "renamed.txt" gp ls-tree HEAD
+
+# both sides edited it as well: theirs moved it and changed the top line,
+# ours changed the bottom one, so the merge of the contents has to happen at
+# the name the file now carries
+mergecase "$work/rename-edit-both"
+printf 'one\ntwo\nthree\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp mv moved.txt renamed.txt >/dev/null 2>&1
+printf 'ONE\ntwo\nthree\n' > renamed.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "side renames it and edits the top" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'one\ntwo\nTHREE\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "main edits the bottom" >/dev/null 2>&1
+expect_status "a move the far side also edited merges" 0 gp merge side
+printf 'ONE\ntwo\nTHREE\n' > "$work/want-rename-both"
+expect_same "both edits arrive at the new name" renamed.txt "$work/want-rename-both"
+
+# they moved it and edited it, we deleted it: git will not choose between a
+# change and a deletion, so the move comes back unmerged with the versions
+# both sides need -- ours as the deletion, theirs in the tree
+mergecase "$work/rename-delete-ours"
+printf 'one\ntwo\nthree\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp mv moved.txt renamed.txt >/dev/null 2>&1
+printf 'one\ntwo\nthree\nfour\n' > renamed.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "side renames it and edits it" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+gp rm moved.txt >/dev/null 2>&1
+gp commit -m "main deletes it" >/dev/null 2>&1
+mergeout rename-delete-ours gp merge side
+if [ "$mrc" = 1 ]; then
+	ok "a move onto a deletion is not settled"
+else
+	bad "a move onto a deletion is not settled" \
+		"exit $mrc: $(cat "$work/rename-delete-ours.out")"
+fi
+expect "the conflict names the move and the deletion" \
+	"CONFLICT (rename/delete): moved.txt renamed to renamed.txt in side, but deleted in HEAD." \
+	cat "$work/rename-delete-ours.out"
+expect "the conflict says which version it left" \
+	"Version side of renamed.txt left in tree" \
+	cat "$work/rename-delete-ours.out"
+stages=$(gp ls-files -s renamed.txt | awk '{print $3}' | tr -d '\r' | sort | tr '\n' ',')
+if [ "$stages" = "1,3," ]; then
+	ok "the new name holds the base and theirs, not a deletion of ours"
+else
+	bad "the new name holds the base and theirs, not a deletion of ours" "stages $stages"
+fi
+printf 'one\ntwo\nthree\nfour\n' > "$work/want-rename-theirs"
+expect_same "the version left in the tree is theirs" renamed.txt "$work/want-rename-theirs"
+
+# the mirror image: we moved it, they deleted it, so our move is the version
+# left in the tree and the stages are ours and the base
+mergecase "$work/rename-mine-delete-theirs"
+printf 'one\ntwo\nthree\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp rm moved.txt >/dev/null 2>&1
+gp commit -m "side deletes it" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+gp mv moved.txt ours.txt >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "main renames it" >/dev/null 2>&1
+mergeout rename-mine-delete-theirs gp merge side
+if [ "$mrc" = 1 ]; then
+	ok "our move onto their deletion is not settled either"
+else
+	bad "our move onto their deletion is not settled either" \
+		"exit $mrc: $(cat "$work/rename-mine-delete-theirs.out")"
+fi
+expect "the mirror conflict names ours as the move" \
+	"CONFLICT (rename/delete): moved.txt renamed to ours.txt in HEAD, but deleted in side." \
+	cat "$work/rename-mine-delete-theirs.out"
+stages=$(gp ls-files -s ours.txt | awk '{print $3}' | tr -d '\r' | sort | tr '\n' ',')
+if [ "$stages" = "1,2," ]; then
+	ok "our new name holds the base and our version"
+else
+	bad "our new name holds the base and our version" "stages $stages"
+fi
+printf 'one\ntwo\nthree\n' > "$work/want-rename-ours"
+expect_same "the version left in the tree is ours" ours.txt "$work/want-rename-ours"
+
+# both sides moved it, to different names: neither name is the file, so the
+# old name comes back as a stage of its own and the two new names as theirs,
+# which is the DD/AU/UA that git prints and `status` has to agree with
+mergecase "$work/rename-two-ways"
+printf 'one\ntwo\nthree\n' > moved.txt
+gp add moved.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp mv moved.txt theirs.txt >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "side renames it to theirs.txt" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+gp mv moved.txt ours.txt >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "main renames it to ours.txt" >/dev/null 2>&1
+mergeout rename-two-ways gp merge side
+if [ "$mrc" = 1 ]; then
+	ok "two names for one file are not settled"
+else
+	bad "two names for one file are not settled" \
+		"exit $mrc: $(cat "$work/rename-two-ways.out")"
+fi
+expect "the conflict is a rename/rename" "CONFLICT (rename/rename)" \
+	cat "$work/rename-two-ways.out"
+stages=""
+for p in moved.txt ours.txt theirs.txt; do
+	stages="$stages$(gp ls-files -s "$p" | awk '{print $3}' | tr -d '\r' | tr '\n' ','):"
+done
+if [ "$stages" = "1,:2,:3,:" ]; then
+	ok "each name holds the one version it stands for"
+else
+	bad "each name holds the one version it stands for" "stages $stages"
+fi
+short=$(gp status --short | tr -d '\r' | sort | tr '\n' '|')
+if [ "$short" = "AU ours.txt|DD moved.txt|UA theirs.txt|" ]; then
+	ok "status names the two names and the deletion, as git does"
+else
+	bad "status names the two names and the deletion, as git does" "got [$short]"
+fi
+printf 'one\ntwo\nthree\n' > "$work/want-rename-theirs-copy"
+expect_same "their version is left in the tree" theirs.txt "$work/want-rename-theirs-copy"
+
+# a deletion beside an unrelated addition is not a move: the two files share
+# a line, which is under the threshold for reading them as one file that
+# moved, and reading them as a move would invent a conflict here
+mergecase "$work/not-a-rename"
+printf 'alpha\nbeta\ngamma\n' > gone.txt
+printf 'keep\n' > keep.txt
+gp add gone.txt keep.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp switch -c side >/dev/null 2>&1
+gp rm gone.txt >/dev/null 2>&1
+gp commit -m "side deletes gone.txt" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'alpha\nnine\nten\n' > fresh.txt
+gp add fresh.txt >/dev/null 2>&1
+gp commit -m "main adds an unrelated file" >/dev/null 2>&1
+mergeout not-a-rename gp merge side
+if [ "$mrc" = 0 ]; then
+	ok "an unrelated addition is not read as a move"
+else
+	bad "an unrelated addition is not read as a move" \
+		"exit $mrc: $(cat "$work/not-a-rename.out")"
+fi
+if grep -q "Renamed" "$work/not-a-rename.out"; then
+	bad "nothing is reported as having moved" "$(cat "$work/not-a-rename.out")"
+else
+	ok "nothing is reported as having moved"
+fi
+expect_absent "the deleted file stays deleted" gone.txt
+printf 'alpha\nnine\nten\n' > "$work/want-fresh"
+expect_same "the added file arrives whole" fresh.txt "$work/want-fresh"
+
+# ------------------------------------------------------------------
 say "writing the commit message in an editor"
 
 # Neither -m nor -F, so git falls back on an editor: the checks below write

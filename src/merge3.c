@@ -378,6 +378,61 @@ static void flags_changes(const u8 *bflags, size_t bn, const u8 *sflags,
 }
 
 /* ------------------------------------------------------------------ */
+/* how much of one text the other still has                            */
+
+/*
+ * A percentage: the lines the two have in common, over the lines there are
+ * between them, so an unchanged file is 100 and a file with no line left of
+ * the other is 0.  Two empty files are each other's whole text.
+ *
+ * This is what tells a file that was moved and edited from a file that was
+ * deleted beside an unrelated one.  git scores the same judgement from the
+ * bytes its delta copied rather than from the lines its diff matched, which is
+ * finer -- a one-line file that was rewritten has no line in common and scores
+ * 0 here however much of it survived -- but it is the same question asked of
+ * the same two texts, and the same 50% line between "the same file" and "a
+ * different one".
+ */
+int merge3_similarity(const struct buf *a, const struct buf *b)
+{
+	struct line *al = NULL, *bl = NULL;
+	struct change_list cl = { NULL, 0, 0 };
+	struct idmap m;
+	u32 *aid, *bid;
+	u8 *afoo, *bfoo;
+	size_t an, bn, changed = 0, common, i;
+
+	an = split_lines(a->b, a->len, &al);
+	bn = split_lines(b->b, b->len, &bl);
+	if (!an && !bn)
+		return 100;
+
+	idmap_init(&m);
+	aid = to_ids(&m, al, an);
+	bid = to_ids(&m, bl, bn);
+	afoo = xcalloc(an ? an : 1, 1);
+	bfoo = xcalloc(bn ? bn : 1, 1);
+	diff_flags(aid, an, bid, bn, afoo, bfoo);
+	flags_changes(afoo, an, bfoo, bn, &cl);
+
+	/* every change replaces base lines with side lines, so what one
+	 * description leaves behind is what the other does */
+	for (i = 0; i < cl.n; i++)
+		changed += cl.v[i].b_len;
+	common = an - changed;
+
+	free(afoo);
+	free(bfoo);
+	free(aid);
+	free(bid);
+	free(al);
+	free(bl);
+	idmap_release(&m);
+	change_list_release(&cl);
+	return (int)((200 * (unsigned long)common) / (an + bn));
+}
+
+/* ------------------------------------------------------------------ */
 /* the merge                                                           */
 
 static void emit_lines(struct buf *out, const struct line *v,

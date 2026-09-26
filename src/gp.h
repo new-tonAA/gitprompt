@@ -479,6 +479,13 @@ int merge3(const struct buf *base, const struct buf *ours,
 	   const struct buf *theirs, enum merge_favor favor,
 	   const char *label_ours, const char *label_theirs, struct buf *out);
 
+/*
+ * How much of one text the other still has, as a percentage of the lines
+ * between them: 100 for identical, 0 for nothing in common.  This is how a
+ * moved file that was also edited is told from an unrelated add.
+ */
+int merge3_similarity(const struct buf *a, const struct buf *b);
+
 /* ------------------------------------------------------------------ */
 /* the working tree                                                    */
 
@@ -732,6 +739,34 @@ void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
 /* check a tree out onto the work tree; both used by checkout and merge */
 void write_blob_to_worktree(struct repo *r, const char *relpath, const oid_t *oid);
 void restore_all_from_index(struct repo *r, const struct index_state *ist);
+
+/* ------------------------------------------------------------------ */
+/* renames (rename.c)                                                  */
+
+/*
+ * A path one side lost and a path it gained, holding the same object.  Both
+ * strings are owned by the list and freed with it.
+ */
+struct rename_pair {
+	char *from;
+	char *to;
+};
+
+struct rename_list {
+	struct rename_pair *e;
+	size_t nr, alloc;
+};
+
+/*
+ * Every rename that turned `base` into `side`, in two passes: paths holding
+ * the same object, then paths whose texts are still at least half the same.
+ * The objects are read through `odb`, so a store of packed files works.
+ */
+void renames_between(struct odb *odb, struct index_state *base,
+		     struct index_state *side, struct rename_list *out);
+const struct rename_pair *rename_by_from(const struct rename_list *rl,
+					 const char *from);
+void rename_list_release(struct rename_list *rl);
 
 /*
  * An unfinished merge: MERGE_HEAD points at the revision being merged in,
