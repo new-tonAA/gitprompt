@@ -40,6 +40,12 @@ skip() { skipped=$((skipped + 1)); printf 'skip %s\n' "$1"; }
 
 gp() { "$GP" "$@"; }
 
+# The developer's editor must not reach these checks.  `commit` falls back on
+# one when no message is given, so an inherited GIT_EDITOR would decide what a
+# bare commit does -- and whose machine the suite ran on would change what it
+# verified.  The editor section below sets these for the checks that want one.
+unset GIT_EDITOR VISUAL EDITOR
+
 # expect <description> <substring> <command...>
 expect() {
 	desc=$1; want=$2; shift 2
@@ -671,6 +677,166 @@ expect_status "reset --hard succeeds" 0 gp reset --hard HEAD~1
 expect "HEAD moved back one commit" "a commit only on other" gp log --oneline
 expect_status "check-ref-format accepts a good name" 0 gp check-ref-format refs/heads/good
 expect_status "check-ref-format rejects a bad name" 1 gp check-ref-format "refs/heads/bad name"
+
+# ------------------------------------------------------------------
+say "writing the commit message in an editor"
+
+# Neither -m nor -F, so git falls back on an editor: the checks below write
+# one and let it decide the message.  The editors are run as `sh <script>`
+# rather than as executables, because that is the same command whether
+# system() reaches a shell (Unix) or cmd.exe (Windows), and so whether the
+# script has to carry the executable bit stops mattering.
+editcase() {   # editcase <directory>: a repository with one staged change
+	rm -rf "$1"
+	mkdir -p "$1" || exit 2
+	cd "$1" || exit 2
+	gp init . >/dev/null 2>&1
+	gp config user.name "Editor Test" >/dev/null 2>&1
+	gp config user.email editor@example.com >/dev/null 2>&1
+	printf 'first\n' > e.txt
+	gp add e.txt >/dev/null 2>&1
+	gp commit -m "the base" >/dev/null 2>&1
+	printf 'second\n' >> e.txt
+	gp add e.txt >/dev/null 2>&1
+}
+editor_writes() {   # editor_writes <script> <text>: replaces the message
+	cat > "$1" <<EOF
+#!/bin/sh
+printf '%s' '$2' > "\$1"
+EOF
+}
+editor_appends() {   # editor_appends <script> <text>: adds a line below it
+	cat > "$1" <<EOF
+#!/bin/sh
+printf '%s\n' '$2' >> "\$1"
+EOF
+}
+expect_message() {   # expect_message <description> <expected message>
+	got=$(gp cat-file -p HEAD | sed '1,/^$/d')
+	if [ "$got" = "$2" ]; then
+		ok "$1"
+	else
+		bad "$1" "wanted [$2] got [$got]"
+	fi
+}
+
+editcase "$work/commit-editor"
+editor_writes "$work/ed-msg.sh" 'written by the editor
+'
+expect_status "an editor supplies the message" 0 \
+	env GIT_EDITOR="sh $work/ed-msg.sh" "$GP" commit
+expect_message "the commit carries what the editor wrote" "written by the editor"
+expect_file "the editor was given a file to write into" .gitprompt/COMMIT_EDITMSG
+
+# the file the editor is handed explains itself, and the explanation is not
+# part of the message -- `#` lines are comments, and blank runs collapse
+editcase "$work/commit-editor-comments"
+editor_writes "$work/ed-comments.sh" 'subject line
+
+# a comment the editor left behind
+body under a comment
+
+
+'
+expect_status "comments in the edited message are accepted" 0 \
+	env GIT_EDITOR="sh $work/ed-comments.sh" "$GP" commit
+expect_message "the comment and the blank runs are stripped" \
+	"subject line
+
+body under a comment"
+
+editcase "$work/commit-editor-empty"
+editor_writes "$work/ed-empty.sh" '# nothing but a comment
+'
+expect_status "an emptied message aborts the commit" 1 \
+	env GIT_EDITOR="sh $work/ed-empty.sh" "$GP" commit
+expect "the refusal says why" "Aborting commit due to empty commit message." \
+	env GIT_EDITOR="sh $work/ed-empty.sh" "$GP" commit
+expect_message "nothing was committed" "the base"
+
+editcase "$work/commit-editor-fails"
+expect_status "an editor that fails stops the commit" 1 \
+	env GIT_EDITOR='sh -c "exit 1"' "$GP" commit
+expect "the refusal blames the editor" "the editor exited with an error" \
+	env GIT_EDITOR='sh -c "exit 1"' "$GP" commit
+expect_message "a failed editor committed nothing" "the base"
+
+editcase "$work/commit-editor-none"
+# clearing it locally as well, so a core.editor in this machine's global
+# config cannot decide what the check below sees
+gp config core.editor "" >/dev/null 2>&1
+expect_status "with no editor, commit refuses" 1 "$GP" commit
+expect "the refusal names the ways to set one" 'set GIT_EDITOR or EDITOR' \
+	"$GP" commit
+expect_status "a message on the command line needs no editor" 0 \
+	"$GP" commit -m "typed on the command line"
+expect_message "and that is the message" "typed on the command line"
+gp commit -m "another" >/dev/null 2>&1
+expect_status "--no-edit has nothing to reach for" 1 "$GP" commit --no-edit
+expect "the refusal names the ways to give a message" 'pass -m "..." or -F <file>' \
+	"$GP" commit --no-edit
+
+editcase "$work/commit-editor-amend"
+editor_writes "$work/ed-amend.sh" 'a new message
+'
+expect_status "an amend with no message opens the editor" 0 \
+	env GIT_EDITOR="sh $work/ed-amend.sh" "$GP" commit --amend
+expect_message "the amendment replaced the message" "a new message"
+expect_status "--amend --no-edit keeps the old message" 0 \
+	"$GP" commit --amend --no-edit
+expect_message "the old message is what came back" "a new message"
+expect_status "-e opens the editor even with -m" 0 \
+	env GIT_EDITOR="sh $work/ed-amend.sh" "$GP" commit --amend -e -m "ignored"
+expect_message "the editor's message won" "a new message"
+
+editcase "$work/commit-editor-priority"
+editor_writes "$work/ed-git.sh" 'from GIT_EDITOR
+'
+editor_writes "$work/ed-editor.sh" 'from EDITOR
+'
+editor_writes "$work/ed-core.sh" 'from core.editor
+'
+expect_status "GIT_EDITOR is used when it is set" 0 \
+	env GIT_EDITOR="sh $work/ed-git.sh" EDITOR="sh $work/ed-editor.sh" "$GP" commit
+expect_message "GIT_EDITOR beats EDITOR" "from GIT_EDITOR"
+gp config core.editor "sh $work/ed-core.sh" >/dev/null 2>&1
+expect_status "core.editor is used" 0 \
+	env EDITOR="sh $work/ed-editor.sh" "$GP" commit --amend
+expect_message "core.editor beats EDITOR" "from core.editor"
+expect_status "core.editor is consulted before VISUAL too" 0 \
+	env VISUAL="sh $work/ed-editor.sh" "$GP" commit --amend
+expect_message "core.editor is still what ran" "from core.editor"
+
+# a merge is the case where there is already a message to start from, and the
+# editor the suite writes only appends -- so what comes out shows the file it
+# was handed began with the merge's message
+editcase "$work/commit-editor-merge"
+gp commit -m "our second" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+printf 'theirs\n' > z.txt
+gp add z.txt >/dev/null 2>&1
+gp commit -m "their commit" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+printf 'ours\n' > q.txt
+gp add q.txt >/dev/null 2>&1
+gp commit -m "our commit" >/dev/null 2>&1
+expect_status "a merge is prepared without committing" 0 gp merge --no-commit side
+expect "the merge state holds a message" "Merge side" cat .gitprompt/MERGE_MSG
+editor_appends "$work/ed-merge.sh" 'and a note about it'
+expect_status "commit concludes the prepared merge" 0 \
+	env GIT_EDITOR="sh $work/ed-merge.sh" "$GP" commit
+expect_message "the editor started from the merge's message" \
+	"Merge side
+and a note about it"
+nparents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$nparents" = 2 ]; then
+	ok "and it is still a merge commit"
+else
+	bad "and it is still a merge commit" "found $nparents parents"
+fi
+
+cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
 say "a local remote"

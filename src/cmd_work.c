@@ -758,14 +758,207 @@ int cmd_status(struct repo *r, int argc, char **argv)
 static int do_commit(struct repo *r, const char *message, int amend,
 		     int allow_empty, int quiet);
 
+/* ------------------------------------------------------------------ */
+/* the commit message editor                                           */
+
+/*
+ * The command to run as the editor.  First one set wins, as in git: GIT_EDITOR,
+ * then the repository's core.editor, then VISUAL, then EDITOR.  The string is a
+ * shell command line, not a program name, so that "code --wait" works.
+ */
+static char *editor_command(struct repo *r)
+{
+	char *v = NULL;
+
+	v = getenv("GIT_EDITOR");
+	if (v && *v)
+		return xstrdup(v);
+	if (repo_config_get(r, "core.editor", &v) == 0 && v && *v)
+		return v;
+	free(v);
+	v = getenv("VISUAL");
+	if (v && *v)
+		return xstrdup(v);
+	v = getenv("EDITOR");
+	if (v && *v)
+		return xstrdup(v);
+	return NULL;
+}
+
+/*
+ * The editor is run through the shell, so the path goes in quoted.  Anything
+ * that could break out of those quotes is refused rather than escaped, as the
+ * transports do with the same kind of argument.
+ */
+static int run_editor(const char *editor, const char *path)
+{
+	struct buf cmd = BUF_INIT;
+	char *p;
+	int rc;
+
+	if (strpbrk(path, "\"\r\n%")) {
+		gp_error("commit: refusing to hand '%s' to the shell", path);
+		return -1;
+	}
+	p = xstrdup(path);
+#ifdef _WIN32
+	{
+		char *q;
+		for (q = p; *q; q++)
+			if (*q == '\\')
+				*q = '/';
+	}
+#endif
+	buf_addf(&cmd, "%s \"%s\"", editor, p);
+	free(p);
+	rc = system(buf_cstr(&cmd));
+	buf_release(&cmd);
+	return rc == 0 ? 0 : -1;
+}
+
+/*
+ * git's rule for a message that came back from an editor: a line whose first
+ * character is '#' is a comment and is dropped whole, trailing whitespace goes,
+ * a run of blank lines becomes one, and the ends are trimmed.  The carriage
+ * return matters: an editor on Windows saves the file with CRLF, and a message
+ * with a '\r' at the end of every line would otherwise be committed as written.
+ */
+static void strip_message(struct buf *b)
+{
+	struct buf out = BUF_INIT;
+	size_t i = 0;
+	int pending_blank = 0;
+
+	while (i < b->len) {
+		size_t start = i, end;
+		int blank;
+
+		while (i < b->len && b->b[i] != '\n')
+			i++;
+		end = i;
+		if (i < b->len)
+			i++;
+		while (end > start &&
+		       (b->b[end - 1] == '\r' || b->b[end - 1] == ' ' ||
+			b->b[end - 1] == '\t'))
+			end--;
+		blank = end == start;
+		if (blank) {
+			/* a blank only means something between two real lines */
+			if (out.len)
+				pending_blank = 1;
+			continue;
+		}
+		if (b->b[start] == '#')
+			continue;
+		if (pending_blank) {
+			buf_addch(&out, '\n');
+			pending_blank = 0;
+		}
+		buf_add(&out, b->b + start, end - start);
+		buf_addch(&out, '\n');
+	}
+	buf_reset(b);
+	buf_add(b, out.b, out.len);
+	buf_release(&out);
+}
+
+/*
+ * Put the message through an editor.  `msg` is what the buffer starts with --
+ * a merge's own message, or the one --amend is replacing -- and comes back as
+ * what the editor left behind, stripped.  Returns -1 when the commit must not
+ * go ahead, having said why.
+ */
+static int edit_message(struct repo *r, struct buf *msg)
+{
+	struct buf file = BUF_INIT;
+	char *path = repo_git_path(r, "COMMIT_EDITMSG");
+	char *editor = editor_command(r);
+	char *branch;
+	int rc = -1;
+
+	if (!editor) {
+		gp_error("commit: no editor is configured\n"
+			 "hint: set GIT_EDITOR or EDITOR, or pass -m \"...\" to "
+			 "write the message on the command line");
+		goto out;
+	}
+
+	buf_add(&file, msg->b, msg->len);
+	if (file.len && file.b[file.len - 1] != '\n')
+		buf_addch(&file, '\n');
+	buf_addstr(&file, "# Please enter the commit message for your changes. "
+		   "Lines starting\n# with '#' will be ignored, and an empty "
+		   "message aborts the commit.\n#\n");
+	branch = refs_head_target(&r->refs);
+	if (branch) {
+		const char *name = branch;
+		if (!strncmp(name, "refs/heads/", 11))
+			name += 11;
+		buf_addf(&file, "# On branch %s\n", name);
+	} else {
+		buf_addstr(&file, "# Not currently on any branch.\n");
+	}
+	free(branch);
+
+	if (write_file(path, file.b, file.len) < 0) {
+		gp_error("commit: cannot write %s", path);
+		goto out;
+	}
+	if (run_editor(editor, path) < 0) {
+		gp_error("commit: the editor exited with an error; nothing was "
+			 "committed");
+		goto out;
+	}
+	if (read_file(path, msg) < 0) {
+		gp_error("commit: cannot read back %s", path);
+		goto out;
+	}
+	strip_message(msg);
+	if (!msg->len) {
+		gp_error("Aborting commit due to empty commit message.");
+		goto out;
+	}
+	rc = 0;
+out:
+	free(editor);
+	free(path);
+	buf_release(&file);
+	return rc;
+}
+
+/*
+ * The message a commit already has: a merge's, so that a bare `commit` can
+ * conclude one, or the message --amend is about to replace.
+ */
+static int existing_message(struct repo *r, int amend, struct buf *out)
+{
+	oid_t head;
+	struct commit c = COMMIT_INIT;
+
+	if (merge_message(r, out))
+		return 0;
+	if (!amend)
+		return -1;
+	if (refs_head(&r->refs, &head) < 0)
+		return -1;
+	read_commit(r, &head, &c);
+	if (c.message)
+		buf_addstr(out, c.message);
+	commit_release(&c);
+	return out->len ? 0 : -1;
+}
+
 int cmd_commit(struct repo *r, int argc, char **argv)
 {
 	static const char *const takes[] = { "-m", "-F", "--author" };
 	struct opts o;
 	struct buf msg;
 	const char *m;
+	int amend, edit = 0;
 
 	opts_init(&o, argc, argv, takes, 3);
+	amend = opts_flag(&o, "--amend");
 
 	if (opts_flag(&o, "-a") || opts_flag(&o, "--all")) {
 		struct index_state ist;
@@ -795,18 +988,32 @@ int cmd_commit(struct repo *r, int argc, char **argv)
 	} else if (opts_value(&o, "-F")) {
 		if (read_file(opts_value(&o, "-F"), &msg) < 0)
 			gp_die("commit: cannot read %s", opts_value(&o, "-F"));
-	} else if (!merge_message(r, &msg)) {
-		/* no editor here; absent a merge's own message, one is required */
+	} else if (opts_flag(&o, "--no-edit")) {
+		/* say the same thing again: a merge's message, or the old one */
+		if (existing_message(r, amend, &msg) < 0) {
+			buf_release(&msg);
+			gp_error("commit: no message given\nhint: pass -m \"...\" "
+				 "or -F <file>, or leave --no-edit off to write "
+				 "the message in an editor");
+			return 1;
+		}
+	} else {
+		/* start from whatever the commit already has, if anything */
+		existing_message(r, amend, &msg);
+		edit = 1;
+	}
+	/* -e asks for the editor even when the command line carried a message */
+	if (opts_flag(&o, "-e") || opts_flag(&o, "--edit"))
+		edit = 1;
+	if (edit && edit_message(r, &msg) < 0) {
 		buf_release(&msg);
-		gp_error("commit: no message given\nhint: pass -m \"...\" "
-			 "to write the message on the command line");
 		return 1;
 	}
 	if (msg.len && msg.b[msg.len - 1] != '\n')
 		buf_addch(&msg, '\n');
 
 	{
-		int rc = do_commit(r, buf_cstr(&msg), opts_flag(&o, "--amend"),
+		int rc = do_commit(r, buf_cstr(&msg), amend,
 				   opts_flag(&o, "--allow-empty"),
 				   opts_flag(&o, "-q"));
 		buf_release(&msg);

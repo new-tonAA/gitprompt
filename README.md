@@ -212,8 +212,6 @@ one that says no:
   Use the delegated transports above.
 - **Rename detection.** A rename is a delete and an add. Merging a path that
   one side renamed and the other side changed does not follow the rename.
-- **An editor.** `commit` needs `-m` or `-F`, except when concluding a merge,
-  where `MERGE_MSG` supplies the message.
 - **Unknown options are rejected** with `unknown option '--bogus'` and exit 1.
   The list of accepted options is program-wide rather than per-command, so an
   option belonging to a *different* command is accepted and ignored. Catching
@@ -226,7 +224,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **281 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **315 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, local remotes, packed object stores, and git interoperability —
@@ -234,6 +232,18 @@ the last being the section that matters most, since a gitprompt repository is
 meant to be an ordinary git repository. As part of it, `git verify-pack` checks
 the pack `gc` writes against git's own index, and `git ls-files` checks the
 index gitprompt wrote against git's own reader.
+
+A commit with no `-m` and no `-F` opens an editor, looked for the way git looks
+for one: `GIT_EDITOR`, then `core.editor`, then `VISUAL`, then `EDITOR`. The
+buffer is `COMMIT_EDITMSG`, it starts from the message the commit already has
+when there is one — a merge's, or the one `--amend` is replacing — and what the
+editor saves is stripped the way git strips it, so `#` lines are comments, blank
+runs collapse, and a message that comes back empty aborts the commit rather than
+recording a commit with no reason. `-e` asks for the editor after a `-m`,
+`--no-edit` takes the message the commit already has and stops if there is none.
+The suite hands `commit` editors it writes itself: one that replaces the buffer,
+one that appends to it, one that fails, and none at all, and asserts on the
+message that ends up in the commit rather than on the exit status.
 
 A merge conflict is where that claim is tested hardest, because a conflict is
 not only in the objects: it is in the index. gitprompt records one the way git

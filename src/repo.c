@@ -446,7 +446,7 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 	char *want_section, *want_sub, *want_name;
 	char *cur_section = NULL, *cur_sub = NULL;
 	size_t i;
-	int done = 0, insert_at = -1, section_found = 0;
+	int done = 0, insert_at = -1;
 
 	if (!path)
 		return -1;
@@ -458,12 +458,18 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 		char *section, *subsection;
 		if (parse_header(l.v[i], &section, &subsection) == 0) {
 			/*
-			 * A new header ends the previous section: if the key
-			 * was not found before it, it is not in the section,
-			 * so insert just above this header.
+			 * A header opens a new section, so the previous one
+			 * ended here.  If that was the section the key
+			 * belongs to and the key was not in it, the key goes
+			 * at the end of that section -- not at the end of the
+			 * file, which is where continuing to scan would put
+			 * it, under whatever section came last.
 			 */
-			if (section_found && insert_at < 0)
-				insert_at = (int)i;
+			if (insert_at >= 0) {
+				free(section);
+				free(subsection);
+				break;
+			}
 			free(cur_section);
 			free(cur_sub);
 			cur_section = section;
@@ -471,13 +477,11 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 			if (!stricmp_ascii(section, want_section) &&
 			    ((!want_sub && !subsection) ||
 			     (want_sub && subsection &&
-			      !stricmp_ascii(subsection, want_sub)))) {
-				section_found = 1;
+			      !stricmp_ascii(subsection, want_sub))))
 				insert_at = (int)i + 1;
-			}
 			continue;
 		}
-		if (!section_found || !cur_section)
+		if (insert_at < 0)
 			continue;
 		{
 			char *k, *v;
@@ -495,7 +499,7 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 			insert_at = (int)i + 1;
 		}
 	}
-	if (!done && section_found && insert_at >= 0) {
+	if (!done && insert_at >= 0) {
 		l.v = xrealloc(l.v, (l.nr + 1) * sizeof(char *));
 		memmove(l.v + insert_at + 1, l.v + insert_at,
 			(l.nr - (size_t)insert_at) * sizeof(char *));

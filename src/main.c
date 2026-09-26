@@ -51,17 +51,17 @@ static const char *const known_options[] = {
 	"-m", "-n", "-o", "-p", "-q", "-r", "-s", "-t", "-u", "-v", "-w",
 	"--abort", "--all", "--allow-empty", "--amend", "--author", "--bare",
 	"--batch", "--build-options", "--cached", "--create", "--delete",
-	"--depth", "--dir", "--dry-run", "--ff-only", "--force", "--format",
-	"--get", "--global", "--hard", "--help", "--initial-branch", "--json",
-	"--last", "--layout", "--list", "--list-sessions", "--max-count",
+	"--depth", "--dir", "--dry-run", "--edit", "--ff-only", "--force",
+	"--format", "--get", "--global", "--hard", "--help", "--initial-branch",
+	"--json", "--last", "--layout", "--list", "--list-sessions", "--max-count",
 	"--message", "--mixed", "--model",
-	"--move", "--name-only", "--no-commit", "--no-ff", "--no-stage", "--oneline",
+	"--move", "--name-only", "--no-commit", "--no-edit", "--no-ff",
+	"--no-stage", "--oneline",
 	"--output", "--parent", "--pathspec-from-file", "--port", "--prune",
 	"--quiet", "--session", "--set", "--set-upstream", "--short",
 	"--single-branch", "--soft", "--source", "--squash", "--stage", "--staged",
 	"--stat", "--stdin", "--strategy-option", "--strict", "--tags", "--title",
-	"--unset",
-	"--update", "--verbose", "--version",
+	"--unset", "--update", "--verbose", "--version",
 };
 
 static int option_is_known(const char *name)
@@ -206,7 +206,8 @@ const struct command commands[] = {
 	{ "mv",         cmd_mv,         "Move or rename a file, and update the index",
 	  "mv <source> <destination>" },
 	{ "commit",     cmd_commit,     "Record the staged changes",
-	  "commit [-m MSG] [-a] [--amend] [--allow-empty]" },
+	  "commit [-m MSG] [-F FILE] [-e] [--no-edit] [-a] [--amend]"
+	  " [--allow-empty]" },
 
 	/* reconstruct a project */
 	{ "replay",     cmd_replay,     "Reconstruct the prompt history as one document",
