@@ -169,6 +169,20 @@ expect_file "capture reads stdin" "prompts/0003-a-prompt-from-stdin.md"
 gp prompt -t parser -m "a tagged prompt" >/dev/null
 expect "the tag is recorded in the frontmatter" "parser" cat prompts/0004-a-tagged-prompt.md
 
+# outcome, both spellings: an id names a prompt anywhere in the history, and
+# --last is what the quick start uses -- the prompt just written, unnamed
+pid=$(sed -n 's/^id: //p' prompts/0004-a-tagged-prompt.md)
+expect "outcome attaches a note by id" "outcome recorded for $pid" \
+	gp outcome "$pid" "the parser rejects empty input"
+expect "the note lands in the frontmatter" \
+	"outcome: the parser rejects empty input" cat prompts/0004-a-tagged-prompt.md
+expect "outcome --last attaches to the newest prompt" "outcome recorded for " \
+	gp outcome --last "and the empty tree"
+expect "the --last note lands on the newest prompt" \
+	"outcome: and the empty tree" cat prompts/0004-a-tagged-prompt.md
+expect_status "outcome rejects an unknown id" 1 gp outcome p_nosuchid "text"
+expect_status "outcome needs text" 1 gp outcome "$pid"
+
 expect "session end closes it" "ended" gp session end
 expect_status "ending twice fails" 1 gp session end
 expect "the session file records the end" "ended_at: " cat "prompts/sessions/$sid.md"
@@ -206,6 +220,8 @@ expect "replay can render json" '"prompts"' gp replay --format=json
 expect "replay can render plain text" "write a tokenizer" gp replay --format=txt
 expect "stats summarises the repository" "prompt" gp stats
 expect "stats can emit json" "{" gp stats --json
+expect "replay can list the sessions instead" "$sid" gp replay --list-sessions
+expect "timeline takes a revision" "write a tokenizer first" gp timeline HEAD
 
 replay_out=$work/replay.md
 gp replay -o "$replay_out" >/dev/null 2>&1
@@ -428,6 +444,25 @@ if command -v git >/dev/null 2>&1; then
 	expect_status "git can walk our whole history" 0 \
 		git --git-dir="$gpdir" rev-list --all --quiet
 
+	# Ancestry suffixes, against git as the reference.  These were dead code
+	# until they were fixed: the suffix was searched for in the name *after*
+	# truncating it, so the search hit the NUL that the truncation had just
+	# written and every `HEAD~1` resolved to HEAD -- which would have made
+	# `reset --hard HEAD~1` a silent no-op.
+	for rev in 'HEAD^' 'HEAD~1' 'HEAD^0' 'HEAD~0'; do
+		ours=$(gp rev-parse "$rev" 2>/dev/null)
+		theirs=$(git --git-dir="$gpdir" rev-parse "$rev" 2>/dev/null)
+		if [ -n "$theirs" ] && [ "$ours" = "$theirs" ]; then
+			ok "rev-parse resolves $rev the way git does"
+		else
+			bad "rev-parse resolves $rev the way git does" \
+				"ours=$ours theirs=$theirs"
+		fi
+	done
+	expect_status "a suffix that walks past the root is refused" 128 \
+		gp rev-parse 'HEAD~99'
+	expect_status "junk after a suffix is refused" 128 gp rev-parse 'HEAD~1x'
+
 	# hashing must agree, or none of the above would mean anything
 	cd "$work" || exit 2
 	printf 'hash me\n' > h.txt
@@ -491,6 +526,42 @@ expect_status "serve reports honestly and fails" 1 gp serve
 expect "serve names the reason" "not implemented" gp serve
 expect_status "an unknown command fails" 1 gp nosuchcommand
 expect_status "a replay of an unknown ref fails" 128 gp replay nosuchref
+
+# ------------------------------------------------------------------
+say "a revision means that revision"
+
+# Its own repository, so nothing above depends on the extra commit.  The
+# property: `replay <ref>` is the history at that ref.  The work tree is
+# later than every ref, so folding it in -- which is right for a bare
+# `replay`, which asks what has been recorded -- would make the argument
+# mean nothing here, since the newest prompt is checked out in both cases.
+refrepo=$work/refrepo
+mkdir -p "$refrepo" || exit 2
+cd "$refrepo" || exit 2
+gp init . >/dev/null 2>&1
+gp prompt -m "the first prompt" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "first" >/dev/null 2>&1
+gp prompt -m "the second prompt" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "second" >/dev/null 2>&1
+
+n_all=$(gp replay | grep -c '^### ')
+n_ref=$(gp replay HEAD~1 | grep -c '^### ')
+if [ "$n_ref" = 1 ] && [ "$n_all" = 2 ]; then
+	ok "a replay of a revision stops at that revision"
+else
+	bad "a replay of a revision stops at that revision" \
+		"HEAD=$n_all HEAD~1=$n_ref"
+fi
+expect "timeline of a revision agrees with replay" "the first prompt" \
+	gp timeline HEAD~1
+n_tl=$(gp timeline HEAD~1 | grep -c '^  20')
+if [ "$n_tl" = 1 ]; then
+	ok "a timeline of a revision stops at that revision"
+else
+	bad "a timeline of a revision stops at that revision" "HEAD~1=$n_tl"
+fi
 
 # ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

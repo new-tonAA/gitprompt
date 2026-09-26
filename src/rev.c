@@ -121,11 +121,8 @@ static const char *apply_ancestry(struct repo *r, const oid_t *start,
 			while (*p >= '0' && *p <= '9')
 				n = n * 10 + (*p++ - '0');
 		}
-		if (n == 0) {
-			if (op == '^')
-				continue;       /* ^0 peels to the commit itself */
-			return NULL;            /* ~0 is not a revision git accepts */
-		}
+		if (n == 0)
+			continue;       /* ^0 and ~0 both name the commit itself */
 		/*
 		 * ^N is "the Nth parent"; ~N is "N first parents".  Both end
 		 * up taking a parent n times, just from a different slot.
@@ -149,6 +146,8 @@ static const char *apply_ancestry(struct repo *r, const oid_t *start,
 			cur = next;
 		}
 	}
+	if (*p)
+		return NULL;            /* trailing junk: HEAD~1x is not a revision */
 	*out = cur;
 	return p;
 }
@@ -156,7 +155,7 @@ static const char *apply_ancestry(struct repo *r, const oid_t *start,
 int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 {
 	char *name;
-	const char *p;
+	const char *suffix;
 	oid_t base;
 	int rc = -1;
 
@@ -195,12 +194,18 @@ int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 		}
 	}
 
-	/* split off the ancestry suffix */
-	p = name;
+	/* Split off the ancestry suffix.  The suffix has to be remembered from
+	 * the original string, not from the truncated copy: truncating writes
+	 * the NUL that the suffix would have started at, so checking the
+	 * truncated name for a suffix always says "none" and `HEAD~1` would
+	 * quietly resolve to HEAD. */
+	suffix = NULL;
 	{
 		char *caret = strpbrk(name, "^~");
-		if (caret)
+		if (caret) {
+			suffix = rev + (caret - name);
 			*caret = '\0';
+		}
 	}
 
 	if (!strcmp(name, "") || !strcmp(name, "@")) {
@@ -223,9 +228,7 @@ int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 	}
 
 	rc = 0;
-	if (p && *p) {
-		/* p points into name, which we truncated at the suffix */
-		char *suffix = xstrdup(rev + (p - name));
+	if (suffix) {
 		oid_t after;
 		if (apply_ancestry(r, &base, suffix, &after))
 			*out = after;
@@ -233,7 +236,6 @@ int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 			gp_error("bad revision: %s", rev);
 			rc = -1;
 		}
-		free(suffix);
 	} else {
 		*out = base;
 	}

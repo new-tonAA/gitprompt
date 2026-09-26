@@ -295,8 +295,12 @@ static void scan_all(struct repo *r, const oid_t *only_tree,
 		oid_array_clear(&t.seen);
 	}
 
-	/* the work tree last, so an uncommitted edit is what is reported */
-	if (r->root)
+	/* The work tree last, so an uncommitted edit is what is reported -- but
+	 * only when no revision was named.  `replay <ref>` asks what the
+	 * history looked like at that point, and uncommitted files are later
+	 * than every ref, so folding them in would make the argument mean
+	 * nothing in any working tree that has one. */
+	if (!only_tree && r->root)
 		walk_worktree(r, scan_worktree_file, &c);
 }
 

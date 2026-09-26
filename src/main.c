@@ -48,7 +48,8 @@ static const char *const known_options[] = {
 	"--batch", "--build-options", "--cached", "--create", "--delete",
 	"--depth", "--dir", "--dry-run", "--ff-only", "--force", "--format",
 	"--get", "--global", "--hard", "--help", "--initial-branch", "--json",
-	"--layout", "--list", "--max-count", "--message", "--mixed", "--model",
+	"--last", "--layout", "--list", "--list-sessions", "--max-count",
+	"--message", "--mixed", "--model",
 	"--move", "--name-only", "--no-commit", "--no-stage", "--oneline",
 	"--output", "--parent", "--pathspec-from-file", "--port", "--prune",
 	"--quiet", "--session", "--set", "--set-upstream", "--short",
@@ -191,7 +192,7 @@ const struct command commands[] = {
 	{ "capture",    cmd_capture,    "Record a prompt read from stdin",
 	  "capture [--model M] [-t TAG]..." },
 	{ "outcome",    cmd_outcome,    "Attach a note about what a prompt produced",
-	  "outcome <prompt-id> <text>" },
+	  "outcome <prompt-id> <text>\n   outcome --last <text>" },
 	{ "add",        cmd_add,        "Add file contents to the index",
 	  "add [-A] [-u] [-n] [--] <path>..." },
 	{ "commit",     cmd_commit,     "Record the staged changes",
@@ -199,7 +200,8 @@ const struct command commands[] = {
 
 	/* reconstruct a project */
 	{ "replay",     cmd_replay,     "Reconstruct the prompt history as one document",
-	  "replay [<ref>] [--format=md|json|txt] [-o FILE] [--layout=DIR] [--stat]" },
+	  "replay [<ref>] [--format=md|json|txt] [-o FILE] [--layout=DIR] [--stat]\n"
+	  "   replay <ref> --list-sessions" },
 	{ "timeline",   cmd_timeline,   "Show the history as a compact list",
 	  "timeline [<ref>]" },
 	{ "log-prompt", cmd_log_prompt, "List prompts without commit noise",

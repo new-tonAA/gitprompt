@@ -225,12 +225,17 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **176 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **193 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, local remotes, and git interoperability — the last being the
 section that matters most, since a gitprompt repository is meant to be an
 ordinary git repository.
+
+The suite runs offline, so it covers the local transport and leaves the carrier
+transports to git. `push`, `fetch`, `pull` and `clone` against an `https://`
+remote have been exercised by hand against a repository on GitHub; anything
+added there is worth running the same way before it is trusted.
 
 ```console
 $ make test

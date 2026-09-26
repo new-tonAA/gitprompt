@@ -294,29 +294,77 @@ static int find_prompt_path(struct repo *r, const char *id, char **out)
 	return found;
 }
 
+/*
+ * `--last` means the prompt with the highest sequence number, so the outcome
+ * goes to what was just recorded without retyping its id.  The list is
+ * scanned rather than taken as already ordered, because collect_prompts
+ * appends uncommitted work tree files after the committed ones and those two
+ * orders are not the same.
+ */
+static int find_last_prompt(struct repo *r, char **out_path, char **out_id)
+{
+	struct prompt_list pl = PROMPT_LIST_INIT;
+	size_t i, best = 0;
+	int found = -1;
+
+	collect_prompts(r, &pl);
+	for (i = 0; i < pl.nr; i++) {
+		if (!pl.e[i].prompt->path || !pl.e[i].prompt->id)
+			continue;
+		if (found < 0 || pl.e[i].prompt->seq >= pl.e[best].prompt->seq) {
+			best = i;
+			found = 0;
+		}
+	}
+	if (found == 0) {
+		*out_path = xstrdup(pl.e[best].path);
+		*out_id = xstrdup(pl.e[best].prompt->id);
+	}
+	prompt_list_release(&pl);
+	return found;
+}
+
 int cmd_outcome(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	struct prompt p;
 	struct buf b, text;
 	char *path = NULL;
+	char *id = NULL;
+	int last, first_text;
 
 	opts_init(&o, argc, argv, NULL, 0);
-	if (!opts_arg(&o, 0) || !opts_arg(&o, 1)) {
-		gp_error("outcome: expected <prompt-id> <text>");
-		return 1;
-	}
+	last = opts_flag(&o, "--last");
 
-	if (find_prompt_path(r, opts_arg(&o, 0), &path) < 0) {
-		gp_error("outcome: no prompt with id %s", opts_arg(&o, 0));
-		return 1;
+	if (last) {
+		if (!o.nargs) {
+			gp_error("outcome: expected --last <text>");
+			return 1;
+		}
+		if (find_last_prompt(r, &path, &id) < 0) {
+			gp_error("outcome: no prompt recorded yet");
+			return 1;
+		}
+		first_text = 0;
+	} else {
+		if (!opts_arg(&o, 0) || !opts_arg(&o, 1)) {
+			gp_error("outcome: expected <prompt-id> <text>");
+			return 1;
+		}
+		if (find_prompt_path(r, opts_arg(&o, 0), &path) < 0) {
+			gp_error("outcome: no prompt with id %s", opts_arg(&o, 0));
+			return 1;
+		}
+		id = xstrdup(opts_arg(&o, 0));
+		first_text = 1;
 	}
 
 	buf_init(&text);
 	{
 		int i;
-		for (i = 1; i < o.nargs; i++)
-			buf_addf(&text, "%s%s", i > 1 ? " " : "", o.args[i]);
+		for (i = first_text; i < o.nargs; i++)
+			buf_addf(&text, "%s%s", i > first_text ? " " : "",
+				 o.args[i]);
 	}
 
 	memset(&p, 0, sizeof p);
@@ -345,15 +393,17 @@ int cmd_outcome(struct repo *r, int argc, char **argv)
 		buf_release(&b);
 		buf_release(&text);
 		free(path);
+		free(id);
 		return 1;
 	}
 	stage_worktree_path(r, path);
-	printf("outcome recorded for %s\n", opts_arg(&o, 0));
+	printf("outcome recorded for %s\n", id);
 
 	prompt_release(&p);
 	buf_release(&b);
 	buf_release(&text);
 	free(path);
+	free(id);
 	return 0;
 }
 
@@ -487,16 +537,15 @@ static void load_groups(struct repo *r, struct prompt_list *pl,
 	group_by_session(r, pl, sg);
 }
 
-static int session_list(struct repo *r)
+/* one line per session; `session list` and `replay --list-sessions` both
+ * print this, so the two never drift apart */
+static void print_session_groups(struct repo *r, const struct session_groups *sg)
 {
-	struct prompt_list pl;
-	struct session_groups sg;
 	size_t i;
 	char *cur = repo_current_session(r);
 
-	load_groups(r, &pl, &sg);
-	for (i = 0; i < sg.nr; i++) {
-		const struct session_group *g = &sg.g[i];
+	for (i = 0; i < sg->nr; i++) {
+		const struct session_group *g = &sg->g[i];
 		if (g->session) {
 			printf("%s%s  %-32s %s  %lu prompt(s)\n",
 			       cur && !strcmp(cur, g->session->id) ? "* " : "  ",
@@ -510,10 +559,18 @@ static int session_list(struct repo *r)
 			       (unsigned long)g->prompts.nr);
 		}
 	}
-	if (!sg.nr)
+	if (!sg->nr)
 		printf("no sessions recorded yet\n");
-
 	free(cur);
+}
+
+static int session_list(struct repo *r)
+{
+	struct prompt_list pl;
+	struct session_groups sg;
+
+	load_groups(r, &pl, &sg);
+	print_session_groups(r, &sg);
 	session_groups_release(&sg);
 	prompt_list_release(&pl);
 	return 0;
@@ -649,6 +706,14 @@ int cmd_replay(struct repo *r, int argc, char **argv)
 		load_groups(r, &pl, &sg);
 	}
 
+	/* the listing stands in for the document, so it prints and stops */
+	if (opts_flag(&o, "--list-sessions")) {
+		print_session_groups(r, &sg);
+		session_groups_release(&sg);
+		prompt_list_release(&pl);
+		return 0;
+	}
+
 	buf_init(&out);
 	if (!strcmp(fmt, "md") || !strcmp(fmt, "markdown")) {
 		replay_markdown(r, &sg, &out, stat_only);
@@ -695,7 +760,15 @@ int cmd_timeline(struct repo *r, int argc, char **argv)
 	size_t i, j;
 
 	opts_init(&o, argc, argv, NULL, 0);
-	load_groups(r, &pl, &sg);
+	/* an optional ref, as replay has: the history as it stood then */
+	if (o.nargs > 0) {
+		memset(&pl, 0, sizeof pl);
+		memset(&sg, 0, sizeof sg);
+		collect_prompts_from_ref(r, o.args[0], &pl);
+		group_by_session(r, &pl, &sg);
+	} else {
+		load_groups(r, &pl, &sg);
+	}
 
 	for (i = 0; i < sg.nr; i++) {
 		const struct session_group *g = &sg.g[i];

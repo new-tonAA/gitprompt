@@ -171,14 +171,41 @@ static const char *url_without_file_scheme(const char *url)
 
 #include <process.h>
 
-/* quote one argument for cmd.exe; refuse anything that could break out */
+/*
+ * Quote one argument for cmd.exe; refuse anything that could break out.
+ *
+ * Backslashes are path separators on Windows and cmd.exe does not treat them
+ * as escapes, so they are normalised to forward slashes, which git and Windows
+ * both accept.  That is not cosmetic: without it every delegated transport
+ * fails on any Windows checkout, because --git-dir is an absolute path with
+ * backslashes in it.  It also removes the "\\\"" sequence cmd's quoting is
+ * known to mishandle.  What is left -- a quote, a percent sign, a newline --
+ * is refused rather than escaped, since a path containing one of those is
+ * rare enough that saying no beats guessing.
+ */
 static char *quote_arg(const char *s)
 {
-	if (strpbrk(s, "\"\r\n\\%")) {
+	char *slashed;
+	char *q;
+	char *p;
+
+#ifdef _WIN32
+	slashed = xstrdup(s);
+	for (p = slashed; *p; p++)
+		if (*p == '\\')
+			*p = '/';
+#else
+	slashed = xstrdup(s);
+#endif
+
+	if (strpbrk(slashed, "\"\r\n%")) {
 		gp_error("refusing to pass '%s' to the shell", s);
+		free(slashed);
 		return NULL;
 	}
-	return xstrfmt("\"%s\"", s);
+	q = xstrfmt("\"%s\"", slashed);
+	free(slashed);
+	return q;
 }
 
 static int run_git(const char *gpdir, const char *const *args, size_t nargs,
@@ -337,7 +364,7 @@ void remote_read_refs(struct repo *r, const char *url, const char *name,
 		const char *args[] = { "ls-remote", "--heads", "--tags", url };
 		const char *p;
 
-		if (run_git(NULL, args, 3, &out) != 0) {
+		if (run_git(NULL, args, 4, &out) != 0) {
 			gp_error("ls-remote failed for %s:\n%s", url,
 				 buf_cstr(&out));
 			buf_release(&out);
@@ -718,6 +745,17 @@ static void push_list_push(struct push_list *l, const char *src, const char *dst
 	l->nr++;
 }
 
+/*
+ * `push --tags` means every tag, which a wildcard refspec cannot express: a
+ * refspec carries one oid, and a wildcard names no single one, so the tags
+ * are enumerated instead.  Ignoring the flag was the alternative, and it is
+ * worse -- pushing a tag that never arrives looks like success.
+ */
+static void push_tag_cb(const char *name, const oid_t *oid, void *ud)
+{
+	push_list_push(ud, name, name, oid);
+}
+
 int cmd_push(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
@@ -796,6 +834,10 @@ int cmd_push(struct repo *r, int argc, char **argv)
 		free(src);
 		free(dst);
 	}
+
+	/* in addition to whatever was named, never instead of it */
+	if (opts_flag(&o, "--tags"))
+		refs_list(&r->refs, "refs/tags/", push_tag_cb, &refs);
 
 	/* carriers: git does the wire work over our object store */
 	if (!url_is_local(url) && !url_is_gp(url)) {
@@ -1076,10 +1118,14 @@ static char *remote_head_branch(struct repo *r, const char *url,
 	} else if (git_available()) {
 		struct buf out = BUF_INIT;
 		const char *args[] = { "ls-remote", "--symref", url, "HEAD" };
-		if (run_git(NULL, args, 3, &out) == 0) {
+		if (run_git(NULL, args, 4, &out) == 0) {
 			const char *p = strstr((const char *)out.b, "ref: refs/heads/");
 			if (p) {
-				const char *start = p + 17;
+				/* strlen("ref: refs/heads/"), and one past it is
+				 * the first character of the branch name; counting
+				 * to 17 here loses the leading letter and the
+				 * clone then checks nothing out. */
+				const char *start = p + strlen("ref: refs/heads/");
 				const char *end = start;
 				while (*end && *end != '\t' && *end != '\n')
 					end++;
@@ -1210,6 +1256,12 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 			commit_release(&c);
 			checkout_tree(&local, &tree, 1, 1);
 			free(head_ref);
+		} else {
+			/* the branch was named but never arrived: saying
+			 * "done." here would hand back an empty checkout */
+			gp_error("clone: fetched no %s, so there is nothing to "
+				 "check out", remote_ref);
+			rc = 1;
 		}
 		free(remote_ref);
 	} else {
@@ -1308,18 +1360,19 @@ int cmd_pull(struct repo *r, int argc, char **argv)
 		return 1;
 	}
 
-	/* merge it, the same way `merge` would */
+	/* merge it, the same way `merge` would.  A command takes its own
+	 * arguments only -- the dispatcher has already stripped the command
+	 * name -- so this is the id alone, not "merge" followed by the id. */
 	{
 		char hex[GP_SHA1_HEXSZ + 1];
-		char *argv2[2];
+		char *argv2[1];
 		oid_hex(&fetched, hex);
-		argv2[0] = (char *)"merge";
-		argv2[1] = hex;
+		argv2[0] = hex;
 		printf("From %s\n", url);
 		fetch_collect_release(&fc);
 		free(name);
 		free(url);
-		return cmd_merge(r, 2, argv2);
+		return cmd_merge(r, 1, argv2);
 	}
 }
 
