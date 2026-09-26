@@ -1,0 +1,12 @@
+zlib 1.3.1, statically linked into gitprompt.exe.
+
+Vendored rather than fetched at build time so the build needs nothing but a
+compiler.  Built from an unmodified zlib-1.3.1 source drop with:
+
+    mingw32-make -f win32/Makefile.gcc
+
+which produced libz.a.  zlib.h and zconf.h are copied verbatim from that
+drop; only libz.a is a build product.
+
+zlib is (c) Jean-loup Gailly and Mark Adler, under the zlib licence -- see
+the upstream distribution for the full text.

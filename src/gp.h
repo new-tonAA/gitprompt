@@ -1,0 +1,631 @@
+/*
+ * gp.h - common declarations for gitprompt.
+ *
+ * gitprompt versions prompts the way git versions code: same object model,
+ * same object ids, same command names and usage.  The pieces git needs that
+ * gitprompt also needs -- sha1, zlib-deflated loose objects, trees, commits,
+ * refs -- are reimplemented here rather than linked from git.
+ */
+#ifndef GP_H
+#define GP_H
+
+/*
+ * MinGW's default stdio is msvcrt's, which predates C99 and knows nothing
+ * of %lld or %zu.  This must be defined before any header is pulled in, so
+ * it lives above the includes and not in the Makefile where a stray -include
+ * could reorder things.
+ */
+#ifdef _WIN32
+#ifndef __USE_MINGW_ANSI_STDIO
+#define __USE_MINGW_ANSI_STDIO 1
+#endif
+#endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stddef.h>
+
+typedef unsigned char u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int64_t i64;
+
+#define GP_VERSION "0.1.0"
+
+/* ------------------------------------------------------------------ */
+/* errors                                                              */
+
+/*
+ * Every command returns 0 on success and a non-zero exit status on
+ * failure.  gp_die() reports and exits; gp_error() reports and lets the
+ * caller decide.
+ */
+void gp_die(const char *fmt, ...);
+void gp_error(const char *fmt, ...);
+void gp_warn(const char *fmt, ...);
+
+/* ------------------------------------------------------------------ */
+/* growable byte buffer                                                */
+
+struct buf {
+	u8 *b;
+	size_t len, cap;
+};
+
+#define BUF_INIT { NULL, 0, 0 }
+
+void buf_init(struct buf *b);
+void buf_release(struct buf *b);
+void buf_reset(struct buf *b);
+void buf_grow(struct buf *b, size_t need);
+void buf_add(struct buf *b, const void *data, size_t len);
+void buf_addstr(struct buf *b, const char *s);
+void buf_addch(struct buf *b, int c);
+void buf_addf(struct buf *b, const char *fmt, ...);
+void buf_insert(struct buf *b, size_t pos, const void *data, size_t len);
+void buf_splice(struct buf *b, size_t pos, size_t len);   /* remove */
+void buf_swap(struct buf *a, struct buf *b);
+
+/* NUL-terminated view; the buffer keeps its own copy of the terminator */
+char *buf_detach(struct buf *b, size_t *lenp);
+const char *buf_cstr(struct buf *b);
+
+/* ------------------------------------------------------------------ */
+/* object ids                                                          */
+
+#define GP_SHA1_RAWSZ 20
+#define GP_SHA1_HEXSZ 40
+
+struct oid {
+	u8 raw[GP_SHA1_RAWSZ];
+};
+
+typedef struct oid oid_t;
+
+extern const oid_t null_oid;
+
+int oid_is_null(const oid_t *o);
+int oid_equal(const oid_t *a, const oid_t *b);
+int oid_compare(const oid_t *a, const oid_t *b);
+void oid_hex(const oid_t *o, char out[GP_SHA1_HEXSZ + 1]);
+int oid_parse(oid_t *o, const char *hex);
+int oid_parse_prefix(oid_t *o, const char *hex);   /* exact length only */
+
+struct oid_array {
+	oid_t *oid;
+	size_t nr, alloc;
+};
+#define OID_ARRAY_INIT { NULL, 0, 0 }
+void oid_array_append(struct oid_array *a, const oid_t *o);
+int oid_array_contains(const struct oid_array *a, const oid_t *o);
+void oid_array_clear(struct oid_array *a);
+void oid_array_sort(struct oid_array *a);
+
+/* ------------------------------------------------------------------ */
+/* sha1                                                                */
+
+typedef struct {
+	u32 state[5];
+	u64 count;              /* total bytes */
+	u8 buffer[64];
+} gp_sha1_ctx;
+
+void gp_sha1_init(gp_sha1_ctx *ctx);
+void gp_sha1_update(gp_sha1_ctx *ctx, const void *data, size_t len);
+void gp_sha1_final(gp_sha1_ctx *ctx, u8 out[GP_SHA1_RAWSZ]);
+void gp_sha1(const void *data, size_t len, u8 out[GP_SHA1_RAWSZ]);
+
+/* ------------------------------------------------------------------ */
+/* object model                                                        */
+
+/*
+ * gitprompt uses git's own four types and invents none.  A prompt is an
+ * ordinary blob holding a markdown file with a frontmatter block, recorded
+ * at an ordinary mode, which is what keeps a gitprompt repository a plain
+ * git repository: git can clone it, check it out and browse it, and the
+ * metadata a replay needs rides along inside the files.
+ */
+enum obj_type {
+	OBJ_NONE   = 0,
+	OBJ_COMMIT = 1,
+	OBJ_TREE   = 2,
+	OBJ_BLOB   = 3,
+	OBJ_TAG    = 4
+};
+
+enum obj_type obj_type_from_name(const char *name);
+const char *obj_type_name(enum obj_type t);
+int obj_type_valid(enum obj_type t);
+
+/* tree modes, exactly as git writes them */
+#define MODE_TREE   040000
+#define MODE_BLOB   0100644
+#define MODE_EXEC   0100755
+#define MODE_LINK   0120000
+
+struct tree_entry {
+	u32 mode;
+	oid_t oid;
+	char *name;             /* no '/' and no NUL; owned */
+};
+
+struct tree {
+	struct tree_entry *e;
+	size_t nr, alloc;
+};
+#define TREE_INIT { NULL, 0, 0 }
+void tree_release(struct tree *t);
+void tree_append(struct tree *t, u32 mode, const oid_t *oid, const char *name);
+void tree_parse(struct tree *t, const void *data, size_t len);
+void tree_format(const struct tree *t, struct buf *out);
+int  tree_lookup(const struct tree *t, const char *name, u32 *mode, oid_t *oid,
+		 size_t *pos);
+void tree_sort_for_write(struct tree *t);
+
+struct commit {
+	oid_t tree;
+	struct oid_array parents;
+	char *author;           /* full ident line, with timestamp */
+	char *committer;
+	char *message;          /* owned */
+	char *session;          /* gitprompt: session id, or NULL */
+};
+#define COMMIT_INIT { { {0} }, OID_ARRAY_INIT, NULL, NULL, NULL, NULL }
+void commit_release(struct commit *c);
+void commit_parse(struct commit *c, const void *data, size_t len);
+void commit_format(const struct commit *c, struct buf *out);
+
+/* ------------------------------------------------------------------ */
+/* prompt and session objects                                          */
+
+struct prompt {
+	char *id;               /* p_... */
+	char *session;          /* s_... or NULL */
+	int seq;                /* 1-based position within the session */
+	char *timestamp;        /* ISO 8601 with offset, as written */
+	i64 ts;                 /* epoch seconds, for ordering */
+	char *author;
+	char *model;            /* or NULL */
+	char **tags; size_t nr_tags;
+	char *outcome;          /* or NULL */
+	char *parent_prompt;    /* or NULL */
+	char **attachments; size_t nr_attachments;
+	char *path;             /* repo-relative path of the file form */
+	char *body;             /* the prompt text itself */
+};
+#define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL }
+void prompt_release(struct prompt *p);
+
+struct session {
+	char *id;
+	char *title;
+	char *started_at;
+	i64 started_ts;
+	char *ended_at;         /* or NULL */
+	char *author;
+	char *notes;            /* or NULL */
+};
+#define SESSION_INIT { NULL,NULL,NULL,0,NULL,NULL,NULL }
+void session_release(struct session *s);
+
+/*
+ * The on-disk form, and the form the object store holds: a frontmatter
+ * block fenced by ---, then the text.  One representation serves both the
+ * working tree and the blob, so a checked-out file and its blob always
+ * hash the same and `status` can compare them directly.
+ */
+void prompt_to_file(const struct prompt *p, struct buf *out);
+int  prompt_from_file(struct prompt *p, const void *data, size_t len);
+void session_to_file(const struct session *s, struct buf *out);
+int  session_from_file(struct session *s, const void *data, size_t len);
+
+/* rendering used by `replay --format=json` */
+void prompt_to_json(const struct prompt *p, struct buf *out);
+void session_to_json(const struct session *s, struct buf *out);
+
+/* emit a quoted, escaped JSON string */
+void json_quote(struct buf *out, const char *s);
+
+/*
+ * A minimal JSON reader, used for the refs.json a carrier repository holds.
+ * Values are opaque; ask for the type you expect and take a default.
+ */
+struct jval;
+struct jval *json_parse(const char *s, size_t len);
+void json_free(struct jval *v);
+const char *json_get_str(const struct jval *o, const char *key, const char *dflt);
+i64 json_get_int(const struct jval *o, const char *key, i64 dflt);
+size_t json_obj_len(const struct jval *o);
+const char *json_obj_key(const struct jval *o, size_t i);
+const char *json_obj_val_str(const struct jval *o, size_t i);
+i64 json_obj_val_int(const struct jval *o, size_t i);
+
+/* ------------------------------------------------------------------ */
+/* object database                                                     */
+
+struct odb {
+	char *dir;              /* .gitprompt/objects */
+	struct buf tmp;
+};
+#define ODB_INIT { NULL, BUF_INIT }
+void odb_init(struct odb *o, const char *dir);
+void odb_release(struct odb *o);
+
+int odb_exists(struct odb *o, const oid_t *oid);
+int odb_read(struct odb *o, const oid_t *oid, enum obj_type *type,
+	     struct buf *out);
+int odb_read_raw(struct odb *o, const oid_t *oid, enum obj_type *type,
+		 struct buf *out);
+int odb_write(struct odb *o, enum obj_type type, const void *data, size_t len,
+	      oid_t *out);
+int odb_hash(struct odb *o, enum obj_type type, const void *data, size_t len,
+	     oid_t *out, int write_it);
+int odb_type_of(struct odb *o, const oid_t *oid, enum obj_type *type);
+size_t odb_count(struct odb *o);
+/* calls fn for every loose object; fn returns non-zero to stop */
+void odb_foreach_loose(struct odb *o,
+		       int (*fn)(const oid_t *, void *), void *data);
+/* resolve an abbreviated hex prefix to a full oid */
+int odb_resolve_prefix(struct odb *o, const char *hex, oid_t *out);
+
+/* ------------------------------------------------------------------ */
+/* index (git's index v2, byte for byte)                               */
+
+struct index_entry {
+	u32 ctime_sec, ctime_nsec;
+	u32 mtime_sec, mtime_nsec;
+	u32 dev, ino, mode, uid, gid, size;
+	oid_t oid;
+	char *path;
+	u16 flags;
+};
+
+struct index_state {
+	struct index_entry *e;
+	size_t nr, alloc;
+};
+#define INDEX_INIT { NULL, 0, 0 }
+void index_release(struct index_state *istate);
+void index_read(struct index_state *istate, const char *path);
+void index_write(const struct index_state *istate, const char *path);
+struct index_entry *index_get(const struct index_state *istate,
+			      const char *path);
+void index_add(struct index_state *istate, const struct index_entry *e);
+void index_remove(struct index_state *istate, const char *path);
+void index_clear(struct index_state *istate);
+void index_fill_stat(struct index_entry *e, const char *fullpath);
+
+/* ------------------------------------------------------------------ */
+/* refs                                                                */
+
+struct ref_store {
+	char *dir;              /* .gitprompt */
+	char *ident;            /* cached identity, for reflog lines */
+};
+#define REF_STORE_INIT { NULL, NULL }
+void refs_init(struct ref_store *r, const char *gpdir);
+void refs_release(struct ref_store *r);
+
+int refs_read(struct ref_store *r, const char *name, oid_t *out);
+int refs_write(struct ref_store *r, const char *name, const oid_t *oid);
+int refs_delete(struct ref_store *r, const char *name);
+int refs_exists(struct ref_store *r, const char *name);
+void refs_reflog(struct ref_store *r, const char *name, const oid_t *old,
+		 const oid_t *new, const char *msg);
+char *refs_head_target(struct ref_store *r);          /* "refs/heads/main" */
+int refs_head(struct ref_store *r, oid_t *out);
+int refs_set_head(struct ref_store *r, const char *target);
+int refs_set_head_detached(struct ref_store *r, const oid_t *oid);
+int refs_read_1(struct ref_store *r, const char *name, oid_t *out, int *symref,
+		char **target);
+void refs_list(struct ref_store *r, const char *prefix,
+	       void (*fn)(const char *name, const oid_t *oid, void *), void *data);
+void refs_list_packed(struct ref_store *r, const char *prefix,
+		      void (*fn)(const char *name, const oid_t *oid, void *),
+		      void *data);
+int refs_check_name(const char *name);
+
+/* ------------------------------------------------------------------ */
+/* repository                                                          */
+
+struct repo {
+	char *root;             /* work tree, or NULL for bare */
+	char *gpdir;            /* the .gitprompt directory */
+	struct odb odb;
+	struct ref_store refs;
+};
+#define REPO_INIT { NULL, NULL, ODB_INIT, REF_STORE_INIT }
+
+int repo_find(struct repo *r, const char *start);      /* search upwards */
+int repo_open(struct repo *r, const char *dir);
+void repo_release(struct repo *r);
+
+const char *repo_index_path(struct repo *r);
+const char *repo_head_path(struct repo *r);
+char *repo_git_path(struct repo *r, const char *fmt, ...);
+
+int repo_config_get(struct repo *r, const char *key, char **out);
+int repo_config_set(struct repo *r, const char *key, const char *value,
+		    int global);
+int repo_config_unset(struct repo *r, const char *key);
+void repo_config_list(struct repo *r, int global,
+		      void (*fn)(const char *k, const char *v, void *),
+		      void *data);
+/* resolved identity */
+void repo_ident(struct repo *r, struct buf *out);      /* "Name <email>" */
+void repo_ident_with_time(struct repo *r, struct buf *out);  /* with " 123 +0800" */
+
+/* gitprompt configuration */
+const char *repo_prompt_dir(struct repo *r);           /* default "prompts" */
+const char *repo_default_branch(struct repo *r);
+/* the next repository-wide file number */
+long repo_next_file_seq(struct repo *r);
+void repo_bump_file_seq(struct repo *r, long n);
+/* current session id, or NULL */
+char *repo_current_session(struct repo *r);
+int repo_set_current_session(struct repo *r, const char *id);
+
+/* ------------------------------------------------------------------ */
+/* the working tree                                                    */
+
+int write_tree_from_index(struct repo *r, const struct index_state *istate,
+			  oid_t *out);
+/* check out a tree into the work tree; force==0 refuses to clobber */
+int checkout_tree(struct repo *r, const oid_t *tree, int force, int update_index);
+int read_tree_into_index(struct repo *r, struct index_state *istate,
+			 const oid_t *tree, const char *prefix);
+
+/* paths */
+void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
+int path_is_ignored(struct repo *r, const char *relpath);
+int read_file(const char *path, struct buf *out);
+int write_file(const char *path, const void *data, size_t len);
+int is_directory(const char *path);
+int is_file(const char *path);
+int mkdir_p(const char *path);
+void mkdir_one(const char *path);
+int remove_file(const char *path);
+int remove_dir_recursive(const char *path);
+int copy_file(const char *src, const char *dst);
+char *xstrdup(const char *s);
+char *xstrndup(const char *s, size_t n);
+void *xmalloc(size_t n);
+void *xcalloc(size_t n, size_t sz);
+void *xrealloc(void *p, size_t n);
+char *xstrfmt(const char *fmt, ...);
+/* walk every file in the work tree, skipping .gitprompt and ignored paths */
+void walk_worktree(struct repo *r,
+		   void (*fn)(const char *relpath, void *), void *data);
+int path_in_subdir(const char *relpath);
+
+/* ------------------------------------------------------------------ */
+/* revision walking                                                    */
+
+int resolve_rev(struct repo *r, const char *rev, oid_t *out);
+int resolve_rev_tree(struct repo *r, const char *rev, oid_t *out);
+/* fill out[] with commits reachable from tips, newest first */
+void walk_commits(struct repo *r, const struct oid_array *tips,
+		  void (*fn)(const oid_t *, const struct commit *, void *),
+		  void *data);
+int is_ancestor(struct repo *r, const oid_t *ancestor, const oid_t *tip);
+int commit_peel(struct repo *r, const oid_t *oid, enum obj_type want, oid_t *out);
+void read_commit(struct repo *r, const oid_t *oid, struct commit *c);
+void read_tree_obj(struct repo *r, const oid_t *oid, struct tree *t);
+char *commit_message_line(const struct commit *c);
+i64 commit_time(const struct commit *c);
+
+/* ------------------------------------------------------------------ */
+/* the prompt history                                                  */
+
+/*
+ * One prompt as it appears in the history, joined from the prompt object
+ * and the commit and path it was reached through.
+ */
+struct prompt_ref {
+	struct prompt *prompt;   /* borrowed */
+	oid_t commit;
+	char *commit_sha;        /* hex */
+	char *path;
+};
+struct prompt_list {
+	struct prompt_ref *e;
+	size_t nr, alloc;
+};
+#define PROMPT_LIST_INIT { NULL, 0, 0 }
+void prompt_list_release(struct prompt_list *l);
+
+/* every prompt reachable from every ref, folded with uncommitted files,
+ * ordered for replay */
+void collect_prompts(struct repo *r, struct prompt_list *out);
+/* as above, but restricted to one revision's tree, plus the work tree */
+void collect_prompts_from_ref(struct repo *r, const char *rev,
+			      struct prompt_list *out);
+/* grouped by session, sessions in start order */
+struct session_group {
+	struct session *session;   /* NULL for unattributed prompts */
+	struct prompt_list prompts;
+};
+struct session_groups {
+	struct session_group *g;
+	size_t nr, alloc;
+};
+void group_by_session(struct repo *r, const struct prompt_list *in,
+		      struct session_groups *out);
+void session_groups_release(struct session_groups *g);
+
+char *new_prompt_id(void);
+char *new_session_id(void);
+char *slugify(const char *text, size_t maxlen);
+i64 now_epoch(void);
+void now_iso8601(struct buf *out);
+void epoch_to_iso8601(i64 t, struct buf *out);
+void local_tz_offset(int *sign, int *hours, int *mins);
+i64 parse_timestamp(const char *s);
+
+/* ------------------------------------------------------------------ */
+/* replay output                                                       */
+
+void replay_markdown(struct repo *r, const struct session_groups *g,
+		     struct buf *out, int stat_only);
+void replay_json(struct repo *r, const struct session_groups *g,
+		 struct buf *out);
+void replay_text(struct repo *r, const struct session_groups *g,
+		 struct buf *out);
+void replay_layout(struct repo *r, const struct session_groups *g,
+		   const char *dir);
+
+/* ------------------------------------------------------------------ */
+/* transports                                                          */
+
+/*
+ * A remote is one of:
+ *   /path or file:///path   local, a plain shared directory
+ *   gp://host:port/path     gitprompt's own HTTP transport
+ *   https://... .git        a git repository used as a carrier (GitHub)
+ */
+struct remote {
+	char *name;
+	char *url;
+};
+struct remote_list {
+	struct remote *e;
+	size_t nr, alloc;
+};
+#define REMOTE_LIST_INIT { NULL, 0, 0 }
+void remote_list_release(struct remote_list *l);
+void remote_list_load(struct repo *r, struct remote_list *out);
+int remote_get_url(struct repo *r, const char *name, char **out);
+int remote_add(struct repo *r, const char *name, const char *url);
+int remote_remove(struct repo *r, const char *name);
+int remote_set_url(struct repo *r, const char *name, const char *url);
+void remote_rename(struct repo *r, const char *from, const char *to);
+void remotes_of(struct repo *r, struct remote_list *out);  /* with urls */
+
+void remote_read_refs(struct repo *r, const char *url, const char *name,
+		      void (*fn)(const char *refname, const oid_t *oid,
+				 void *data), void *data);
+void remote_fetch_objects(struct repo *r, const char *url, const char *name,
+			  const struct oid_array *wants);
+void remote_push_objects(struct repo *r, const char *url, const char *name,
+			 const struct oid_array *haves,
+			 const struct oid_array *wants);
+char *remote_tracking_ref(const char *name, const char *refname);
+void remote_update_local_ref(struct repo *r, const char *name,
+			     const char *refname, const oid_t *oid);
+
+/* ------------------------------------------------------------------ */
+/* command dispatch                                                    */
+
+struct command {
+	const char *name;
+	int (*fn)(struct repo *r, int argc, char **argv);
+	const char *summary;
+	const char *usage;
+};
+
+/* small argument helper, shared by the commands */
+struct opts {
+	char **args;
+	int nargs;
+	int nf;                 /* number of flags seen */
+	struct { const char *name; const char *value; } flags[64];
+};
+void opts_init(struct opts *o, int argc, char **argv,
+	       const char *const *takes_value, int ntakes);
+int opts_flag(const struct opts *o, const char *name);
+const char *opts_value(const struct opts *o, const char *name);
+const char *opts_arg(const struct opts *o, int i);
+int opts_count(const struct opts *o);
+
+extern const struct command commands[];
+extern const size_t commands_nr;
+
+int cmd_help(struct repo *r, int argc, char **argv);
+int cmd_version(struct repo *r, int argc, char **argv);
+
+/* command implementations, grouped by file */
+int cmd_init(struct repo *, int, char **);
+int cmd_clone(struct repo *, int, char **);
+int cmd_config(struct repo *, int, char **);
+int cmd_hash_object(struct repo *, int, char **);
+int cmd_cat_file(struct repo *, int, char **);
+int cmd_ls_tree(struct repo *, int, char **);
+int cmd_write_tree(struct repo *, int, char **);
+int cmd_commit_tree(struct repo *, int, char **);
+int cmd_rev_parse(struct repo *, int, char **);
+int cmd_update_ref(struct repo *, int, char **);
+int cmd_symbolic_ref(struct repo *, int, char **);
+int cmd_count_objects(struct repo *, int, char **);
+int cmd_verify_objects(struct repo *, int, char **);
+int cmd_check_ref_format(struct repo *, int, char **);
+int cmd_for_each_ref(struct repo *, int, char **);
+int cmd_ls_files(struct repo *, int, char **);
+
+int cmd_add(struct repo *, int, char **);
+int cmd_rm(struct repo *, int, char **);
+int cmd_mv(struct repo *, int, char **);
+int cmd_status(struct repo *, int, char **);
+int cmd_commit(struct repo *, int, char **);
+int cmd_log(struct repo *, int, char **);
+int cmd_show(struct repo *, int, char **);
+int cmd_diff(struct repo *, int, char **);
+int cmd_reset(struct repo *, int, char **);
+int cmd_reflog(struct repo *, int, char **);
+int cmd_describe(struct repo *, int, char **);
+
+int cmd_prompt(struct repo *, int, char **);
+int cmd_capture(struct repo *, int, char **);
+int cmd_outcome(struct repo *, int, char **);
+int cmd_session(struct repo *, int, char **);
+int cmd_replay(struct repo *, int, char **);
+int cmd_timeline(struct repo *, int, char **);
+int cmd_log_prompt(struct repo *, int, char **);
+int cmd_stats(struct repo *, int, char **);
+
+int cmd_branch(struct repo *, int, char **);
+int cmd_checkout(struct repo *, int, char **);
+int cmd_switch(struct repo *, int, char **);
+int cmd_merge(struct repo *, int, char **);
+int cmd_tag(struct repo *, int, char **);
+
+int cmd_remote(struct repo *, int, char **);
+int cmd_push(struct repo *, int, char **);
+int cmd_fetch(struct repo *, int, char **);
+int cmd_pull(struct repo *, int, char **);
+int cmd_serve(struct repo *, int, char **);
+
+int cmd_fsck(struct repo *, int, char **);
+int cmd_gc(struct repo *, int, char **);
+
+/* shared plumbing helpers used across command files */
+int load_tree_flat(struct repo *r, const oid_t *tree, const char *prefix,
+		   void (*fn)(const char *path, u32 mode, const oid_t *oid,
+			      void *data), void *data);
+int index_write_tree_cb(struct repo *r, struct index_state *istate, oid_t *out);
+char *abbrev_oid(const oid_t *oid);
+/* hash one work-tree path into the object store and record it in the index */
+int stage_worktree_path(struct repo *r, const char *relpath);
+int diff_buffers(const char *a_label, const void *a, size_t alen,
+		 const char *b_label, const void *b, size_t blen,
+		 struct buf *out, int stat_only);
+void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
+		struct buf *out, int stat_only);
+
+/* check a tree out onto the work tree; both used by checkout and merge */
+void write_blob_to_worktree(struct repo *r, const char *relpath, const oid_t *oid);
+void restore_all_from_index(struct repo *r, const struct index_state *ist);
+
+/* an unfinished merge: MERGE_HEAD points at the revision being merged in */
+int merge_in_progress(struct repo *r, oid_t *other);
+void merge_state_write(struct repo *r, const oid_t *other, const char *subject);
+void merge_state_clear(struct repo *r);
+char **merge_conflicts_list(struct repo *r, size_t *nr);
+void merge_conflicts_free(char **v);
+void merge_conflicts_resolve(struct repo *r, const char *path);
+int merge_message(struct repo *r, struct buf *out);
+
+#endif /* GP_H */

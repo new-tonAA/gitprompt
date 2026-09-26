@@ -1,23 +1,7 @@
-# Python build and cache artifacts
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Build output: object files, the linked binary, and the test scratch tree.
+*.o
+*.exe
 build/
-dist/
-.eggs/
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Packaging / test tooling caches
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.mypy_cache/
-.ruff_cache/
 
 # Editor and OS noise
 .vscode/

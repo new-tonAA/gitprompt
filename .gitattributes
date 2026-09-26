@@ -6,8 +6,9 @@
 # Explicit, so the shell script keeps working whatever the global setting is.
 *.sh text eol=lf
 
-# Binaries git should never try to normalise.
-*.png binary
-*.jpg binary
-*.pdf binary
-*.whl binary
+# Binaries git must never try to normalise: the vendored zlib archive, and the
+# object files and executables a build produces.
+*.a binary
+*.dll binary
+*.o binary
+*.exe binary
