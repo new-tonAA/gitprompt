@@ -225,7 +225,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **193 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **200 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, local remotes, and git interoperability — the last being the

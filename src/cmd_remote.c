@@ -1181,6 +1181,16 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 		return 1;
 	}
 
+	{
+		struct buf id;
+		buf_init(&id);
+		/* the identity a reflog line carries, for the entry the clone
+		 * leaves behind itself -- repo_release frees it */
+		repo_ident_with_time(&local, &id);
+		local.refs.ident = xstrdup(buf_cstr(&id));
+		buf_release(&id);
+	}
+
 	name = xstrdup("origin");
 	how = xstrdup(url);
 
@@ -1250,6 +1260,15 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 			oid_t tree;
 
 			refs_write(&local.refs, head_ref, &oid);
+			/* git's clone leaves a reflog behind, and without
+			 * one `gitprompt reflog` in a fresh clone fails on a
+			 * branch that the clone itself just created. */
+			{
+				char *msg = xstrfmt("clone: from %s", how);
+				refs_reflog(&local.refs, head_ref, &null_oid, &oid,
+					    msg);
+				free(msg);
+			}
 			refs_set_head(&local.refs, head_ref);
 			read_commit(&local, &oid, &c);
 			tree = c.tree;

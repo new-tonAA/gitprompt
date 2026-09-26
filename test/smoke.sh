@@ -247,6 +247,7 @@ gp checkout madebranch >/dev/null 2>&1
 expect "checkout moves HEAD" "refs/heads/madebranch" gp symbolic-ref HEAD
 gp switch -c other >/dev/null 2>&1
 expect "switch -c moves HEAD" "refs/heads/other" gp symbolic-ref HEAD
+expect "a branch made by switch -c is in the reflog" "branch: Created" gp reflog
 printf 'branch only\n' > b.txt
 gp add b.txt >/dev/null 2>&1
 gp commit -m "a commit only on other" >/dev/null 2>&1
@@ -562,6 +563,43 @@ if [ "$n_tl" = 1 ]; then
 else
 	bad "a timeline of a revision stops at that revision" "HEAD~1=$n_tl"
 fi
+
+# ------------------------------------------------------------------
+say "a branch that exists only on the remote"
+
+# A clone names only the default branch locally; every other branch arrives as
+# a remote-tracking ref.  git's DWIM turns `switch <name>` for one of those
+# into a new local branch that tracks it, and a fresh clone leaves a reflog
+# behind, so both are checked here.
+dwsrc=$work/dwimsrc
+dwcln=$work/dwimclone
+mkdir -p "$dwsrc" || exit 2
+cd "$dwsrc" || exit 2
+gp init . >/dev/null 2>&1
+gp prompt -m "on the default branch" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "first" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+gp switch side >/dev/null 2>&1
+gp prompt -m "only on the side branch" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "side work" >/dev/null 2>&1
+gp switch main >/dev/null 2>&1
+
+cd "$work" || exit 2
+gp clone "$dwsrc" dwimclone >/dev/null 2>&1
+cd "$dwcln" || exit 2
+expect "a fresh clone has a reflog" "clone: from" gp reflog
+if gp branch | grep -q side; then
+	bad "the side branch is not local yet" "$(gp branch | tr '\n' ' ')"
+else
+	ok "the side branch is not local yet"
+fi
+expect "switch takes a branch from the remote" "set up to track" gp switch side
+expect "the branch is local and current" "* side" gp branch
+expect "the new branch records where it came from" "Created from origin/side" \
+	gp reflog
+expect "the new branch has the remote's work" "side work" gp log --oneline
 
 # ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

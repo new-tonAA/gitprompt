@@ -283,13 +283,73 @@ static int guard_worktree(struct repo *r, const oid_t *target_tree, int force)
 	return rc;
 }
 
+/*
+ * git's DWIM: for a bare branch name with no local branch of that name, a
+ * remote-tracking ref refs/remotes/<remote>/<name> is what the new branch is
+ * made from, and it is set up to track it.  Returns the remote that has one,
+ * or NULL.  "origin" is preferred and then the rest, which is the order git
+ * searches in and the one that matters after a clone, where origin is the
+ * only remote there is.
+ */
+static char *tracking_remote_for(struct repo *r, const char *name)
+{
+	struct remote_list rl = REMOTE_LIST_INIT;
+	char *found = NULL;
+	size_t i;
+	int pass;
+
+	remotes_of(r, &rl);
+	for (pass = 0; pass < 2 && !found; pass++) {
+		for (i = 0; i < rl.nr && !found; i++) {
+			int is_origin = !strcmp(rl.e[i].name, "origin");
+			char *ref;
+
+			if ((pass == 0) != is_origin)
+				continue;
+			ref = xstrfmt("refs/remotes/%s/%s", rl.e[i].name, name);
+			if (refs_exists(&r->refs, ref))
+				found = xstrdup(rl.e[i].name);
+			free(ref);
+		}
+	}
+	remote_list_release(&rl);
+	return found;
+}
+
 static int switch_to(struct repo *r, const char *rev, int force)
 {
 	oid_t oid, tree;
 	char *branch = NULL;
 	int was_branch = 0;
+	int created = 0;                /* the branch came from the DWIM */
+	char *tracking = NULL;
 
-	if (resolve_rev(r, rev, &oid) < 0)
+	/*
+	 * The DWIM has to run before the revision lookup, because `x` is not
+	 * a revision: there is no refs/heads/x and no refs/remotes/x, only
+	 * refs/remotes/<remote>/x, so resolving first would die with "not a
+	 * valid object name".  Bare names only -- `switch origin/x` names a
+	 * remote-tracking ref and detaches, as it does in git.
+	 */
+	if (!strchr(rev, '/')) {
+		char *ref = branch_ref(rev);
+
+		if (!refs_exists(&r->refs, ref))
+			tracking = tracking_remote_for(r, rev);
+		free(ref);
+	}
+
+	if (tracking) {
+		char *remote_ref = xstrfmt("refs/remotes/%s/%s", tracking, rev);
+
+		if (refs_read(&r->refs, remote_ref, &oid) < 0) {
+			free(tracking);
+			tracking = NULL;        /* gone: fall back to a revision */
+		}
+		free(remote_ref);
+	}
+
+	if (!tracking && resolve_rev(r, rev, &oid) < 0)
 		gp_die("not a valid object name: %s", rev);
 	if (commit_peel(r, &oid, OBJ_COMMIT, &oid) < 0)
 		gp_die("not a commit: %s", rev);
@@ -301,11 +361,40 @@ static int switch_to(struct repo *r, const char *rev, int force)
 		commit_release(&c);
 	}
 
-	if (guard_worktree(r, &tree, force) < 0)
+	/*
+	 * The tree is checked before the branch is created, so a switch that a
+	 * dirty work tree refuses leaves no half-made branch behind -- the same
+	 * order git does it in.
+	 */
+	if (guard_worktree(r, &tree, force) < 0) {
+		free(tracking);
 		return 1;
+	}
+
+	if (tracking) {
+		char *ref = branch_ref(rev);
+		char *msg = xstrfmt("branch: Created from %s/%s", tracking, rev);
+		char *k = xstrfmt("branch.%s.remote", rev);
+		char *m = xstrfmt("branch.%s.merge", rev);
+		char *mv = xstrfmt("refs/heads/%s", rev);
+
+		refs_write(&r->refs, ref, &oid);
+		refs_reflog(&r->refs, ref, &null_oid, &oid, msg);
+		repo_config_set(r, k, tracking, 0);
+		repo_config_set(r, m, mv, 0);
+		printf("branch '%s' set up to track '%s/%s'.\n", rev, tracking, rev);
+		free(msg);
+		free(k);
+		free(m);
+		free(mv);
+		branch = ref;
+		was_branch = 1;
+		created = 1;
+		free(tracking);
+	}
 
 	/* a branch of that name is switched to; anything else detaches */
-	{
+	if (!was_branch) {
 		char *ref = branch_ref(rev);
 		if (refs_exists(&r->refs, ref)) {
 			was_branch = 1;
@@ -316,7 +405,8 @@ static int switch_to(struct repo *r, const char *rev, int force)
 
 	if (was_branch) {
 		refs_set_head(&r->refs, branch);
-		printf("Switched to branch '%s'\n", rev);
+		printf(created ? "Switched to a new branch '%s'\n"
+			       : "Switched to branch '%s'\n", rev);
 	} else {
 		char *short_oid = abbrev_oid(&oid);
 		refs_set_head_detached(&r->refs, &oid);
@@ -479,6 +569,9 @@ int cmd_switch(struct repo *r, int argc, char **argv)
 		if (refs_exists(&r->refs, ref))
 			gp_die("a branch named '%s' already exists", name);
 		refs_write(&r->refs, ref, &head);
+		/* the same birth line `checkout -b` writes: a branch made
+		 * here is in the reflog afterwards like any other */
+		refs_reflog(&r->refs, ref, &null_oid, &head, "branch: Created");
 		refs_set_head(&r->refs, ref);
 		printf("Switched to a new branch '%s'\n", name);
 		free(ref);
