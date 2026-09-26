@@ -179,7 +179,7 @@ names are git's, and the behaviour is meant to match:
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`, `tag`,
   `reset`, `describe`
-- **collaborate** — `remote`, `push`, `fetch`, `pull`
+- **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
   `commit-tree`, `rev-parse`, `update-ref`, `symbolic-ref`, `for-each-ref`,
   `ls-files`, `count-objects`, `verify-objects`, `check-ref-format`
@@ -190,6 +190,7 @@ names are git's, and the behaviour is meant to match:
 | URL form | how it works |
 | --- | --- |
 | `/path/to/repo`, `../repo`, `file:///path` | handled natively: every object is read out of the source and written into the target, and the other repository's refs are written directly |
+| `gp://host[:port][/path]` | gitprompt's own transport, with `gitprompt serve` on the far end: HTTP with a `Content-Length`, one request per connection |
 | `https://`, `git://`, `ssh://` | delegated to the `git` binary, as `git --git-dir=.gitprompt push <url> <refspec>` |
 
 The delegation is not a workaround. It is correct precisely because
@@ -207,26 +208,24 @@ unable to read back its own fetched history.
 Stated plainly, because a tool that quietly does the wrong thing is worse than
 one that says no:
 
-- **`serve` and the `gp://` transport.** There is no HTTP server. `gitprompt
-  serve` prints `not implemented` and exits non-zero rather than pretending.
-  Use the delegated transports above.
 - **Rename detection.** A rename is a delete and an add. Merging a path that
   one side renamed and the other side changed does not follow the rename.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
-  plain C99 with a small `#ifdef _WIN32` block for `_getcwd`/`_getpid`,
-  `__USE_MINGW_ANSI_STDIO`, and putting the streams in binary mode so that a
-  newline written out is a newline and not a carriage return before it; it has
-  not been built on Unix.
+  plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
+  `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
+  binary mode so that a newline written out is a newline and not a carriage
+  return before it, and the sockets in `net.c`, which winsock provides on
+  Windows and libc on Unix. Only the Windows build has been run.
 
 ## Status
 
-The end-to-end suite passes: **342 checks, 0 failures**. `test/smoke.sh` covers
+The end-to-end suite passes: **365 checks, 0 failures**. `test/smoke.sh` covers
 the object model, sessions and prompts, committing, reconstruction (ordering and
 session boundaries), branches, tags, history editing, merges including conflicts
 and `--abort`, the commit editor, per-command option validation, local remotes,
-packed object stores, and git interoperability — the last being the section that
-matters most, since a gitprompt repository is meant to be an ordinary git
-repository. As part of it, `git verify-pack` checks
+serving over `gp://`, packed object stores, and git interoperability — the last
+being the section that matters most, since a gitprompt repository is meant to be
+an ordinary git repository. As part of it, `git verify-pack` checks
 the pack `gc` writes against git's own index, and `git ls-files` checks the
 index gitprompt wrote against git's own reader.
 
@@ -305,10 +304,30 @@ loose copy to fall back on; and every reader — `replay`, `timeline`,
 contents without its type is a different path through the store from wanting
 both.
 
-The suite runs offline, so it covers the local transport and leaves the carrier
-transports to git. `push`, `fetch`, `pull` and `clone` against an `https://`
-remote have been exercised by hand against a repository on GitHub; anything
-added there is worth running the same way before it is trusted.
+`serve` is the one transport that is gitprompt's own, and it is deliberately not
+git's wire protocol. It does not have to be: the store is already a git object
+store, so the exchange it needs is the one the local transport already performs
+— read the far side's refs, copy across the objects that are missing here — and
+HTTP is only somewhere to carry those bytes, with a `Content-Length` so neither
+end has to guess where a body ends. `gitprompt serve` answers `/info/refs`,
+`/HEAD` and the objects, and takes a push at `/gp/push`; a push sends its objects
+first and the ref is checked afterwards, so a rewind is refused with a reason
+(`it would move backwards`) unless it is forced. It serves only the store:
+`config` and `index` are 404, and so is a path that tries to climb out.
+
+The same server answers git's *dumb* HTTP protocol, because a store that is a
+real git object store should be clonable by the real git — the suite clones one
+with `git` to say so. One request per connection also means a long-lived process
+that reloads nothing: the packs are re-listed for every request, because the
+repository being served is usually one whose owner is still using it, and a
+server that had answered a request before a `gc` would otherwise go on offering
+the loose objects that `gc` had just removed.
+
+The suite runs offline, so the transports it covers are the local ones: a path on
+disk, and `gp://` on loopback with a server it starts itself. `push`, `fetch`,
+`pull` and `clone` against an `https://` remote have been exercised by hand
+against a repository on GitHub; anything added there is worth running the same
+way before it is trusted.
 
 ```console
 $ make test

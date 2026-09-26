@@ -24,6 +24,9 @@ ifeq ($(OS),Windows_NT)
 BIN := gitprompt.exe
 # Link the runtime and zlib in, so the binary runs without shipping DLLs.
 LDFLAGS += -static
+# `serve` and `gp://` use winsock, which the sockets come from on Windows; on
+# Unix they are in libc and nothing extra is needed.
+LDLIBS += -lws2_32
 endif
 
 SRCS := $(wildcard src/*.c)

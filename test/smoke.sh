@@ -985,6 +985,147 @@ expect "the clone of a packed store has the same log" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "serving over gp://"
+
+# gitprompt's own transport, and the only one that is not a local path.  It is
+# deliberately not git's wire protocol: the store is already an ordinary git
+# object store, so the exchange is the one the local transport already performs
+# -- read the far side's refs, copy across the objects it is missing -- and HTTP
+# is only somewhere to carry those bytes.
+#
+# The repository served here is the one the section above has just gc'd, and
+# another gc runs while the server is up: a server that loaded its packs once
+# and kept them would keep serving the loose objects that gc has since removed,
+# and hand out a store with holes in it.
+cd "$repo" || exit 2
+branch=$(gp symbolic-ref HEAD)
+branch_short=${branch#refs/heads/}
+served_head=$(gp rev-parse HEAD)
+
+gp serve --port 0 > "$work/serve.log" 2>&1 &
+serve_pid=$!
+port=""
+i=0
+while [ $i -lt 60 ]; do
+	port=$(sed -n 's|.*http://127.0.0.1:\([0-9]*\)/.*|\1|p' \
+		"$work/serve.log" 2>/dev/null | head -1)
+	[ -n "$port" ] && break
+	i=$((i + 1))
+	sleep 0.5
+done
+
+if [ -z "$port" ]; then
+	bad "the server reports the port it listens on" \
+		"$(cat "$work/serve.log" 2>/dev/null)"
+	skip "the rest of the gp:// section (the server did not come up)"
+else
+	ok "the server reports the port it listens on"
+	gpurl="gp://127.0.0.1:$port/"
+
+	cd "$work" || exit 2
+	expect "clone over gp://" "Cloning" gp clone "$gpurl" netclone
+	expect_file "the gp:// clone has the project files" netclone/a.txt
+	expect_file "the gp:// clone has the prompts" \
+		netclone/prompts/0001-write-a-tokenizer-first.md
+	cd "$work/netclone" || exit 2
+	expect "the gp:// clone reads the same log" "record the first prompts" \
+		gp log --oneline
+	expect_out "the gp:// clone is on the served commit" "$served_head" \
+		gp rev-parse HEAD
+	expect_status "fsck is clean on the gp:// clone" 0 gp fsck
+
+	# a push over the wire sends the objects before it moves the ref, so the
+	# ref having moved is the proof that they arrived -- and reading one back
+	# out of the served store is the proof that they arrived intact
+	printf 'over the wire\n' > net.txt
+	gp add -A >/dev/null
+	gp commit -m "a commit pushed over gp://" >/dev/null
+	pushed=$(gp rev-parse HEAD)
+	expect "push over gp://" "$branch_short -> $branch_short" gp push "$gpurl"
+	cd "$repo" || exit 2
+	expect_out "the served branch moved to the pushed commit" "$pushed" \
+		gp rev-parse "$branch"
+	expect "the pushed objects arrived" "net.txt" \
+		gp ls-tree -r --name-only "$pushed"
+
+	cd "$work/netclone" || exit 2
+	gp reset --hard "$served_head" >/dev/null
+	expect_status "a push that would rewind is refused" 1 gp push "$gpurl"
+	expect "and the refusal says why" "move backwards" gp push "$gpurl"
+	expect "a forced push is taken" "forced update" gp push -f "$gpurl"
+	cd "$repo" || exit 2
+	expect_out "the forced push moved the served branch back" "$served_head" \
+		gp rev-parse "$branch"
+
+	cd "$work" || exit 2
+	expect "a second clone over gp://" "Cloning" gp clone "$gpurl" netthird
+	cd "$work/netthird" || exit 2
+	gp remote add other "$gpurl" >/dev/null
+	cd "$repo" || exit 2
+	printf 'fetched\n' > net2.txt
+	gp add -A >/dev/null
+	gp commit -m "a commit to fetch over gp://" >/dev/null
+	fetched=$(gp rev-parse HEAD)
+	cd "$work/netthird" || exit 2
+	expect "fetch over gp://" "other/" gp fetch other
+	expect_out "the tracking ref names what was fetched" "$fetched" \
+		gp rev-parse "refs/remotes/other/$branch_short"
+
+	# the pack that appeared while the server was running
+	cd "$repo" || exit 2
+	gp gc >/dev/null 2>&1
+	cd "$work" || exit 2
+	expect "clone over gp:// after a gc the server did not run" "Cloning" \
+		gp clone "$gpurl" netpacked
+	cd "$work/netpacked" || exit 2
+	expect_status "that clone is complete" 0 gp fsck
+	expect "and it reads the packed history" "a commit to fetch over gp://" \
+		gp log --oneline
+
+	# the same store answers git's dumb HTTP protocol, which is what says the
+	# thing being served is a git object store and not a private format
+	if command -v git >/dev/null 2>&1; then
+		cd "$work" || exit 2
+		if git clone -q "http://127.0.0.1:$port/" netgit \
+				2>"$work/netgit.err"; then
+			ok "git clones the served store"
+			cd "$work/netgit" || exit 2
+			if [ "$(git rev-parse HEAD)" = "$fetched" ]; then
+				ok "git's clone is on the served commit"
+			else
+				bad "git's clone is on the served commit" \
+					"$(git rev-parse HEAD) is not $fetched"
+			fi
+		else
+			bad "git clones the served store" \
+				"$(cat "$work/netgit.err")"
+		fi
+	else
+		skip "git cloning the served store (git is not on PATH)"
+	fi
+
+	# only the store is reachable: the configuration and the index sit beside
+	# it in .gitprompt and are none of a client's business
+	if command -v curl >/dev/null 2>&1; then
+		for p in config index ../config; do
+			code=$(curl -s -o /dev/null -w '%{http_code}' \
+				"http://127.0.0.1:$port/$p")
+			if [ "$code" = 404 ]; then
+				ok "the server does not serve /$p"
+			else
+				bad "the server does not serve /$p" "answered $code"
+			fi
+		done
+	else
+		skip "the path whitelist (curl is not on PATH)"
+	fi
+
+	kill $serve_pid 2>/dev/null
+	wait $serve_pid 2>/dev/null
+	cd "$repo" || exit 2
+fi
+
+# ------------------------------------------------------------------
 say "git interoperability"
 
 if command -v git >/dev/null 2>&1; then
@@ -1184,11 +1325,9 @@ else
 fi
 
 # ------------------------------------------------------------------
-say "things that are not implemented"
+say "a command and a revision that are not there"
 
 cd "$repo" || exit 2
-expect_status "serve reports honestly and fails" 1 gp serve
-expect "serve names the reason" "not implemented" gp serve
 expect_status "an unknown command fails" 1 gp nosuchcommand
 expect_status "a replay of an unknown ref fails" 128 gp replay nosuchref
 

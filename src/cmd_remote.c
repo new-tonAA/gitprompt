@@ -15,9 +15,14 @@
  *       object store is byte-compatible, so this delegates only the wire
  *       protocol to the git binary and does everything else itself.
  *
- *   gp://host:port/path
- *       gitprompt's own transport.  Reserved; `serve` reports that it is
- *       not implemented in this build rather than pretending otherwise.
+ *   gp://host[:port][/path]
+ *       gitprompt's own transport, spoken by `serve` on one side and by the
+ *       code below on the other.  It is HTTP carrying the same exchange the
+ *       local transport performs -- refs out, then the objects that are
+ *       missing -- so it needs no pack format and no third-party program.
+ *       What a client may ask for is a short list: the refs, the store, and
+ *       one object at a time.  Everything else in the store, the index and
+ *       the config in particular, is not served.
  *
  * Everything a prompt needs to be reconstructed travels inside the prompt
  * files themselves, so a carrier repository needs no side channel: a plain
@@ -26,6 +31,7 @@
 #include "gp.h"
 
 #include <sys/stat.h>
+#include <dirent.h>
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -330,6 +336,247 @@ static void copy_all_objects(struct odb *from, struct odb *to, size_t *copied,
 }
 
 /* ------------------------------------------------------------------ */
+/* the gp:// transport                                                 */
+
+/*
+ * One framing, both directions: a count on its own line, then that many
+ * objects, each a "<type> <size>" line followed by exactly that many bytes.
+ * The size is explicit so the payload needs no escaping, and it is checked
+ * against what is left before anything is read, so a truncated body is an
+ * error and not a read past the end.
+ */
+static void frame_add(struct buf *out, enum obj_type t, const void *data,
+		      size_t len)
+{
+	buf_addf(out, "%s %llu\n", obj_type_name(t), (unsigned long long)len);
+	buf_add(out, data, len);
+}
+
+struct frame_in {
+	const u8 *p, *end;
+};
+
+static int frame_line(struct frame_in *f, struct buf *out)
+{
+	const u8 *nl;
+
+	buf_reset(out);
+	if (f->p >= f->end)
+		return -1;
+	nl = memchr(f->p, '\n', (size_t)(f->end - f->p));
+	if (!nl)
+		return -1;
+	buf_add(out, f->p, (size_t)(nl - f->p));
+	f->p = nl + 1;
+	return 0;
+}
+
+/* the count a frame declares, read from where the cursor now is */
+static int frame_count(struct frame_in *f, long *count)
+{
+	struct buf line = BUF_INIT;
+	char *end;
+	int rc = -1;
+
+	if (frame_line(f, &line) == 0) {
+		long n = strtol(buf_cstr(&line), &end, 10);
+
+		if (end != buf_cstr(&line) && n >= 0) {
+			*count = n;
+			rc = 0;
+		}
+	}
+	buf_release(&line);
+	return rc;
+}
+
+/* set the cursor on a whole frame and read its count; -1 when malformed */
+static long frame_open(struct frame_in *f, const struct buf *b)
+{
+	long count = -1;
+
+	f->p = b->b;
+	f->end = b->b + b->len;
+	if (frame_count(f, &count) < 0)
+		return -1;
+	return count;
+}
+
+/* 1 with an object, 0 when the frame is exhausted, -1 when it is malformed */
+static int frame_next(struct frame_in *f, enum obj_type *type, struct buf *data)
+{
+	struct buf line = BUF_INIT;
+	char *head, *sp, *end;
+	enum obj_type t;
+	unsigned long long size;
+	int rc = -1;
+
+	if (frame_line(f, &line) < 0)
+		goto done;
+	if (!line.len) {
+		rc = 0;
+		goto done;
+	}
+	head = (char *)buf_cstr(&line);
+	sp = strchr(head, ' ');
+	if (!sp)
+		goto done;
+	*sp = '\0';   /* the type name ends where the size begins */
+	t = obj_type_from_name(head);
+	if (!obj_type_valid(t))
+		goto done;
+	size = strtoull(sp + 1, &end, 10);
+	if (end == sp + 1 || (size_t)(f->end - f->p) < (size_t)size)
+		goto done;
+
+	data->len = 0;
+	buf_add(data, f->p, (size_t)size);
+	f->p += (size_t)size;
+	*type = t;
+	rc = 1;
+done:
+	buf_release(&line);
+	return rc;
+}
+
+/*
+ * A store travels as one request.  Every object the sender has is offered and
+ * the receiver keeps the ones it is missing, which is what the local transport
+ * does too -- there is no negotiation over which objects are needed, so a
+ * fetch of a large store re-sends what is already there.  That is the honest
+ * limit of this first version, and the reason it is one request rather than
+ * one per object.
+ */
+struct frame_ctx {
+	struct odb *odb;
+	struct buf *out;
+	size_t nr;
+	int failed;
+};
+
+static int frame_one_object(const oid_t *oid, void *ud)
+{
+	struct frame_ctx *c = ud;
+	enum obj_type t;
+	struct buf data = BUF_INIT;
+
+	if (odb_read(c->odb, oid, &t, &data) < 0) {
+		c->failed++;
+		buf_release(&data);
+		return 0;
+	}
+	frame_add(c->out, t, data.b, data.len);
+	c->nr++;
+	buf_release(&data);
+	return 0;
+}
+
+static void frame_store(struct odb *from, struct buf *body)
+{
+	struct frame_ctx c;
+	struct buf objs = BUF_INIT;
+
+	c.odb = from;
+	c.out = &objs;
+	c.nr = 0;
+	c.failed = 0;
+	odb_foreach(from, frame_one_object, &c);
+	/* the count has to come first, so the objects are framed into their
+	 * own buffer and joined once there are known to be no more */
+	buf_addf(body, "%llu\n", (unsigned long long)c.nr);
+	buf_add(body, objs.b, objs.len);
+	buf_release(&objs);
+}
+
+/*
+ * Receive a framed store.  Each object is written as it is read, so the
+ * receiver never holds a second copy of the repository in memory.
+ */
+static int frame_recv(struct frame_in *f, long count, struct odb *to,
+		      size_t *received)
+{
+	struct buf data = BUF_INIT;
+	enum obj_type t;
+	oid_t oid;
+	long i;
+	int rc = 0;
+
+	for (i = 0; i < count; i++) {
+		switch (frame_next(f, &t, &data)) {
+		case 1:
+			break;
+		case 0:
+			gp_error("the object list ended after %ld of %ld",
+				 i, count);
+			rc = -1;
+			goto done;
+		default:
+			gp_error("the object list is malformed at object %ld",
+				 i + 1);
+			rc = -1;
+			goto done;
+		}
+		/* odb_write leaves an object that is already here alone */
+		if (odb_write(to, t, data.b, data.len, &oid) < 0) {
+			gp_error("cannot store an object sent by the other side");
+			rc = -1;
+			goto done;
+		}
+		(*received)++;
+	}
+done:
+	buf_release(&data);
+	return rc;
+}
+
+/*
+ * "<hex>\t<refname>" per line.  That is git's dumb-protocol advertisement, so
+ * the same response serves both a gitprompt client and a `git clone`.
+ */
+static void parse_ref_lines(const char *p,
+			    void (*fn)(const char *refname, const oid_t *oid,
+				       void *data), void *data)
+{
+	while (p && *p) {
+		const char *nl = strchr(p, '\n');
+		size_t n = nl ? (size_t)(nl - p) : strlen(p);
+		const char *tab = memchr(p, '\t', n);
+
+		if (tab) {
+			char *hexpart = xstrndup(p, (size_t)(tab - p));
+			char *refname = xstrndup(tab + 1,
+						 n - (size_t)(tab - p) - 1);
+			oid_t oid;
+
+			if (oid_parse(&oid, hexpart) == 0)
+				fn(refname, &oid, data);
+			free(hexpart);
+			free(refname);
+		}
+		p = nl ? nl + 1 : NULL;
+	}
+}
+
+/*
+ * GET a path and insist on a 200.  Anything else is the far end refusing,
+ * and its own words are the useful part -- "refs/heads/main: it would move
+ * backwards" says more than any message this side could invent.
+ */
+static int gp_get(const struct gp_url *u, const char *path, struct buf *out)
+{
+	int status = 0;
+
+	if (http_request(u, "GET", path, NULL, 0, &status, out) < 0)
+		return -1;
+	if (status != 200) {
+		gp_error("%s:%d refused %s (%d): %s", u->host, u->port, path,
+			 status, out->len ? (const char *)out->b : "\n");
+		return -1;
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* reading a remote's refs                                             */
 
 void remote_read_refs(struct repo *r, const char *url, const char *name,
@@ -340,8 +587,14 @@ void remote_read_refs(struct repo *r, const char *url, const char *name,
 	(void)name;
 
 	if (url_is_gp(url)) {
-		gp_error("gp:// is not implemented in this build; use a local path "
-			 "or an https:// carrier repository");
+		struct gp_url u;
+		struct buf body = BUF_INIT;
+
+		if (gp_url_parse(url, &u) < 0)
+			return;
+		if (gp_get(&u, "/info/refs", &body) == 0)
+			parse_ref_lines((const char *)body.b, fn, data);
+		buf_release(&body);
 		return;
 	}
 
@@ -363,7 +616,6 @@ void remote_read_refs(struct repo *r, const char *url, const char *name,
 	{
 		struct buf out = BUF_INIT;
 		const char *args[] = { "ls-remote", "--heads", "--tags", url };
-		const char *p;
 
 		if (run_git(NULL, args, 4, &out) != 0) {
 			gp_error("ls-remote failed for %s:\n%s", url,
@@ -371,23 +623,7 @@ void remote_read_refs(struct repo *r, const char *url, const char *name,
 			buf_release(&out);
 			return;
 		}
-		p = (const char *)out.b;
-		while (p && *p) {
-			const char *nl = strchr(p, '\n');
-			size_t len = nl ? (size_t)(nl - p) : strlen(p);
-			const char *tab = memchr(p, '\t', len);
-			if (tab) {
-				char *hex = xstrndup(p, (size_t)(tab - p));
-				char *refname = xstrndup(tab + 1,
-							 len - (size_t)(tab - p) - 1);
-				oid_t oid;
-				if (oid_parse(&oid, hex) == 0)
-					fn(refname, &oid, data);
-				free(hex);
-				free(refname);
-			}
-			p = nl ? nl + 1 : NULL;
-		}
+		parse_ref_lines((const char *)out.b, fn, data);
 		buf_release(&out);
 	}
 }
@@ -433,7 +669,25 @@ void remote_fetch_objects(struct repo *r, const char *url, const char *name,
 	(void)wants;
 
 	if (url_is_gp(url)) {
-		gp_error("gp:// is not implemented in this build");
+		struct gp_url u;
+		struct buf body = BUF_INIT;
+		struct frame_in f;
+		long count;
+		size_t received = 0;
+
+		if (gp_url_parse(url, &u) < 0)
+			return;
+		if (gp_get(&u, "/gp/objects", &body) < 0) {
+			buf_release(&body);
+			return;
+		}
+		count = frame_open(&f, &body);
+		if (count < 0)
+			gp_error("the store sent by %s:%d is not readable",
+				 u.host, u.port);
+		else
+			frame_recv(&f, count, &r->odb, &received);
+		buf_release(&body);
 		return;
 	}
 
@@ -506,7 +760,12 @@ void remote_push_objects(struct repo *r, const char *url, const char *name,
 	(void)wants;
 
 	if (url_is_gp(url)) {
-		gp_error("gp:// is not implemented in this build");
+		/*
+		 * Not reachable from cmd_push, which drives a gp:// push itself:
+		 * the ref update belongs on the far side, and all this function
+		 * knows how to do is copy objects into a path.
+		 */
+		gp_error("push: gp:// needs the far side to move the ref");
 		return;
 	}
 
@@ -637,6 +896,22 @@ int cmd_remote(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* shared push/fetch plumbing                                          */
 
+/*
+ * Is this argument a remote name, or is it itself somewhere the objects go?
+ * `push origin` names a configured remote; `push ../other`, `push gp://host/`
+ * and `push https://...` name a place.  Telling the two apart matters most
+ * inside a clone, which always has an origin: without this the URL is read as
+ * a remote name, found in no config, and reported as no remote given.
+ */
+static int looks_like_a_url(const char *s)
+{
+	if (strstr(s, "://") || !strncmp(s, "gp:", 3))
+		return 1;
+	if (strchr(s, '/') || strchr(s, '\\'))
+		return 1;
+	return is_directory(s);
+}
+
 static int resolve_remote(struct repo *r, const char *given, char **name,
 			  char **url)
 {
@@ -649,7 +924,7 @@ static int resolve_remote(struct repo *r, const char *given, char **name,
 		if (remote_get_url(r, given, url) == 0) {
 			*name = xstrdup(given);
 			rc = 0;
-		} else if (!rl.nr) {
+		} else if (!rl.nr || looks_like_a_url(given)) {
 			/* not a configured remote: treat it as a url */
 			*name = xstrdup("origin");
 			*url = xstrdup(given);
@@ -756,6 +1031,121 @@ static void push_list_push(struct push_list *l, const char *src, const char *dst
 static void push_tag_cb(const char *name, const oid_t *oid, void *ud)
 {
 	push_list_push(ud, name, name, oid);
+}
+
+/* one "<dst-ref> <verb> <before-hex>" line from the server, as git prints it */
+static void report_pushed(struct push_list *refs, const char *line, size_t len)
+{
+	char *copy = xstrndup(line, len);
+	char ref[512], verb[32], hex[GP_SHA1_HEXSZ + 1];
+	struct push_ref *e = NULL;
+	oid_t before = null_oid;
+	const char *name = ref;
+	size_t i;
+
+	if (sscanf(copy, "%511s %31s %40s", ref, verb, hex) != 3) {
+		free(copy);
+		return;
+	}
+	oid_parse(&before, hex);
+
+	for (i = 0; i < refs->nr; i++)
+		if (!strcmp(refs->e[i].dst_ref, ref)) {
+			e = &refs->e[i];
+			break;
+		}
+	if (!e) {
+		free(copy);
+		return;
+	}
+	if (!strncmp(name, "refs/heads/", 11))
+		name += 11;
+	else if (!strncmp(name, "refs/tags/", 10))
+		name += 10;
+
+	if (!strcmp(verb, "new"))
+		printf(" * [new branch]      %s -> %s\n", name, name);
+	else if (!strcmp(verb, "uptodate"))
+		printf(" = [up to date]      %s -> %s\n", name, name);
+	else if (!strcmp(verb, "forced"))
+		printf(" + %s...%s  %s -> %s (forced update)\n",
+		       abbrev_oid(&before), abbrev_oid(&e->oid), name, name);
+	else
+		printf("   %s..%s  %s -> %s\n", abbrev_oid(&before),
+		       abbrev_oid(&e->oid), name, name);
+	free(copy);
+}
+
+/*
+ * Push over gp://.
+ *
+ * One request carries every object the local store holds and every ref being
+ * pushed, in that order, so the objects are in place before the first ref
+ * moves: a server cannot tell a fast-forward from a rewind against history it
+ * has not got yet.  The server answers one line per ref, and it is the server
+ * that decides, because it holds the refs -- the alternative is a round trip in
+ * the middle of a push, with the refs of both sides going stale while it
+ * happens.
+ *
+ * The whole store goes, not only what the server is missing.  Working out what
+ * is missing needs a reachability walk against refs the other side has already
+ * moved past, and the local transport does not do it either: it reads every
+ * object and lets the receiver drop the ones it has.  The receiver here drops
+ * them the same way, so what this costs is bandwidth, and what it buys is that
+ * there is one code path instead of two.
+ */
+static int push_gp(struct repo *r, const char *url, struct push_list *refs,
+		   int force)
+{
+	struct gp_url u;
+	struct buf body = BUF_INIT, out = BUF_INIT;
+	const char *p;
+	size_t i;
+	int status = 0, rc = 0;
+
+	if (gp_url_parse(url, &u) < 0)
+		return 1;
+
+	buf_addf(&body, "%llu\n", (unsigned long long)refs->nr);
+	for (i = 0; i < refs->nr; i++) {
+		char hex[GP_SHA1_HEXSZ + 1];
+
+		oid_hex(&refs->e[i].oid, hex);
+		buf_addf(&body, "%s %s %s\n", refs->e[i].dst_ref, hex,
+			 force ? "force" : "ff");
+	}
+	frame_store(&r->odb, &body);
+
+	if (http_request(&u, "POST", "/gp/push", body.b, body.len, &status,
+			 &out) < 0) {
+		rc = 1;
+		goto done;
+	}
+	if (status != 200) {
+		gp_error("push to %s failed: %s", url,
+			 out.len ? (const char *)out.b : "(no explanation)");
+		rc = 1;
+		goto done;
+	}
+
+	printf("To %s\n", url);
+	p = (const char *)out.b;
+	while (p && *p) {
+		const char *nl = strchr(p, '\n');
+		size_t len = nl ? (size_t)(nl - p) : strlen(p);
+
+		if (len > 3 && !strncmp(p, "ok ", 3))
+			report_pushed(refs, p + 3, len - 3);
+		else if (len > 3 && !strncmp(p, "no ", 3)) {
+			gp_error("%.*s", (int)(len - 3), p + 3);
+			rc = 1;
+		}
+		p = nl ? nl + 1 : NULL;
+	}
+done:
+	buf_release(&body);
+	buf_release(&out);
+	return rc;
 }
 
 int cmd_push(struct repo *r, int argc, char **argv)
@@ -883,6 +1273,8 @@ int cmd_push(struct repo *r, int argc, char **argv)
 			printf("   %s -> %s\n", refs.e[i].src_ref,
 			       refs.e[i].dst_ref);
 		rc = 0;
+	} else if (url_is_gp(url)) {
+		rc = push_gp(r, url, &refs, force);
 	} else {
 		struct oid_array haves = OID_ARRAY_INIT, wants = OID_ARRAY_INIT;
 		struct fetch_collect fc;
@@ -1105,6 +1497,32 @@ static char *remote_head_branch(struct repo *r, const char *url,
 				const char *name)
 {
 	char *fallback = NULL;
+
+	if (url_is_gp(url)) {
+		struct gp_url u;
+		struct buf body = BUF_INIT;
+
+		/* the HEAD file as the server has it: a symref, or a bare id
+		 * for a detached head, which the caller falls back from */
+		if (gp_url_parse(url, &u) == 0 && gp_get(&u, "/HEAD", &body) == 0) {
+			const char *p = buf_cstr(&body);
+			const char *prefix = "ref: refs/heads/";
+
+			/* the length comes from the string, not from a hand
+			 * count: 17 here is one too many, which misses on every
+			 * remote and drops the clone back to the probe for a
+			 * branch that may not be the one it names. */
+			if (!strncmp(p, prefix, strlen(prefix))) {
+				const char *e = p + strlen(prefix);
+				const char *nl = strchr(e, '\n');
+
+				fallback = xstrndup(e, nl ? (size_t)(nl - e)
+							  : strlen(e));
+			}
+		}
+		buf_release(&body);
+		return fallback;
+	}
 
 	if (url_is_local(url)) {
 		struct repo other;
@@ -1400,17 +1818,476 @@ int cmd_pull(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* serve                                                              */
 
+/*
+ * What the server hands out, and what it does not.
+ *
+ * The refs, the store, one object at a time, and -- because a store that is a
+ * real git object store should be clonable by the real git -- the handful of
+ * paths git's dumb HTTP protocol asks for.  Nothing else is reachable: the
+ * index, the config and the reflogs sit in the same directory as the objects,
+ * and a server that answered /config would be handing out somebody's identity,
+ * along with whatever a remote URL in it carried.  A request path is matched
+ * against the list below and refused when it is not on it, so a file added to
+ * the store later is not served by default.
+ */
+
+struct serve_ref_ctx {
+	struct buf *out;
+};
+
+static void serve_ref_cb(const char *refname, const oid_t *oid, void *ud)
+{
+	struct serve_ref_ctx *c = ud;
+	char hex[GP_SHA1_HEXSZ + 1];
+
+	oid_hex(oid, hex);
+	buf_addf(c->out, "%s\t%s\n", hex, refname);
+}
+
+static void serve_refs(struct repo *r, struct buf *out)
+{
+	struct serve_ref_ctx c;
+
+	c.out = out;
+	/* a repository git has gc'd keeps its refs in packed-refs, and one
+	 * that has not keeps them loose, so both lists are walked */
+	refs_list(&r->refs, "refs/heads/", serve_ref_cb, &c);
+	refs_list_packed(&r->refs, "refs/heads/", serve_ref_cb, &c);
+	refs_list(&r->refs, "refs/tags/", serve_ref_cb, &c);
+	refs_list_packed(&r->refs, "refs/tags/", serve_ref_cb, &c);
+}
+
+/* the HEAD file as it stands: "ref: refs/heads/main", or a bare id */
+static void serve_head(struct repo *r, struct buf *out)
+{
+	if (read_file(repo_head_path(r), out) < 0)
+		buf_reset(out);
+	if (!out->len || out->b[out->len - 1] != '\n')
+		buf_addch(out, '\n');
+}
+
+/* "P <name>" per pack, which is how a dumb client learns what to fetch */
+static void serve_pack_list(struct repo *r, struct buf *out)
+{
+	char *dir = xstrfmt("%s/objects/pack", r->gpdir);
+	DIR *d = opendir(dir);
+
+	if (d) {
+		struct dirent *e;
+
+		while ((e = readdir(d))) {
+			size_t n = strlen(e->d_name);
+
+			if (n > 5 && !strcmp(e->d_name + n - 5, ".pack"))
+				buf_addf(out, "P %s\n", e->d_name);
+		}
+		closedir(d);
+	}
+	free(dir);
+	buf_addch(out, '\n');   /* the list ends with a blank line */
+}
+
+static int safe_pack_name(const char *name)
+{
+	size_t n = strlen(name), i;
+
+	if (n < 8 || n > 80)
+		return 0;
+	if (strcmp(name + n - 5, ".pack") && strcmp(name + n - 4, ".idx"))
+		return 0;
+	for (i = 0; i < n; i++) {
+		char c = name[i];
+
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+		      (c >= '0' && c <= '9') || c == '-' || c == '.'))
+			return 0;
+	}
+	return 1;
+}
+
+static void serve_pack_file(struct repo *r, const char *name, int *status,
+			    const char **ctype, struct buf *out)
+{
+	char *path;
+
+	if (!safe_pack_name(name)) {
+		*status = 404;
+		buf_addstr(out, "not found\n");
+		return;
+	}
+	path = xstrfmt("%s/objects/pack/%s", r->gpdir, name);
+	if (read_file(path, out) < 0) {
+		buf_reset(out);
+		*status = 404;
+		buf_addf(out, "no such pack: %s\n", name);
+	} else {
+		*ctype = "application/x-git-packed-objects";
+	}
+	free(path);
+}
+
+/*
+ * One object, in the form a loose object file has on disk.  An object that
+ * lives in a pack is deflated into that same form rather than declined, so
+ * whether the store has been gc'd is not something a client has to know.
+ */
+static void serve_one_object(struct repo *r, const char *rest, int *status,
+			     const char **ctype, struct buf *out)
+{
+	char hex[GP_SHA1_HEXSZ + 1];
+	enum obj_type t;
+	struct buf data = BUF_INIT, whole = BUF_INIT;
+	const char *p;
+	oid_t oid;
+	size_t n = 0;
+
+	/* git asks for /objects/ab/cdef... as well as /objects/abcdef... */
+	for (p = rest; *p; p++) {
+		if (*p == '/')
+			continue;
+		if (n >= GP_SHA1_HEXSZ)
+			break;
+		hex[n++] = *p;
+	}
+	hex[n] = '\0';
+
+	if (n != GP_SHA1_HEXSZ || *p || oid_parse(&oid, hex) < 0 ||
+	    odb_read(&r->odb, &oid, &t, &data) < 0) {
+		*status = 404;
+		buf_addf(out, "no such object: %s\n", rest);
+		goto done;
+	}
+	buf_addf(&whole, "%s %llu", obj_type_name(t), (unsigned long long)data.len);
+	buf_addch(&whole, '\0');
+	buf_add(&whole, data.b, data.len);
+	*ctype = "application/x-git-loose-object";
+	if (gp_deflate(whole.b, whole.len, out) < 0) {
+		*status = 500;
+		buf_addstr(out, "cannot compress an object\n");
+	}
+done:
+	buf_release(&data);
+	buf_release(&whole);
+}
+
+static void serve_get(struct repo *r, const char *path, int *status,
+		      const char **ctype, struct buf *out)
+{
+	if (!strcmp(path, "/")) {
+		buf_addf(out, "gitprompt %s\n\n"
+			 "A gitprompt store, served over gitprompt's own "
+			 "transport.\n\n"
+			 "  gitprompt clone gp://<host>:<port>/ <dir>\n"
+			 "  git clone http://<host>:<port>/ <dir>\n\n"
+			 "Both work: the store holds nothing but ordinary git "
+			 "objects, so git can clone it over its own dumb HTTP "
+			 "protocol, and gitprompt can clone it over gp://.\n",
+			 GP_VERSION);
+		return;
+	}
+	if (!strcmp(path, "/info/refs")) {
+		serve_refs(r, out);
+		return;
+	}
+	if (!strcmp(path, "/HEAD")) {
+		serve_head(r, out);
+		return;
+	}
+	if (!strcmp(path, "/objects/info/packs")) {
+		serve_pack_list(r, out);
+		return;
+	}
+	if (!strcmp(path, "/gp/objects")) {
+		frame_store(&r->odb, out);
+		return;
+	}
+	if (!strncmp(path, "/objects/pack/", 14)) {
+		serve_pack_file(r, path + 14, status, ctype, out);
+		return;
+	}
+	if (!strncmp(path, "/objects/", 9)) {
+		*ctype = "application/x-git-loose-object";
+		serve_one_object(r, path + 9, status, ctype, out);
+		return;
+	}
+	*status = 404;
+	buf_addf(out, "not found: %s\n", path);
+}
+
+/* a ref name a client may push to: under refs/, and nothing that climbs */
+static int safe_ref_name(const char *name)
+{
+	const char *p;
+	size_t n = strlen(name);
+
+	if (n < 6 || strncmp(name, "refs/", 5) || strstr(name, "..") ||
+	    strstr(name, "//") || name[n - 1] == '/' || name[n - 1] == '.')
+		return 0;
+	for (p = name; *p; p++) {
+		unsigned char c = (unsigned char)*p;
+
+		if (c <= 0x20 || c == 0x7f || c == '~' || c == '^' || c == ':' ||
+		    c == '?' || c == '*' || c == '[' || c == '\\' || c == '{')
+			return 0;
+	}
+	return 1;
+}
+
+struct push_target {
+	char *ref;
+	oid_t oid;
+	int force;
+};
+
+/*
+ * Objects first, then the refs that name them.  The order matters: the ref
+ * can only be checked against history the store already holds, so the objects
+ * are written before any ref is looked at.  Each ref then gets its own line
+ * back, which is why one refused ref does not take the others with it.
+ */
+static void serve_push(struct repo *r, const char *body, size_t len,
+		       struct buf *out, int *status)
+{
+	struct frame_in f;
+	struct buf line = BUF_INIT;
+	struct push_target *targets = NULL;
+	long nrefs = 0, nobj = 0;
+	size_t i, received = 0;
+	int rc = 500;
+
+	f.p = (const u8 *)body;
+	f.end = (const u8 *)body + len;
+
+	if (frame_count(&f, &nrefs) < 0 || nrefs < 0 || nrefs > 65536) {
+		*status = 400;
+		buf_addstr(out, "the push names no ref, or names too many\n");
+		goto done;
+	}
+	targets = xcalloc(nrefs ? (size_t)nrefs : 1, sizeof *targets);
+	for (i = 0; i < (size_t)nrefs; i++) {
+		char ref[512], hex[GP_SHA1_HEXSZ + 1], mode[16];
+
+		if (frame_line(&f, &line) < 0 ||
+		    sscanf(buf_cstr(&line), "%511s %40s %15s", ref, hex, mode) != 3 ||
+		    oid_parse(&targets[i].oid, hex) < 0 ||
+		    (strcmp(mode, "ff") && strcmp(mode, "force")) ||
+		    !safe_ref_name(ref)) {
+			*status = 400;
+			buf_addstr(out, "a ref in the push is not one this "
+					"server will write\n");
+			goto done;
+		}
+		targets[i].ref = xstrdup(ref);
+		targets[i].force = !strcmp(mode, "force");
+	}
+
+	if (frame_count(&f, &nobj) < 0 || nobj < 0) {
+		*status = 400;
+		buf_addstr(out, "the push does not say how many objects follow\n");
+		goto done;
+	}
+	if (frame_recv(&f, nobj, &r->odb, &received) < 0) {
+		*status = 400;
+		buf_addf(out, "the objects could not be read\n");
+		goto done;
+	}
+
+	for (i = 0; i < (size_t)nrefs; i++) {
+		struct push_target *t = &targets[i];
+		oid_t before = null_oid;
+		char hex[GP_SHA1_HEXSZ + 1];
+		const char *verb;
+		int had, ff;
+
+		if (!odb_exists(&r->odb, &t->oid)) {
+			buf_addf(out, "no %s: the object %s never arrived\n",
+				 t->ref, abbrev_oid(&t->oid));
+			continue;
+		}
+		had = refs_read(&r->refs, t->ref, &before) == 0;
+		ff = !had || oid_equal(&before, &t->oid) ||
+		     is_ancestor(r, &before, &t->oid);
+		if (!ff && !t->force) {
+			buf_addf(out, "no %s: it would move backwards, losing "
+				 "%s\n", t->ref, abbrev_oid(&before));
+			continue;
+		}
+		if (refs_write(&r->refs, t->ref, &t->oid) < 0) {
+			buf_addf(out, "no %s: the ref could not be written\n",
+				 t->ref);
+			continue;
+		}
+		refs_reflog(&r->refs, t->ref, had ? &before : &null_oid,
+			    &t->oid, t->force && !ff ? "push --force" : "push");
+
+		verb = !had ? "new"
+			   : oid_equal(&before, &t->oid) ? "uptodate"
+			   : !ff ? "forced" : "ff";
+		oid_hex(&before, hex);
+		buf_addf(out, "ok %s %s %s\n", t->ref, verb, hex);
+	}
+	rc = 200;
+done:
+	if (targets) {
+		for (i = 0; i < (size_t)nrefs; i++)
+			free(targets[i].ref);
+		free(targets);
+	}
+	buf_release(&line);
+	*status = rc;
+}
+
+static int read_body(struct http_in *in, size_t len, struct buf *out)
+{
+	u8 chunk[8192];
+
+	buf_reset(out);
+	while (len) {
+		size_t want = len < sizeof chunk ? len : sizeof chunk;
+		size_t got = http_read(in, chunk, want);
+
+		if (!got)
+			return -1;
+		buf_add(out, chunk, got);
+		len -= got;
+	}
+	return 0;
+}
+
+static void serve_one(struct repo *r, gp_socket fd)
+{
+	struct http_in in;
+	struct buf method = BUF_INIT, path = BUF_INIT, headers = BUF_INIT;
+	struct buf body = BUF_INIT, out = BUF_INIT;
+	const char *ctype = "text/plain; charset=utf-8";
+	size_t content_length = 0;
+	int status = 200;
+
+	/*
+	 * The packs are re-listed for every request.  The store this is serving
+	 * is usually a working copy whose owner is still using it -- a `gc` run
+	 * while the server is up must not be invisible to it -- and a loaded
+	 * pack set is otherwise fetched once and kept for the life of the
+	 * process.  Loose objects are already looked up afresh on every read;
+	 * this is what makes the packed ones behave the same way.
+	 */
+	pack_release_all(&r->odb);
+
+	http_in_init(&in, fd);
+	/*
+	 * A connection that carried no request at all is not answered: there
+	 * is nothing to answer, and a client that opened a socket to ask
+	 * nothing gets the connection closed.
+	 */
+	if (http_read_request(&in, &method, &path, &headers, &content_length) < 0)
+		goto out;
+
+	if (!strcmp(buf_cstr(&method), "GET")) {
+		if (!strcmp(buf_cstr(&path), "/gp/push")) {
+			status = 405;
+			buf_addstr(&out, "/gp/push takes a POST\n");
+		} else {
+			serve_get(r, buf_cstr(&path), &status, &ctype, &out);
+		}
+	} else if (!strcmp(buf_cstr(&method), "POST")) {
+		if (strcmp(buf_cstr(&path), "/gp/push")) {
+			status = 404;
+			buf_addf(&out, "not found: %s\n", buf_cstr(&path));
+		} else if (read_body(&in, content_length, &body) < 0) {
+			status = 400;
+			buf_addstr(&out, "the body is shorter than its "
+					"Content-Length\n");
+		} else {
+			serve_push(r, (const char *)body.b, body.len, &out,
+				   &status);
+		}
+	} else {
+		status = 405;
+		buf_addf(&out, "%s is not a method this server takes\n",
+			 buf_cstr(&method));
+	}
+
+	http_respond(fd, status, ctype, out.b, out.len);
+out:
+	buf_release(&method);
+	buf_release(&path);
+	buf_release(&headers);
+	buf_release(&body);
+	buf_release(&out);
+}
+
 int cmd_serve(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
+	struct repo own;
+	const char *dir, *host;
+	const char *shown;
+	int port = 9418, chosen = 0, opened = 0;
+	gp_socket listener;
 
-	(void)r;
 	opts_init(&o, argc, argv, (const char *const[]){
-		"--port=", "--dir=", NULL });
+		"--port=", "--dir=", "--host=", NULL });
 
-	gp_error("serve: gitprompt's own transport (gp://) is not implemented in "
-		 "this build.\n"
-		 "The local and carrier transports are: point a remote at a "
-		 "path or at an https:// repository.");
-	return 1;
+	dir = opts_value(&o, "--dir");
+	host = opts_value(&o, "--host");
+	if (opts_value(&o, "--port")) {
+		char *end;
+		long n = strtol(opts_value(&o, "--port"), &end, 10);
+
+		if (*end || n < 0 || n > 65535) {
+			gp_error("serve: '%s' is not a port",
+				 opts_value(&o, "--port"));
+			return 1;
+		}
+		port = (int)n;
+	}
+
+	memset(&own, 0, sizeof own);
+	if (dir) {
+		if (repo_open(&own, dir) < 0) {
+			gp_error("serve: %s is not a gitprompt repository, nor a "
+				 "store", dir);
+			return 1;
+		}
+		{
+			struct buf id;
+
+			buf_init(&id);
+			/* the identity a reflog line from a push will carry */
+			repo_ident_with_time(&own, &id);
+			own.refs.ident = xstrdup(buf_cstr(&id));
+			buf_release(&id);
+		}
+		r = &own;
+		opened = 1;
+	}
+	if (!r) {
+		gp_error("serve: no repository here; run this inside one, or "
+			 "name one with --dir");
+		return 1;
+	}
+
+	listener = net_listen(host, port, &chosen);
+	if (listener == GP_SOCKET_INVALID) {
+		if (opened)
+			repo_release(&own);
+		return 1;
+	}
+
+	shown = host && strcmp(host, "any") ? host : host ? "0.0.0.0" : "127.0.0.1";
+	printf("gitprompt serve: listening on http://%s:%d/\n", shown, chosen);
+	if (port == 0)
+		printf("(port %d was chosen by the system)\n", chosen);
+	printf("serving %s -- press Ctrl-C to stop\n", r->gpdir);
+	/* the port is the only thing a caller piping this needs */
+	fflush(stdout);
+
+	for (;;) {
+		gp_socket fd = net_accept(listener);
+
+		if (fd == GP_SOCKET_INVALID)
+			continue;
+		serve_one(r, fd);
+		net_close(fd);
+	}
 }

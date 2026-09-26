@@ -34,6 +34,21 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int64_t i64;
 
+/*
+ * A socket, without the header that defines one.  net.c is the only file that
+ * includes <winsock2.h>, and it has to be the first thing that file includes:
+ * on Windows that header and <windows.h> disagree about each other, so pulling
+ * the network headers in here would make every other translation unit a
+ * candidate for the argument.  SOCKET is UINT_PTR, which uintptr_t matches on
+ * both the 32- and the 64-bit builds; on Unix it is a file descriptor.
+ */
+#ifdef _WIN32
+typedef uintptr_t gp_socket;
+#else
+typedef int gp_socket;
+#endif
+#define GP_SOCKET_INVALID ((gp_socket)-1)
+
 #define GP_VERSION "0.1.0"
 
 /* ------------------------------------------------------------------ */
@@ -285,6 +300,8 @@ void odb_foreach(struct odb *o, int (*fn)(const oid_t *, void *), void *data);
 int odb_resolve_prefix(struct odb *o, const char *hex, oid_t *out);
 /* drop what a loose object leaves behind once its bytes are in a pack */
 int odb_forget_loose(struct odb *o, const oid_t *oid);
+/* zlib-deflate a byte string, which is what a loose object file holds */
+int gp_deflate(const void *in, size_t len, struct buf *out);
 
 /* ------------------------------------------------------------------ */
 /* packfiles (pack.c)                                                  */
@@ -724,5 +741,65 @@ int merge_in_progress(struct repo *r, oid_t *other);
 void merge_state_write(struct repo *r, const oid_t *other, const char *subject);
 void merge_state_clear(struct repo *r);
 int merge_message(struct repo *r, struct buf *out);
+
+/* ------------------------------------------------------------------ */
+/* sockets and HTTP (net.c)                                            */
+
+/*
+ * The transport `serve` speaks and `gp://` reads.  It is HTTP with a
+ * Content-Length and nothing else: no chunked bodies, no keep-alive, no
+ * compression, one request per connection.  Bodies are read into memory, so
+ * every length is bounded by what the caller is prepared to hold.
+ */
+int net_init(void);
+int net_strerror(char *buf, size_t n);
+
+/*
+ * Listen on `host` (NULL or "loopback" for 127.0.0.1, "any" for every
+ * interface).  Port 0 asks the system to choose; *got_port receives what it
+ * chose, which is the only way to talk to a server that was just started.
+ */
+gp_socket net_listen(const char *host, int port, int *got_port);
+gp_socket net_accept(gp_socket listener);
+void net_close(gp_socket fd);
+/* connect to host:port, reporting the reason on failure */
+gp_socket net_connect(const char *host, int port);
+
+/* a buffered reader over a socket, so a request can be read a line at a time */
+struct http_in {
+	gp_socket fd;
+	u8 buf[4096];
+	size_t len, pos;
+};
+void http_in_init(struct http_in *in, gp_socket fd);
+/* one byte, or -1 at end of input */
+int http_get(struct http_in *in);
+/* exactly n bytes; fewer only when the peer closed early */
+size_t http_read(struct http_in *in, void *dst, size_t n);
+/* one line, with CR and LF stripped; -1 when nothing was left to read */
+int http_line(struct http_in *in, struct buf *out);
+
+/* read a request head; -1 when the connection carried no request at all */
+int http_read_request(struct http_in *in, struct buf *method, struct buf *path,
+		      struct buf *headers, size_t *content_length);
+/* write a response with an exact body length, and flush it */
+int http_respond(gp_socket fd, int status, const char *ctype, const void *body,
+		 size_t len);
+
+/* gp://host[:port]/path -- the one URL form the transport understands */
+struct gp_url {
+	char host[256];
+	int port;
+	char path[512];
+};
+int gp_url_parse(const char *url, struct gp_url *out);
+
+/*
+ * Send one request and collect the response.  *status receives the status
+ * code and `body` the response body, whatever the code was: a refusal carries
+ * an explanation in its body, and the caller should print it.
+ */
+int http_request(const struct gp_url *u, const char *method, const char *path,
+		 const void *body, size_t len, int *status, struct buf *body_out);
 
 #endif /* GP_H */

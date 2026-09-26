@@ -278,7 +278,7 @@ const struct command commands[] = {
 	{ "pull",       cmd_pull,       "Fetch and merge in one step",
 	  "pull [<remote>] [<branch>]" },
 	{ "serve",      cmd_serve,      "Serve this repository over gitprompt's HTTP transport",
-	  "serve [--port N] [--dir DIR]" },
+	  "serve [--port N] [--host HOST] [--dir DIR]" },
 
 	/* plumbing */
 	{ "hash-object",      cmd_hash_object,      "Compute an object id and optionally store the object",
@@ -349,11 +349,16 @@ static int needs_no_repo(const char *name)
  * those reads to the global file.  `hash-object` is here because hashing a
  * file is a pure computation -- `git hash-object foo` works in an empty
  * directory -- and only `-w`, which stores what it hashed, needs a store to
- * put it in.
+ * put it in.  `serve` is here because it can be pointed at a repository with
+ * --dir, which is the only way to serve a bare store or one that is not the
+ * current directory; inside a repository it serves that one, and outside one
+ * with no --dir it says so itself rather than letting the dispatcher refuse
+ * before it has had a chance to look.
  */
 static int repo_is_optional(const char *name)
 {
-	return !strcmp(name, "config") || !strcmp(name, "hash-object");
+	return !strcmp(name, "config") || !strcmp(name, "hash-object") ||
+	       !strcmp(name, "serve");
 }
 
 static void die_usage(void)

@@ -139,6 +139,17 @@ static int deflate_all(const u8 *in, size_t inlen, struct buf *out)
 	return 0;
 }
 
+/*
+ * The deflated form of a byte string, which is what a loose object file holds.
+ * `serve` needs it to hand out an object the way a dumb HTTP server does: git's
+ * dumb protocol asks for the file it would have found on disk, so an object
+ * that only exists inside a pack still has to be served in loose form.
+ */
+int gp_deflate(const void *in, size_t len, struct buf *out)
+{
+	return deflate_all(in, len, out);
+}
+
 /* ------------------------------------------------------------------ */
 /* read                                                                */
 
