@@ -2560,14 +2560,19 @@ int cmd_reset(struct repo *r, int argc, char **argv)
 		refs_set_head_detached(&r->refs, &target);
 	}
 
-	if (mode >= 1) {
+	if (mode == 1) {
 		struct index_state ist;
 		memset(&ist, 0, sizeof ist);
 		read_tree_into_index(r, &ist, &c.tree, "");
 		index_write(&ist, repo_index_path(r));
 		index_release(&ist);
 	}
-	if (mode >= 2) {
+	if (mode == 2) {
+		/* The checkout writes the index itself, and it has to be the one
+		 * that does, because it tells which files to remove by comparing
+		 * the index it finds against the tree it is checking out.  Writing
+		 * the new index first would have both sides agree and leave the
+		 * previous tree's files sitting in the work tree. */
 		checkout_tree(r, &c.tree, 1, 1);
 		printf("HEAD is now at %s\n", abbrev_oid(&target));
 	}
