@@ -1,19 +1,38 @@
 # gitprompt
 
+**git versions the code. gitprompt versions the prompts that produced it.**
+
+[![ci](https://github.com/new-tonAA/gitprompt/actions/workflows/ci.yml/badge.svg)](https://github.com/new-tonAA/gitprompt/actions/workflows/ci.yml)
+
 A distributed version control system for **prompts** — written in C, on git's
 own object model.
 
-`git` versions the code. `gitprompt` versions the instructions that produced the
-code: every prompt that was sent, in order, grouped by session, with the outcome
-each one had. Clone somebody's prompt repository, hand it to an agent, and the
-project can be rebuilt — not only the final artifact, but the sequence of
-decisions that got there, including the wrong turns that were corrected.
+Every prompt that was sent, in order, grouped by session, with the outcome each
+one had. Clone somebody's prompt repository, hand it to an agent, and the project
+can be rebuilt — not only the final artifact, but the sequence of decisions that
+got there, including the wrong turns that were corrected.
+
+It is the other half of a project to git: git keeps the code, gitprompt keeps the
+instructions that wrote it, and the two can sit in the same directory without
+either noticing the other.
 
 ```console
 $ gitprompt clone https://github.com/you/my-project-prompts.git
 $ cd my-project-prompts
 $ gitprompt replay -o PROMPTS.md      # hand this file to an agent
 ```
+
+Three things make that work, and each is a thing a chat log cannot do:
+
+- **Every prompt, in order.** Each one is a numbered file,
+  `prompts/0001-write-a-tokenizer-first.md`. The number is repository-wide, so a
+  prompt read on its own — with no commit and no other file — still says where
+  in the sequence it belongs.
+- **Session boundaries are stored, not inferred.** Where context was reset is a
+  file in the tree, not something a reader guesses from timestamps.
+- **Ordinary git all the way down.** A gitprompt repository *is* a git
+  repository: `git clone`, `git push`, GitHub's file view, `git reset --hard`
+  and `git gc` all work on it unchanged.
 
 ## The one design decision everything else follows from
 
