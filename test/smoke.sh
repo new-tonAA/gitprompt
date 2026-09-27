@@ -1240,6 +1240,70 @@ esac
 expect "gc --dry-run reports without pruning" "Would prune" gp gc --dry-run
 
 # ------------------------------------------------------------------
+say "the number a prompt gets"
+
+# A prompt's number is what places it in the sequence when the file is read on
+# its own, so one number must not be handed out twice.  It is read off the
+# repository -- the work tree, the index, and the tip of every ref -- because
+# the counter that used to decide it was untracked, and so a clone, a
+# colleague's checkout and a second machine all started numbering in the same
+# place and wrote a prompt file the others already had.
+seqsrc=$work/seq-src
+mergecase "$seqsrc"
+printf 'one\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp prompt -m "the first" >/dev/null 2>&1
+gp prompt -m "the second" >/dev/null 2>&1
+expect_file "a prompt is numbered in order" prompts/0001-the-first.md
+expect_file "and the next one follows it" prompts/0002-the-second.md
+gp add -A >/dev/null 2>&1
+gp commit -m "record the prompts" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+gp switch side >/dev/null 2>&1
+gp prompt -m "on the side" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "a prompt on the side" >/dev/null 2>&1
+gp switch main >/dev/null 2>&1
+
+cd "$work" || exit 2
+gp clone "$seqsrc" seq-clone >/dev/null 2>&1
+cd "$work/seq-clone" || exit 2
+# the clone's work tree holds main's prompts and not the side branch's, so only
+# the refs can say that 0003 is taken
+expect_file "the clone has the prompts it checked out" prompts/0002-the-second.md
+expect_absent "the clone did not check out the side branch" \
+	prompts/0003-on-the-side.md
+gp prompt -m "written in the clone" >/dev/null 2>&1
+expect_file "a prompt written in a clone continues the sequence" \
+	prompts/0004-written-in-the-clone.md
+gp prompt -m "and one more uncommitted" >/dev/null 2>&1
+expect_file "an uncommitted prompt's number is not reused either" \
+	prompts/0005-and-one-more-uncommitted.md
+
+# and a number the repository has forgotten -- the prompt deleted, the deletion
+# committed -- is not handed out again, because the local counter is a floor
+# under the repository's own answer
+seqdrop=$work/seq-drop
+mergecase "$seqdrop"
+printf 'x\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp prompt -m "the only prompt" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "record it" >/dev/null 2>&1
+gp rm prompts/0001-the-only-prompt.md >/dev/null 2>&1
+gp commit -m "drop it" >/dev/null 2>&1
+gp prompt -m "after the deletion" >/dev/null 2>&1
+expect_file "a deleted prompt's number is not handed out again" \
+	prompts/0002-after-the-deletion.md
+
+# Back to the repository the section above left behind: the packed-store checks
+# read it through the shell's own directory, so this section has to hand that
+# directory back the way it found it rather than leave it in a scratch tree.
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "a packed object store"
 
 # gc packs what the refs reach, which is the shape a store takes after the git

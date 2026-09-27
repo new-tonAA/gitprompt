@@ -11,6 +11,7 @@
 #include "gp.h"
 
 #include <sys/stat.h>
+#include <dirent.h>
 
 /* ------------------------------------------------------------------ */
 /* shared helpers                                                     */
@@ -90,6 +91,145 @@ static int write_worktree_file(struct repo *r, const char *relpath,
 }
 
 /* ------------------------------------------------------------------ */
+/* which number a prompt gets                                          */
+
+/*
+ * The number a prompt file's name carries, or 0 where the path is not a prompt
+ * file: "<dir>/<digits>-<slug>.md".  A session file sits in "<dir>/sessions/",
+ * whose segment is not digits, so it falls out here without a special case.
+ */
+static long number_in_prompt_path(const char *dir, const char *path)
+{
+	size_t n = strlen(dir);
+	const char *p;
+	char *end;
+	long v;
+
+	if (!n || strncmp(path, dir, n) || path[n] != '/')
+		return 0;
+	p = path + n + 1;
+	if (*p < '0' || *p > '9')
+		return 0;
+	v = strtol(p, &end, 10);
+	if (*end != '-')
+		return 0;
+	return v < 0 ? 0 : v;
+}
+
+struct seq_max {
+	struct repo *r;
+	const char *dir;
+	struct oid_array seen;   /* one walk per commit, however many refs name it */
+	long max;
+};
+
+static void seq_max_path(struct seq_max *m, const char *path)
+{
+	long v = number_in_prompt_path(m->dir, path);
+
+	if (v > m->max)
+		m->max = v;
+}
+
+static void seq_max_tree_cb(const char *path, u32 mode, const oid_t *oid,
+			    void *ud)
+{
+	if (mode != MODE_TREE)
+		seq_max_path(ud, path);
+}
+
+static void seq_max_ref_cb(const char *name, const oid_t *oid, void *ud)
+{
+	struct seq_max *m = ud;
+	struct commit c = COMMIT_INIT;
+	oid_t commit;
+
+	(void)name;
+	if (oid_array_contains(&m->seen, oid))
+		return;
+	oid_array_append(&m->seen, oid);
+	if (commit_peel(m->r, oid, OBJ_COMMIT, &commit) < 0)
+		return;
+	read_commit(m->r, &commit, &c);
+	load_tree_flat(m->r, &c.tree, "", seq_max_tree_cb, m);
+	commit_release(&c);
+}
+
+static void seq_max_worktree(struct seq_max *m)
+{
+	char *full = m->r->root ? xstrfmt("%s/%s", m->r->root, m->dir)
+				: xstrdup(m->dir);
+	DIR *d = opendir(full);
+	struct dirent *de;
+
+	if (d) {
+		while ((de = readdir(d))) {
+			char *rel;
+
+			if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+				continue;
+			rel = xstrfmt("%s/%s", m->dir, de->d_name);
+			seq_max_path(m, rel);
+			free(rel);
+		}
+		closedir(d);
+	}
+	free(full);
+}
+
+static void seq_max_index(struct seq_max *m)
+{
+	struct index_state ist;
+	size_t i;
+
+	memset(&ist, 0, sizeof ist);
+	index_read(&ist, repo_index_path(m->r));
+	for (i = 0; i < ist.nr; i++)
+		seq_max_path(m, ist.e[i].path);
+	index_release(&ist);
+}
+
+/*
+ * The number the next prompt gets.
+ *
+ * It has to be past every number the repository can see, not merely past the
+ * one this working copy handed out last: the counter that used to decide this
+ * lives in .gitprompt/gitprompt-seq, which is untracked, so a clone, a
+ * colleague's checkout and a second machine all start from the same number and
+ * write a prompt file the others already have.  A prompt's number is what makes
+ * its place in the sequence readable from the file alone, which is the property
+ * the format exists to keep, and a duplicate is the one thing that breaks it.
+ *
+ * So the highest number anywhere wins -- the work tree, the index, and the tip
+ * of every ref, which is another branch or another machine's work -- with the
+ * local counter as a floor under them, so that a number is not handed out twice
+ * even after the prompt that had it is deleted.
+ */
+static long next_prompt_number(struct repo *r)
+{
+	struct seq_max m;
+	char *dir = xstrdup(repo_prompt_dir(r));
+	long n;
+
+	m.r = r;
+	m.dir = dir;
+	memset(&m.seen, 0, sizeof m.seen);
+	m.max = 0;
+
+	seq_max_worktree(&m);
+	seq_max_index(&m);
+	refs_list(&r->refs, "refs/", seq_max_ref_cb, &m);
+	refs_list_packed(&r->refs, "refs/", seq_max_ref_cb, &m);
+	oid_array_clear(&m.seen);
+
+	n = repo_next_file_seq(r);
+	if (m.max + 1 > n)
+		n = m.max + 1;
+	free(dir);
+	return n;
+}
+
+/* ------------------------------------------------------------------ */
 /* recording a prompt                                                  */
 
 struct prompt_input {
@@ -113,7 +253,7 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 	memset(&p, 0, sizeof p);
 	p.id = new_prompt_id();
 	p.session = in->session ? xstrdup(in->session) : repo_current_session(r);
-	seq = repo_next_file_seq(r);
+	seq = next_prompt_number(r);
 	p.seq = (int)seq;
 
 	buf_init(&file);
