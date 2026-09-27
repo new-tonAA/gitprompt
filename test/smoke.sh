@@ -2072,23 +2072,37 @@ gp prompt --date='2026-06-03T10:00:00+08:00' -m "the first one" >/dev/null 2>&1
 expect "a date is stored as it was given" \
 	"timestamp: 2026-06-03T10:00:00+08:00" cat prompts/0001-*.md
 
-# the whole pipeline at once: written out by one function, read back by a
-# second and printed by a third.  An offset applied twice, or not applied at
-# all, shows here and nowhere else -- the prompts come out in the same order
-# either way, so a suite that only ever compares them with each other never
-# sees it, and a machine that keeps UTC cannot see it at all.
-got=$(gp stats | sed -n 's/^first prompt: *//p')
-case "$got" in
-2026-06-03T10:00:00+08:00) ok "and it comes back out the same" ;;
-*) bad "and it comes back out the same" \
-	"wanted [2026-06-03T10:00:00+08:00] got [$got]" ;;
-esac
-
 # the form a commit object carries, and the one GIT_AUTHOR_DATE is usually
 # given in
 gp prompt --date='@1700000000 +0800' -m "an epoch" >/dev/null 2>&1
 expect "the epoch form is read as the instant it names" \
 	"timestamp: 2023-11-15T06:13:20+08:00" cat prompts/0002-*.md
+
+# The instant, not the text of it.  A stored date is read back, counted and
+# printed, and it has to come out as the same moment it went in as -- but what
+# a reader prints for that moment is written in the offset the *reader* keeps,
+# so comparing the printed text with the text that went in only holds for a
+# reader standing in the offset the date was written in.  This check passed on
+# the machine it was written on, which keeps +08:00, and failed on every CI
+# runner, which keep UTC.  The epoch here is the same instant taken from the
+# other side, out of the one form that carries its instant outright, and both
+# are printed by the same reader in the same offset.
+early=$work/dates-epoch
+rm -rf "$early"
+mkdir -p "$early" || exit 2
+cd "$early" || exit 2
+gp init . >/dev/null 2>&1
+gp prompt --date='@1700000000 +0800' -m "the epoch, alone" >/dev/null 2>&1
+epoch_here=$(gp stats | sed -n 's/^first prompt: *//p')
+cd "$dates" || exit 2
+
+got=$(gp stats | sed -n 's/^first prompt: *//p')
+if [ -n "$epoch_here" ] && [ "$got" = "$epoch_here" ]; then
+	ok "the earliest date is that instant, whatever offset this reader keeps"
+else
+	bad "the earliest date is that instant, whatever offset this reader keeps" \
+		"wanted [$epoch_here] got [$got]"
+fi
 
 # no offset means where this machine is, so the fields that were typed are the
 # fields that come back -- whatever offset this machine happens to keep
@@ -2126,12 +2140,14 @@ expect "--date wins over it" "timestamp: 2026-09-09T09:09:09+08:00" \
 expect "the date reaches the document that comes back out" \
 	"- recorded: 2026-06-03T10:00:00+08:00" gp replay
 
-got=$(gp stats | sed -n 's/^last prompt: *//p')
-case "$got" in
-2026-09-09T09:09:09+08:00) ok "and the newest of them is the last one" ;;
-*) bad "and the newest of them is the last one" \
-	"wanted [2026-09-09T09:09:09+08:00] got [$got]" ;;
-esac
+first=$(gp stats | sed -n 's/^first prompt: *//p')
+last=$(gp stats | sed -n 's/^last prompt: *//p')
+if [ "$first" = "$epoch_here" ] && [ -n "$last" ] && [ "$last" != "$first" ]; then
+	ok "and the dates run from that one to a later one"
+else
+	bad "and the dates run from that one to a later one" \
+		"first [$first] last [$last]"
+fi
 
 # a session has a start and an end of its own, and those order the sessions:
 # one begun earlier but written later still comes first, because the dates are
