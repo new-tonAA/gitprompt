@@ -1,0 +1,35 @@
+# Build gitprompt and run the suite on the Unix platforms it supports.
+#
+# The Windows build is developed on Windows.  These two are the ones the
+# platform code in the source has to satisfy, and they are run here rather than
+# on the development machine because that machine has no Unix toolchain.
+# git is installed on both runners, which the suite's interop section needs --
+# that section is the one that tests the claim the whole design rests on, that
+# a gitprompt repository is an ordinary git repository.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other: they fail for different
+      # reasons, and one run should say what both of them do.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build
+        run: make
+
+      - name: test
+        run: make test

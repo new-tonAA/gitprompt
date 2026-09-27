@@ -13,20 +13,27 @@ endif
 PREFIX   ?= /usr/local
 BINDIR   ?= $(PREFIX)/bin
 
-CPPFLAGS += -Ithird_party/zlib
 CFLAGS   ?= -O2
 CFLAGS   += -Wall -Wextra -Wno-unused-parameter -std=gnu99
-LDLIBS   += -Lthird_party/zlib -lz
 
 BIN := gitprompt
 
 ifeq ($(OS),Windows_NT)
 BIN := gitprompt.exe
-# Link the runtime and zlib in, so the binary runs without shipping DLLs.
-LDFLAGS += -static
+# Windows ships no zlib to link, so the vendored build of it is used, and both
+# the runtime and zlib are linked in so the binary runs without shipping DLLs.
+CPPFLAGS += -Ithird_party/zlib
+LDFLAGS  += -static
+LDLIBS   += -Lthird_party/zlib -lz
 # `serve` and `gp://` use winsock, which the sockets come from on Windows; on
 # Unix they are in libc and nothing extra is needed.
-LDLIBS += -lws2_32
+LDLIBS   += -lws2_32
+else
+# Every system git runs on already has zlib, and git links that one rather than
+# carrying its own; this does the same.  The vendored copy under third_party is
+# a Windows build of the library and is not an archive for these platforms, so
+# neither its directory nor its header is on the search path here.
+LDLIBS   += -lz
 endif
 
 SRCS := $(wildcard src/*.c)
