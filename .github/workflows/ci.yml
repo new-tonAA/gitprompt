@@ -48,12 +48,19 @@ jobs:
       # is picked over UCRT64 deliberately: the vendored third_party/zlib/libz.a
       # is a msvcrt build of the library, and UCRT64 links a different C
       # runtime against it.
+      #
+      # diffutils is not part of what MSYS2 installs by default, and the suite
+      # leans on cmp and diff to compare output against what it wanted.  On
+      # Unix they are part of the base system and Git for Windows ships them,
+      # which is why this only shows up here: without them the comparisons fail
+      # with the two sides printed identical.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: false
           install: >-
             make
+            diffutils
             git
             mingw-w64-x86_64-gcc
 
