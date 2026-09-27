@@ -2055,6 +2055,108 @@ expect "the new branch records where it came from" "Created from origin/side" \
 expect "the new branch has the remote's work" "side work" gp log --oneline
 
 # ------------------------------------------------------------------
+say "a date says when something was recorded"
+
+# A conversation recorded today says nothing true about when it happened, and
+# the times are most of what tells one such conversation from another.  So a
+# date can be given rather than taken from the clock -- and it has to survive
+# the trip back out, through the file and through the parse that orders and
+# counts it.
+dates=$work/dates
+rm -rf "$dates"
+mkdir -p "$dates" || exit 2
+cd "$dates" || exit 2
+gp init . >/dev/null 2>&1
+
+gp prompt --date='2026-06-03T10:00:00+08:00' -m "the first one" >/dev/null 2>&1
+expect "a date is stored as it was given" \
+	"timestamp: 2026-06-03T10:00:00+08:00" cat prompts/0001-*.md
+
+# the whole pipeline at once: written out by one function, read back by a
+# second and printed by a third.  An offset applied twice, or not applied at
+# all, shows here and nowhere else -- the prompts come out in the same order
+# either way, so a suite that only ever compares them with each other never
+# sees it, and a machine that keeps UTC cannot see it at all.
+got=$(gp stats | sed -n 's/^first prompt: *//p')
+case "$got" in
+2026-06-03T10:00:00+08:00) ok "and it comes back out the same" ;;
+*) bad "and it comes back out the same" \
+	"wanted [2026-06-03T10:00:00+08:00] got [$got]" ;;
+esac
+
+# the form a commit object carries, and the one GIT_AUTHOR_DATE is usually
+# given in
+gp prompt --date='@1700000000 +0800' -m "an epoch" >/dev/null 2>&1
+expect "the epoch form is read as the instant it names" \
+	"timestamp: 2023-11-15T06:13:20+08:00" cat prompts/0002-*.md
+
+# no offset means where this machine is, so the fields that were typed are the
+# fields that come back -- whatever offset this machine happens to keep
+gp prompt --date='2026-06-03T10:00:00' -m "local" >/dev/null 2>&1
+expect "a date with no offset is read where this machine is" \
+	"timestamp: 2026-06-03T10:00:00" cat prompts/0003-*.md
+
+gp prompt --date='2026-06-03' -m "a bare day" >/dev/null 2>&1
+expect "a bare day means midnight" "timestamp: 2026-06-03T00:00:00" \
+	cat prompts/0004-*.md
+
+# refused, not quietly recorded as now: a date that was meant and dropped
+# without a word is worse than one that was turned down
+before=$(ls prompts/*.md | wc -l)
+expect_status "a date that is not a date is refused" 1 \
+	gp prompt --date="half past whenever" -m "x"
+after=$(ls prompts/*.md | wc -l)
+if [ "$before" = "$after" ]; then
+	ok "and nothing is recorded for it"
+else
+	bad "and nothing is recorded for it" "$before prompts before, $after after"
+fi
+
+# the variable git puts a date in, so that a script or a habit carries over
+GIT_AUTHOR_DATE='2026-01-02T03:04:05+08:00' \
+	gp prompt -m "from the environment" >/dev/null 2>&1
+expect "GIT_AUTHOR_DATE is honoured" \
+	"timestamp: 2026-01-02T03:04:05+08:00" cat prompts/0005-*.md
+
+GIT_AUTHOR_DATE='2026-01-02T03:04:05+08:00' \
+	gp prompt --date='2026-09-09T09:09:09+08:00' -m "both" >/dev/null 2>&1
+expect "--date wins over it" "timestamp: 2026-09-09T09:09:09+08:00" \
+	cat prompts/0006-*.md
+
+expect "the date reaches the document that comes back out" \
+	"- recorded: 2026-06-03T10:00:00+08:00" gp replay
+
+got=$(gp stats | sed -n 's/^last prompt: *//p')
+case "$got" in
+2026-09-09T09:09:09+08:00) ok "and the newest of them is the last one" ;;
+*) bad "and the newest of them is the last one" \
+	"wanted [2026-09-09T09:09:09+08:00] got [$got]" ;;
+esac
+
+# a session has a start and an end of its own, and those order the sessions:
+# one begun earlier but written later still comes first, because the dates are
+# what happened and the writing order is only how it got here
+gp session start -t "the session in December" \
+	--date='2026-12-01T09:00:00+08:00' >/dev/null 2>&1
+gp prompt -m "said in december" >/dev/null 2>&1
+gp session end --date='2026-12-01T09:30:00+08:00' >/dev/null 2>&1
+gp session start -t "the session in March" \
+	--date='2026-03-01T09:00:00+08:00' >/dev/null 2>&1
+gp prompt -m "said in march" >/dev/null 2>&1
+gp session end --date='2026-03-01T09:30:00+08:00' >/dev/null 2>&1
+
+gp replay -o "$work/dates.md" >/dev/null 2>&1
+expect "the session begun in March is replayed first" \
+	"## 1. the session in March" cat "$work/dates.md"
+expect "and the one begun in December second" \
+	"## 2. the session in December" cat "$work/dates.md"
+expect "a session records the start it was given" \
+	"- started: 2026-12-01T09:00:00+08:00" cat "$work/dates.md"
+expect "and the end" "- ended: 2026-12-01T09:30:00+08:00" \
+	cat "$work/dates.md"
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "two sessions begun in the same second"
 
 # Ending one session and beginning the next takes far less than a second, so

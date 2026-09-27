@@ -213,6 +213,17 @@ line is always present and column-stable. `seq` and `timestamp` are the two
 fields that make the file self-describing: a file read in isolation still knows
 where it belongs in the sequence and when it was written.
 
+A `timestamp` — and a session's `started_at` and `ended_at` — is the wall clock
+at a written offset, `YYYY-MM-DDTHH:MM:SS±HH:MM`, with the offset the date was
+given in. The clock and the offset describe one instant together, so a reader
+must apply the offset, not the offset where the reader happens to be: reading
+`10:00+08:00` as ten in the morning local time lands eight hours from what was
+written on a machine that keeps UTC. A date written without an offset is the
+writer's local time and is stored with the writer's offset; a bare day is
+midnight that way. `Z` is accepted and written back as `+00:00`. The epoch with
+an offset after it (`1700000000 +0800`), which is what a commit object carries,
+is accepted wherever a date is.
+
 Both `tags` and `attachments` are inline bracketed lists, comma-separated.
 
 ## 5. Session files

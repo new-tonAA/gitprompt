@@ -581,6 +581,7 @@ void now_iso8601(struct buf *out);
 void epoch_to_iso8601(i64 t, struct buf *out);
 void local_tz_offset(int *sign, int *hours, int *mins);
 i64 parse_timestamp(const char *s);
+int date_to_iso8601(const char *s, struct buf *out);
 
 /* ------------------------------------------------------------------ */
 /* replay output                                                       */

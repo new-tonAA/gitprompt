@@ -456,37 +456,76 @@ static void gmtime_fields(i64 t, int *y, int *mo, int *d, int *h, int *mi,
 		*wday = tmv.tm_wday;
 }
 
+/*
+ * How far this machine's clock is ahead of UTC at a given instant, in
+ * seconds.
+ *
+ * Asked about the instant in question rather than about now, because the two
+ * are an hour apart either side of a daylight-saving change and a date from
+ * last winter has to be read in the offset that was in force last winter.
+ * mktime reads a broken-down time as local and gmtime gives UTC, so putting
+ * the same instant through both and subtracting leaves the offset.
+ */
+static long tz_offset_secs(i64 t)
+{
+	time_t tt = (time_t)t;
+	struct tm lc, uc;
+
+#ifdef _WIN32
+	localtime_s(&lc, &tt);
+	gmtime_s(&uc, &tt);
+#else
+	localtime_r(&tt, &lc);
+	gmtime_r(&tt, &uc);
+#endif
+	return (long)(mktime(&lc) - mktime(&uc));
+}
+
 /* the local UTC offset, as git writes it: "+0800" */
 void local_tz_offset(int *sign, int *hours, int *mins)
 {
-	time_t t = time(NULL);
-	struct tm local, utc;
-#ifdef _WIN32
-	localtime_s(&local, &t);
-	gmtime_s(&utc, &t);
-#else
-	localtime_r(&t, &local);
-	gmtime_r(&t, &utc);
-#endif
-	{
-		long diff = (long)(mktime(&local) - mktime(&utc));
-		int off_min = (int)(diff / 60);
-		*sign = off_min < 0 ? -1 : 1;
-		if (off_min < 0)
-			off_min = -off_min;
-		*hours = off_min / 60;
-		*mins = off_min % 60;
-	}
+	int off_min = (int)(tz_offset_secs(now_epoch()) / 60);
+
+	*sign = off_min < 0 ? -1 : 1;
+	if (off_min < 0)
+		off_min = -off_min;
+	*hours = off_min / 60;
+	*mins = off_min % 60;
+}
+
+static void iso8601_write(struct buf *out, int y, int mo, int d, int h, int mi,
+			  int s, int sgn, int oh, int om)
+{
+	buf_reset(out);
+	buf_addf(out, "%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
+		 y, mo, d, h, mi, s, sgn < 0 ? '-' : '+', oh, om);
+}
+
+/*
+ * An instant as the clock at a given offset reads at that moment:
+ * "2026-06-03T10:00:00+08:00".
+ *
+ * The fields are the local ones, and the offset beside them says which local.
+ * Shifting the epoch by the offset before breaking it down is what makes the
+ * two agree; without that shift the pair names an instant as many hours away
+ * as the offset is wide, and something written at four in the afternoon here
+ * was printed as eight the same morning.
+ */
+static void iso8601_at(i64 t, int sgn, int oh, int om, struct buf *out)
+{
+	int y, mo, d, h, mi, s;
+
+	gmtime_fields(t + (i64)sgn * (oh * 3600 + om * 60), &y, &mo, &d, &h,
+		      &mi, &s, NULL);
+	iso8601_write(out, y, mo, d, h, mi, s, sgn, oh, om);
 }
 
 void epoch_to_iso8601(i64 t, struct buf *out)
 {
-	int y, mo, d, h, mi, s, sgn, oh, om;
-	gmtime_fields(t, &y, &mo, &d, &h, &mi, &s, NULL);
+	int sgn, oh, om;
+
 	local_tz_offset(&sgn, &oh, &om);
-	buf_reset(out);
-	buf_addf(out, "%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
-		 y, mo, d, h, mi, s, sgn < 0 ? '-' : '+', oh, om);
+	iso8601_at(t, sgn, oh, om, out);
 }
 
 void now_iso8601(struct buf *out)
@@ -500,54 +539,147 @@ void now_iso8601(struct buf *out)
 	localtime_r(&t, &lc);
 #endif
 	local_tz_offset(&sgn, &oh, &om);
-	buf_reset(out);
-	buf_addf(out, "%04d-%02d-%02dT%02d:%02d:%02d%c%02d:%02d",
-		 lc.tm_year + 1900, lc.tm_mon + 1, lc.tm_mday,
-		 lc.tm_hour, lc.tm_min, lc.tm_sec,
-		 sgn < 0 ? '-' : '+', oh, om);
+	iso8601_write(out, lc.tm_year + 1900, lc.tm_mon + 1, lc.tm_mday,
+		      lc.tm_hour, lc.tm_min, lc.tm_sec, sgn, oh, om);
+}
+
+/* a date that has been read, and the offset it was written in */
+struct civil_time {
+	i64 epoch;
+	int sgn, oh, om;
+	int have_off;
+};
+
+/*
+ * Read one of the dates git writes: ISO 8601 with an offset, a bare day, or
+ * an epoch with the offset after it ("1700000000 +0800", with the "@" that
+ * git also allows).  The last of those is what a commit object carries and
+ * what GIT_AUTHOR_DATE is usually given as.  Returns 0, or -1 if the text is
+ * not a date at all.
+ *
+ * `have_off` says whether the text named an offset.  When it did, the fields
+ * become the instant that offset names; when it did not, they are read as
+ * this machine's local time, which is the only reading available.
+ */
+static int read_date(const char *s, struct civil_time *out)
+{
+	struct tm tmv;
+	const char *p = s;
+	int y, mo, d, h = 0, mi = 0, sec = 0, n = 0;
+
+	out->epoch = 0;
+	out->sgn = 1;
+	out->oh = out->om = 0;
+	out->have_off = 0;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+
+	memset(&tmv, 0, sizeof tmv);
+	tmv.tm_isdst = -1;
+
+	if (sscanf(p, "%d-%d-%dT%d:%d:%d%n", &y, &mo, &d, &h, &mi, &sec,
+		   &n) >= 5) {
+		/*
+		 * The offset is looked for after the seconds, never from the
+		 * front: the first '+' or '-' in the text is the date's own
+		 * separator, and a scan from the front read the "-06" of
+		 * "2026-06-03" as an offset and put the date six hours from
+		 * where it belonged.
+		 */
+		const char *q = p + n;
+
+		if (*q == 'Z') {
+			out->have_off = 1;
+		} else if (*q == '+' || *q == '-') {
+			out->sgn = (*q == '-') ? -1 : 1;
+			out->have_off = sscanf(q + 1, "%2d:%2d", &out->oh,
+					       &out->om) == 2 ||
+					sscanf(q + 1, "%2d%2d", &out->oh,
+					       &out->om) == 2;
+		}
+	} else if (strlen(p) == 10 &&
+		   sscanf(p, "%d-%d-%d", &y, &mo, &d) == 3) {
+		/* a bare day: midnight, with no offset to say whose */
+		;
+	} else {
+		char *end;
+		long long e;
+
+		if (*p == '@')
+			p++;
+		e = strtoll(p, &end, 10);
+		/* the digits have to be all of it, or "2026-06-03" would
+		 * read as the epoch 2026 and pass for a date */
+		if (end == p || (*end && *end != ' ' && *end != '\t'))
+			return -1;
+		while (*end == ' ' || *end == '\t')
+			end++;
+		if ((*end == '+' || *end == '-') &&
+		    sscanf(end + 1, "%2d%2d", &out->oh, &out->om) == 2) {
+			out->sgn = (*end == '-') ? -1 : 1;
+			out->have_off = 1;
+		}
+		out->epoch = (i64)e;
+		return 0;
+	}
+
+	tmv.tm_year = y - 1900;
+	tmv.tm_mon = mo - 1;
+	tmv.tm_mday = d;
+	tmv.tm_hour = h;
+	tmv.tm_min = mi;
+	tmv.tm_sec = sec;
+
+	/*
+	 * mktime reads the fields as this machine's local time, so what it
+	 * returns is the instant at which this machine's clock reads them.
+	 * When the text named an offset, the instant meant is the one at
+	 * which a clock at that offset reads them, which is a different
+	 * instant whenever the two offsets differ -- so this machine's own
+	 * offset has to be added back before the named one is taken off.
+	 * Taking the named one off by itself left every date written in the
+	 * offset this machine is already in shifted by that offset.
+	 */
+	out->epoch = (i64)mktime(&tmv);
+	if (out->have_off)
+		out->epoch += tz_offset_secs(out->epoch) -
+			      (i64)out->sgn * (out->oh * 3600 + out->om * 60);
+	return 0;
+}
+
+/*
+ * A date as a person writes one, in the form the store keeps: the ISO 8601
+ * that `--date` takes, or the epoch forms git uses for GIT_AUTHOR_DATE.  A
+ * date given without an offset is read as one where this machine is, which is
+ * the only reading that could be meant, and is written back out in that
+ * offset.  Returns 0 on success, -1 if the text cannot be read as a date at
+ * all -- the caller reports that, rather than quietly recording now instead.
+ */
+int date_to_iso8601(const char *s, struct buf *out)
+{
+	struct civil_time c;
+
+	if (read_date(s, &c) < 0)
+		return -1;
+	if (!c.have_off)
+		local_tz_offset(&c.sgn, &c.oh, &c.om);
+	iso8601_at(c.epoch, c.sgn, c.oh, c.om, out);
+	return 0;
 }
 
 /*
  * Parse the ISO 8601 form above, and also the "1234567890 +0800" form git
- * uses inside commit objects, into epoch seconds.  Returns 0 on success.
+ * uses inside commit objects, into epoch seconds.  Returns 0 for text that is
+ * not a date.
  */
 i64 parse_timestamp(const char *s)
 {
-	struct tm tmv;
-	const char *p = s;
-	int y, mo, d, h, mi, sec = 0;
-	int sign = 0, oh = 0, om = 0;
-	time_t base;
+	struct civil_time c;
 
-	memset(&tmv, 0, sizeof tmv);
-	if (sscanf(p, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &sec) >= 5) {
-		tmv.tm_year = y - 1900;
-		tmv.tm_mon = mo - 1;
-		tmv.tm_mday = d;
-		tmv.tm_hour = h;
-		tmv.tm_min = mi;
-		tmv.tm_sec = sec;
-		/* find the offset suffix */
-		while (*p && *p != 'Z' && *p != '+' && *p != '-')
-			p++;
-		if (*p == '+' || *p == '-') {
-			sign = (*p == '-') ? -1 : 1;
-			sscanf(p + 1, "%2d:%2d", &oh, &om);
-		}
-		base = mktime(&tmv);
-		/* mktime reads the struct as local time; the suffix is the
-		 * local offset, so subtract it to land on the true epoch */
-		return (i64)base - (i64)sign * (oh * 3600 + om * 60);
-	}
-	/* git ident form: "<epoch> <+hhmm>" -- strtoll rather than %lld,
-	 * which msvcrt's sscanf does not accept */
-	{
-		char *end;
-		long long e = strtoll(p, &end, 10);
-		if (end != p)
-			return (i64)e;
-	}
-	return 0;
+	if (read_date(s, &c) < 0)
+		return 0;
+	return c.epoch;
 }
 
 /* ------------------------------------------------------------------ */

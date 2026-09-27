@@ -50,6 +50,46 @@ static char *session_path(struct repo *r, const char *id)
 	return p;
 }
 
+/*
+ * The time to record against a prompt or a session: what `--date` asked for,
+ * else GIT_AUTHOR_DATE, else now.
+ *
+ * Recording a conversation that happened months ago is the case this is for,
+ * and the times are most of what tells one such conversation from another --
+ * a stored "now" on every prompt would say the whole thing was typed in the
+ * minute it was imported.  GIT_AUTHOR_DATE is honoured because that is the
+ * variable git puts a date in, so the same scripts and the same habits work
+ * here; it is read last so that an explicit --date always wins.
+ *
+ * Returns the date, or NULL if the text is not a date -- which the caller
+ * reports rather than falling back on now, since a date that was meant and
+ * silently dropped is worse than one that was refused.
+ */
+static char *record_time(const char *asked)
+{
+	const char *when = asked;
+	struct buf b;
+	char *out;
+
+	if (!when || !*when)
+		when = getenv("GIT_AUTHOR_DATE");
+	if (!when || !*when) {
+		buf_init(&b);
+		now_iso8601(&b);
+		out = xstrdup(buf_cstr(&b));
+		buf_release(&b);
+		return out;
+	}
+	buf_init(&b);
+	if (date_to_iso8601(when, &b) < 0) {
+		buf_release(&b);
+		return NULL;
+	}
+	out = xstrdup(buf_cstr(&b));
+	buf_release(&b);
+	return out;
+}
+
 static char *new_prompt_path(struct repo *r, long seq, const char *body)
 {
 	char *d = prompt_dir(r);
@@ -237,6 +277,7 @@ struct prompt_input {
 	const char *session;
 	const char *model;
 	const char *parent;
+	const char *date;
 	const char *const *tags;
 	size_t nr_tags;
 };
@@ -257,8 +298,16 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 	p.seq = (int)seq;
 
 	buf_init(&file);
-	now_iso8601(&file);
-	p.timestamp = xstrdup(buf_cstr(&file));
+	p.timestamp = record_time(in->date);
+	if (!p.timestamp) {
+		const char *bad = in->date ? in->date : getenv("GIT_AUTHOR_DATE");
+
+		gp_error("prompt: cannot read the date '%s'", bad ? bad : "");
+		free(p.id);
+		free(p.session);
+		buf_release(&file);
+		return 1;
+	}
 
 	buf_init(&who);
 	repo_ident(r, &who);
@@ -334,7 +383,7 @@ int cmd_prompt(struct repo *r, int argc, char **argv)
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"-m=", "-F=", "-t=", "--tag=", "-s=", "--session=",
-		"--model=", "--parent=", "--no-stage", NULL });
+		"--model=", "--parent=", "--date=", "--no-stage", NULL });
 	memset(&in, 0, sizeof in);
 
 	buf_init(&body);
@@ -364,6 +413,7 @@ int cmd_prompt(struct repo *r, int argc, char **argv)
 					  : opts_value(&o, "--session");
 	in.model = opts_value(&o, "--model");
 	in.parent = opts_value(&o, "--parent");
+	in.date = opts_value(&o, "--date");
 	in.tags = tags;
 	in.nr_tags = nr_tags;
 
@@ -385,7 +435,7 @@ int cmd_capture(struct repo *r, int argc, char **argv)
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"-t=", "--tag=", "-s=", "--session=", "--model=",
-		"--parent=", "--no-stage", NULL });
+		"--parent=", "--date=", "--no-stage", NULL });
 	memset(&in, 0, sizeof in);
 
 	buf_init(&body);
@@ -403,6 +453,7 @@ int cmd_capture(struct repo *r, int argc, char **argv)
 					  : opts_value(&o, "--session");
 	in.model = opts_value(&o, "--model");
 	in.parent = opts_value(&o, "--parent");
+	in.date = opts_value(&o, "--date");
 	in.tags = tags;
 	in.nr_tags = nr_tags;
 
@@ -576,7 +627,7 @@ static int session_start(struct repo *r, int argc, char **argv)
 	struct buf b, who;
 
 	opts_init(&o, argc, argv, (const char *const[]){
-		"-t=", "--title=", NULL });
+		"-t=", "--title=", "--date=", NULL });
 	memset(&s, 0, sizeof s);
 
 	s.id = new_session_id();
@@ -589,8 +640,17 @@ static int session_start(struct repo *r, int argc, char **argv)
 		s.title = xstrdup(title ? title : "untitled session");
 	}
 	buf_init(&b);
-	now_iso8601(&b);
-	s.started_at = xstrdup(buf_cstr(&b));
+	s.started_at = record_time(opts_value(&o, "--date"));
+	if (!s.started_at) {
+		const char *bad = opts_value(&o, "--date");
+
+		gp_error("session start: cannot read the date '%s'",
+			 bad ? bad : getenv("GIT_AUTHOR_DATE"));
+		free(s.id);
+		free(s.title);
+		buf_release(&b);
+		return 1;
+	}
 	buf_init(&who);
 	repo_ident(r, &who);
 	s.author = xstrdup(buf_cstr(&who));
@@ -611,12 +671,16 @@ static int session_start(struct repo *r, int argc, char **argv)
 	}
 }
 
-static int session_end(struct repo *r)
+static int session_end(struct repo *r, int argc, char **argv)
 {
 	char *id = repo_current_session(r);
 	char *path;
 	struct buf b;
 	struct session s;
+	struct opts o;
+	const char *bad;
+
+	opts_init(&o, argc, argv, (const char *const[]){ "--date=", NULL });
 
 	if (!id) {
 		gp_error("session end: no session is current");
@@ -643,12 +707,20 @@ static int session_end(struct repo *r)
 		s.id = xstrdup(id);
 
 	{
-		struct buf when;
-		buf_init(&when);
-		now_iso8601(&when);
+		char *when = record_time(opts_value(&o, "--date"));
+
+		if (!when) {
+			bad = opts_value(&o, "--date");
+			gp_error("session end: cannot read the date '%s'",
+				 bad ? bad : getenv("GIT_AUTHOR_DATE"));
+			session_release(&s);
+			buf_release(&b);
+			free(path);
+			free(id);
+			return 1;
+		}
 		free(s.ended_at);
-		s.ended_at = xstrdup(buf_cstr(&when));
-		buf_release(&when);
+		s.ended_at = when;
 	}
 
 	buf_reset(&b);
@@ -772,7 +844,7 @@ int cmd_session(struct repo *r, int argc, char **argv)
 	if (!strcmp(sub, "start"))
 		return session_start(r, argc - 1, argv + 1);
 	if (!strcmp(sub, "end"))
-		return session_end(r);
+		return session_end(r, argc - 1, argv + 1);
 	if (!strcmp(sub, "list"))
 		return session_list(r);
 	if (!strcmp(sub, "show")) {

@@ -186,6 +186,31 @@ The order is the order the prompts were written in, and the session boundaries
 are explicit, so an agent reading the document knows where context was reset.
 That is the property the storage format exists to preserve.
 
+### Recording a conversation that happened earlier
+
+A prompt recorded today is dated today, which is right for one being typed now
+and wrong for one being written down afterwards — and when a run is imported
+after the fact, the dates are most of what tells one run from another. So they
+can be given:
+
+```console
+$ gitprompt session start -t "Plan the tokenizer" --date='2026-03-01T09:00:00+08:00'
+$ gitprompt prompt --date='2026-03-01T09:12:40+08:00' -m "Write a tokenizer first."
+$ gitprompt session end --date='2026-03-01T09:30:00+08:00'
+```
+
+`--date` takes what git takes in `GIT_AUTHOR_DATE` — ISO 8601 with or without
+an offset, a bare day, or an `<epoch> <offset>` pair — and that variable is
+honoured when no `--date` is given, so a script that sets it for git sets it
+here too. An explicit `--date` wins over it. A date given with an offset is kept
+in that offset; one given without is read as the machine's local time and
+written back out that way, so the document `replay` produces shows the wall
+clock the prompt was written at. A date that cannot be read is refused rather
+than silently replaced with now.
+
+Sessions are ordered by when they began, so a run recorded out of order still
+comes back in the order it happened.
+
 ## Commands
 
 `gitprompt help` lists them all; `gitprompt help <command>` describes one. The
@@ -247,21 +272,22 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **411 checks, 0 failures**.
+The end-to-end suite passes: **465 checks, 0 failures**.
 
 ```console
 $ make test
 ```
 
-`test/smoke.sh` covers the object model, sessions and prompts, committing,
-reconstruction (ordering and session boundaries), branches, tags, history
-editing, merges including conflicts and `--abort`, merges that follow a file that
-moved, `status` and `diff` on a move, the commit editor, per-command option
-validation, local remotes, serving over `gp://`, packed object stores, and git
-interoperability — the last being the section that matters most, since a
-gitprompt repository is meant to be an ordinary git repository. As part of it,
-`git verify-pack` checks the pack `gc` writes against git's own index, and
-`git ls-files` checks the index gitprompt wrote against git's own reader.
+`test/smoke.sh` covers the object model, sessions and prompts, the dates a
+prompt and a session can be given, committing, reconstruction (ordering and
+session boundaries), branches, tags, history editing, merges including conflicts
+and `--abort`, merges that follow a file that moved, `status` and `diff` on a
+move, the commit editor, per-command option validation, local remotes, serving
+over `gp://`, packed object stores, and git interoperability — the last being
+the section that matters most, since a gitprompt repository is meant to be an
+ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
+writes against git's own index, and `git ls-files` checks the index gitprompt
+wrote against git's own reader.
 
 ### Following a file that moved
 

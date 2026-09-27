@@ -215,13 +215,14 @@ const struct command commands[] = {
 
 	/* record prompts */
 	{ "session",    cmd_session,    "Begin, end and inspect prompting sessions",
-	  "session <start|end|list|show|use|current> [...]" },
+	  "session start [-t TITLE] [--date WHEN]\n"
+	  "   session <end [--date WHEN]|list|show [ID]|use ID|current>" },
 	{ "prompt",     cmd_prompt,     "Record one prompt",
 	  "prompt [-m TEXT] [-F FILE] [-t TAG]... [--model M] [--parent ID]"
-	  " [-s SESSION] [--no-stage]" },
+	  " [-s SESSION] [--date WHEN] [--no-stage]" },
 	{ "capture",    cmd_capture,    "Record a prompt read from stdin",
 	  "capture [-t TAG]... [--model M] [--parent ID] [-s SESSION]"
-	  " [--no-stage]" },
+	  " [--date WHEN] [--no-stage]" },
 	{ "outcome",    cmd_outcome,    "Attach a note about what a prompt produced",
 	  "outcome <prompt-id> <text>\n   outcome --last <text>" },
 	{ "add",        cmd_add,        "Add file contents to the index",
