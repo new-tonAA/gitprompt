@@ -1039,6 +1039,78 @@ expect "and it is a change to the name the index has" \
 	"diff --git a/b.txt b/b.txt" gp diff
 
 # ------------------------------------------------------------------
+say "the columns of a diffstat"
+
+# Three things share the width: the paths, the changed-line count and the bar.
+# The bar gives way first but only down to a floor, since one with no height in
+# it says nothing; what is left over goes to the paths, and a path is cut only
+# when even that does not fit.  A path keeps its tail, because the end of a path
+# is the part that says which file it is.
+#
+# Every number in the block below is the one git prints for this repository, and
+# the block is compared whole, so the columns are pinned to git's rather than to
+# whatever gitprompt happens to produce.
+mergecase "$work/diff-stat"
+mkdir -p deep/directory/that/goes/on/and/on/and/on/on
+longpath=deep/directory/that/goes/on/and/on/and/on/on/deep.txt
+printf 'one\ntwo\nthree\n' > a.txt
+seq 1 5 > big.txt
+printf '\000\001\002' > blob.dat
+printf 'x\ny\n' > "$longpath"
+printf 'no newline here' > tail.txt
+# staged by name rather than with -A, so that the repository does not stage the
+# git directory living inside it and put its own blobs in the output
+gp add a.txt big.txt blob.dat "$longpath" tail.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+
+seq 1 205 > big.txt
+printf 'one\nTWO\nthree\nfour\n' > a.txt
+printf '\000\001\002\003\004\005\006\007\010\011' > blob.dat
+seq 1 6 > "$longpath"
+printf 'still none' > tail.txt
+gp add a.txt big.txt blob.dat "$longpath" tail.txt >/dev/null 2>&1
+
+cat > "$work/want-stat" <<'EOF'
+ a.txt                                              |   3 +-
+ big.txt                                            | 200 +++++++++++++++++++++
+ blob.dat                                           | Bin 3 -> 10 bytes
+ .../that/goes/on/and/on/and/on/on/deep.txt         |   8 +-
+ tail.txt                                           |   2 +-
+ 5 files changed, 209 insertions(+), 4 deletions(-)
+EOF
+gp diff --cached --stat | tr -d '\r' > "$work/got-stat"
+expect_same "a diffstat is laid out in the columns git lays it out in" \
+	"$work/got-stat" "$work/want-stat"
+
+# the three rules that decide those columns, named one at a time so that a
+# failure says which of them moved rather than only that the block changed
+expect "a path too long for its column keeps its tail" \
+	".../that/goes/on/and/on/and/on/on/deep.txt" gp diff --cached --stat
+expect "a file whose contents are not lines is measured in bytes" \
+	"Bin 3 -> 10 bytes" gp diff --cached --stat
+expect "a change too large for a bar leaves the counts to say it" \
+	"| 200 ++++" gp diff --cached --stat
+
+# A last line with no newline is a different line from the same text with one --
+# which is why the hunk above counts `no newline here` as changed -- and a diff
+# has to say which of the two it is showing, since the text alone cannot.
+cat > "$work/want-tail" <<'EOF'
+diff --git a/tail.txt b/tail.txt
+index 1045c4a..3814f79 100644
+--- a/tail.txt
++++ b/tail.txt
+@@ -1 +1 @@
+-no newline here
+\ No newline at end of file
++still none
+\ No newline at end of file
+EOF
+gp diff --cached | tr -d '\r' | sed -n '/^diff --git a\/tail.txt/,$p' \
+	> "$work/got-tail"
+expect_same "a last line with no newline says so" "$work/got-tail" \
+	"$work/want-tail"
+
+# ------------------------------------------------------------------
 say "writing the commit message in an editor"
 
 # Neither -m nor -F, so git falls back on an editor: the checks below write

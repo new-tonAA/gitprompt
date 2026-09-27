@@ -7,6 +7,7 @@
  */
 #include "gp.h"
 
+#include <ctype.h>
 #include <sys/stat.h>
 
 /* ------------------------------------------------------------------ */
@@ -1611,7 +1612,37 @@ static int looks_binary(const void *data, size_t len)
 	return 0;
 }
 
-static int append_hunks(const struct oline *o, size_t n, struct buf *out)
+/*
+ * The name git puts after a hunk's range: the last line above the hunk that
+ * begins with a letter, an underscore or a dollar sign, which is the guess git
+ * makes at the enclosing function when it has no language-aware pattern to go
+ * on -- the line above a hunk in ordinary prose is usually the one that says
+ * what the hunk is about.  Trailing whitespace goes and the line is cut at 79
+ * columns, both as git trims them, and a hunk at the top of a file has no line
+ * above it to name.
+ */
+static size_t funcname_before(const struct dline *a, size_t line,
+			      const char **out)
+{
+	while (line) {
+		const struct dline *l = &a[--line];
+		size_t n = l->len;
+
+		if (!n || !(isalpha((unsigned char)l->p[0]) ||
+			    l->p[0] == '_' || l->p[0] == '$'))
+			continue;
+		while (n && isspace((unsigned char)l->p[n - 1]))
+			n--;
+		if (n > 79)
+			n = 79;
+		*out = l->p;
+		return n;
+	}
+	return 0;
+}
+
+static int append_hunks(const struct oline *o, size_t n,
+			const struct dline *la, struct buf *out)
 {
 	size_t i;
 	int any_change = 0;
@@ -1648,14 +1679,49 @@ static int append_hunks(const struct oline *o, size_t n, struct buf *out)
 				if (o[k].op != '-')
 					b_len++;
 			}
-			buf_addf(out, "@@ -%lu,%lu +%lu,%lu @@\n",
-				 (unsigned long)a_start, (unsigned long)a_len,
-				 (unsigned long)b_start, (unsigned long)b_len);
+			/*
+			 * A side's count is written only when it is not one,
+			 * and when it is none the line before the range is
+			 * named instead, so that "-0,0" reads as "above the
+			 * first line" -- the two spellings a patch reader
+			 * takes, and the ones git writes.
+			 */
+			buf_addf(out, "@@ -%lu",
+				 (unsigned long)(a_len ? a_start : a_start - 1));
+			if (a_len != 1)
+				buf_addf(out, ",%lu", (unsigned long)a_len);
+			buf_addf(out, " +%lu",
+				 (unsigned long)(b_len ? b_start : b_start - 1));
+			if (b_len != 1)
+				buf_addf(out, ",%lu", (unsigned long)b_len);
+			buf_addstr(out, " @@");
+			{
+				const char *fn;
+				size_t fnlen = funcname_before(la, o[first].a,
+							       &fn);
+
+				if (fnlen) {
+					buf_addch(out, ' ');
+					buf_add(out, fn, fnlen);
+				}
+			}
+			buf_addch(out, '\n');
 			for (k = first; k < last; k++) {
 				buf_addch(out, o[k].op);
 				buf_add(out, o[k].p, o[k].len);
-				if (!o[k].len || o[k].p[o[k].len - 1] != '\n')
-					buf_addch(out, '\n');
+				if (o[k].len && o[k].p[o[k].len - 1] == '\n')
+					continue;
+				/*
+				 * A last line with no newline ends the file it
+				 * came from, and a diff has to say so: without
+				 * this the line reads as one that has a newline,
+				 * which is a different line -- and, since a line
+				 * compares as much by its newline as by its text,
+				 * it is the only way to tell the two apart.
+				 */
+				buf_addch(out, '\n');
+				buf_addstr(out,
+					   "\\ No newline at end of file\n");
 			}
 		}
 	}
@@ -1705,7 +1771,7 @@ int diff_buffers(const char *a_label, const void *a, size_t alen,
 	} else {
 		buf_addf(out, "--- %s\n", a_label);
 		buf_addf(out, "+++ %s\n", b_label);
-		append_hunks(o, n, out);
+		append_hunks(o, n, la, out);
 	}
 
 	free(la);
@@ -1717,8 +1783,25 @@ int diff_buffers(const char *a_label, const void *a, size_t alen,
 /* ------------------------------------------------------------------ */
 
 /* walk two trees in parallel and emit a diff per differing path */
+/*
+ * One line of --stat, gathered rather than written.  The lines cannot go out as
+ * they are found, because git pads every path to the longest one in the same
+ * output and sizes each bar against the largest change in it -- figures that
+ * are only known once the last file has been seen.  So the rows are kept and
+ * laid out together at the end.
+ */
+struct stat_row {
+	char *label;            /* owned; a move reads "old => new" */
+	long add, del;          /* changed lines, or the two byte counts of a binary */
+	int binary;
+};
+
 struct stat_totals {
 	size_t files, adds, dels;
+	long max_change;
+	long bin_width;         /* widest "Bin XXX -> YYY bytes" */
+	struct stat_row *row;
+	size_t nr, alloc;
 };
 
 struct tdiff_ctx {
@@ -1730,32 +1813,102 @@ struct tdiff_ctx {
 	struct stat_totals totals;
 };
 
-/*
- * One line of --stat: the path, the number of changed lines, and a bar for
- * each of them.  A move names both paths, which is what tells a reader where
- * the file went.
- */
-static void stat_line(struct buf *out, const char *label, size_t add, size_t del)
+static struct stat_row *stat_row_new(struct stat_totals *t, const char *label)
 {
-	size_t k;
+	struct stat_row *r;
 
-	buf_addf(out, " %s | %lu", label, (unsigned long)(add + del));
-	if (add || del) {
-		buf_addch(out, ' ');
-		for (k = 0; k < add; k++)
-			buf_addch(out, '+');
-		for (k = 0; k < del; k++)
-			buf_addch(out, '-');
+	if (t->nr == t->alloc) {
+		t->alloc = t->alloc ? t->alloc * 2 : 16;
+		t->row = xrealloc(t->row, t->alloc * sizeof *t->row);
 	}
-	buf_addch(out, '\n');
+	r = &t->row[t->nr++];
+	memset(r, 0, sizeof *r);
+	r->label = xstrdup(label);
+	return r;
 }
 
-/* git's line for a file whose contents are not lines */
-static void stat_binary_line(struct buf *out, const char *label,
+/*
+ * The number of changed lines between two texts, as a --stat row.  A move names
+ * both paths, which is what tells a reader where the file went.
+ */
+static void stat_line(struct stat_totals *t, const char *label, size_t add,
+		      size_t del)
+{
+	struct stat_row *r = stat_row_new(t, label);
+
+	r->add = (long)add;
+	r->del = (long)del;
+	if ((long)(add + del) > t->max_change)
+		t->max_change = (long)(add + del);
+	t->files++;
+	t->adds += add;
+	t->dels += del;
+}
+
+static long decimal_width(long v)
+{
+	long n = 1;
+
+	while (v >= 10) {
+		v /= 10;
+		n++;
+	}
+	return n;
+}
+
+/* git's row for a file whose contents are not lines */
+static void stat_binary_line(struct stat_totals *t, const char *label,
 			     size_t old_len, size_t new_len)
 {
-	buf_addf(out, " %s | Bin %lu -> %lu bytes\n", label,
-		 (unsigned long)old_len, (unsigned long)new_len);
+	struct stat_row *r = stat_row_new(t, label);
+	long w;
+
+	r->binary = 1;
+	r->add = (long)new_len;
+	r->del = (long)old_len;
+	/* the row reads "Bin OLD -> NEW bytes", so those sizes set the width too */
+	w = 14 + decimal_width(r->del) + decimal_width(r->add);
+	if (w > t->bin_width)
+		t->bin_width = w;
+	t->files++;
+}
+
+/*
+ * The width --stat has to lay itself out in: what the terminal reports through
+ * COLUMNS, or the 80 git falls back on when nothing says otherwise.
+ */
+static long stat_width(void)
+{
+	const char *c = getenv("COLUMNS");
+	long n;
+
+	if (c && *c) {
+		n = strtol(c, NULL, 10);
+		if (n > 0)
+			return n;
+	}
+	return 80;
+}
+
+/*
+ * How much of a bar a change of `it` out of `max_change` lines earns.  git
+ * spends the columns linearly, and gives every change that is not zero at
+ * least one column, so that a file which changed cannot be drawn as one that
+ * did not -- that rounding up is the whole point of the sum below.
+ */
+static long stat_bar(long it, long graph_width, long max_change)
+{
+	if (!it)
+		return 0;
+	if (max_change <= 0)
+		return it;
+	return (it * (graph_width - 1)) / max_change + 1;
+}
+
+/* a padding count that printf will not read as a left-justify flag */
+static int pad(long width, long len)
+{
+	return len < width ? (int)(width - len) : 0;
 }
 
 /*
@@ -1775,6 +1928,149 @@ static void stat_summary(const struct stat_totals *t, struct buf *out)
 		buf_addf(out, ", %lu deletion%s(-)", (unsigned long)t->dels,
 			 t->dels == 1 ? "" : "s");
 	buf_addch(out, '\n');
+}
+
+/*
+ * Lay the gathered rows out and write them, followed by the summary.
+ *
+ * Three things share the width: the paths, the changed-line count, and the bar.
+ * The bar gives up its columns first, but only down to a floor -- an eighth of
+ * the width below three eighths of it, so 6 columns at the standard 80 -- since
+ * a bar with no height in it says nothing at all.  Whatever those two leave
+ * goes to the paths, and only when they still do not fit is a path cut, because
+ * a reader can spare the front of a path more easily than the change beside it.
+ */
+static void stat_render(struct stat_totals *t, struct buf *out)
+{
+	long width = stat_width();
+	long name_width = 0, number_width, graph_width;
+	long i;
+
+	for (i = 0; i < (long)t->nr; i++) {
+		long l = (long)strlen(t->row[i].label);
+
+		if (l > name_width)
+			name_width = l;
+	}
+	/* a "Bin" row is three columns wide and can be wider than any count */
+	number_width = t->bin_width ? 3 : 0;
+	if (decimal_width(t->max_change) > number_width)
+		number_width = decimal_width(t->max_change);
+
+	/* below this there is not even room for the columns themselves */
+	if (width < 16 + 6 + number_width)
+		width = 16 + 6 + number_width;
+
+	graph_width = t->max_change + 4 > t->bin_width
+		? t->max_change : t->bin_width - 4;
+
+	if (name_width + number_width + 6 + graph_width > width) {
+		if (graph_width > width * 3 / 8 - number_width - 6) {
+			graph_width = width * 3 / 8 - number_width - 6;
+			if (graph_width < 6)
+				graph_width = 6;
+		}
+		if (name_width > width - number_width - 6 - graph_width)
+			name_width = width - number_width - 6 - graph_width;
+		else
+			graph_width = width - number_width - 6 - name_width;
+	}
+
+	for (i = 0; i < (long)t->nr; i++) {
+		struct stat_row *r = &t->row[i];
+		const char *name = r->label;
+		const char *prefix = "";
+		long name_len = (long)strlen(name);
+		long len = name_width, padding;
+
+		/*
+		 * A path too long for its column keeps its tail -- the end of a
+		 * path is the part that says which file it is -- and the
+		 * directories dropped in front of it become "...".  The tail is
+		 * cut again at the first slash in it, so what is left reads as a
+		 * path rather than starting in the middle of a name.
+		 */
+		if (name_width < name_len) {
+			const char *slash;
+
+			prefix = "...";
+			len -= 3;
+			if (len < 0)
+				len = 0;
+			while (name_len > len && *name) {
+				name++;
+				name_len--;
+			}
+			slash = strchr(name, '/');
+			if (slash)
+				name = slash;
+		}
+		padding = len - (long)strlen(name);
+		if (padding < 0)
+			padding = 0;
+
+		if (r->binary) {
+			buf_addf(out, " %s%s%*s | %*s", prefix, name,
+				 pad(len, (long)strlen(name)), "",
+				 (int)number_width, "Bin");
+			if (!r->add && !r->del) {
+				buf_addch(out, '\n');
+				continue;
+			}
+			buf_addf(out, " %ld -> %ld bytes\n", r->del, r->add);
+			continue;
+		}
+
+		/*
+		 * The bar is drawn only while it can stand for the largest
+		 * change in the output; once it is wider than that, the counts
+		 * beside it are the whole story and are printed unscaled.
+		 */
+		{
+			long add = r->add, del = r->del;
+
+			if (graph_width <= t->max_change) {
+				long total = stat_bar(add + del, graph_width,
+						      t->max_change);
+
+				if (total < 2 && add && del)
+					total = 2;
+				if (add < del) {
+					add = stat_bar(add, graph_width,
+						       t->max_change);
+					del = total - add;
+				} else {
+					del = stat_bar(del, graph_width,
+						       t->max_change);
+					add = total - del;
+				}
+			}
+			buf_addf(out, " %s%s%*s | %*ld", prefix, name,
+				 (int)padding, "", (int)number_width,
+				 r->add + r->del);
+			if (r->add + r->del) {
+				long k;
+
+				buf_addch(out, ' ');
+				for (k = 0; k < add; k++)
+					buf_addch(out, '+');
+				for (k = 0; k < del; k++)
+					buf_addch(out, '-');
+			}
+			buf_addch(out, '\n');
+		}
+	}
+	stat_summary(t, out);
+}
+
+static void stat_totals_release(struct stat_totals *t)
+{
+	size_t i;
+
+	for (i = 0; i < t->nr; i++)
+		free(t->row[i].label);
+	free(t->row);
+	memset(t, 0, sizeof *t);
 }
 
 /* how many lines two texts have changed between them, for a stat line */
@@ -1804,15 +2100,11 @@ static void tdiff_stat(struct tdiff_ctx *c, const char *label,
 	struct stat_counts counts;
 
 	if (tdiff_binary(a, b)) {
-		stat_binary_line(c->out, label, a->len, b->len);
-		c->totals.files++;
+		stat_binary_line(&c->totals, label, a->len, b->len);
 		return;
 	}
 	diff_counts(a->b, a->len, b->b, b->len, &counts);
-	stat_line(c->out, label, counts.add, counts.del);
-	c->totals.files++;
-	c->totals.adds += counts.add;
-	c->totals.dels += counts.del;
+	stat_line(&c->totals, label, counts.add, counts.del);
 }
 
 static void tdiff_emit(struct tdiff_ctx *c, const char *path,
@@ -1837,9 +2129,45 @@ static void tdiff_emit(struct tdiff_ctx *c, const char *path,
 	}
 
 	buf_addf(c->out, "diff --git a/%s b/%s\n", path, path);
-	if (old_oid && new_oid && old_mode != new_mode)
+
+	/*
+	 * A file that arrived or went is named as such, and a mode that
+	 * changed is spelled out on its own pair of lines; either way the mode
+	 * is on a line of its own, which is why the index line below carries a
+	 * mode only in the case left over -- both sides present, both the same
+	 * mode -- and why it carries none when one of them is absent.
+	 */
+	if (!old_oid)
+		buf_addf(c->out, "new file mode %06o\n", new_mode);
+	else if (!new_oid)
+		buf_addf(c->out, "deleted file mode %06o\n", old_mode);
+	else if (old_mode != new_mode)
 		buf_addf(c->out, "old mode %06o\nnew mode %06o\n", old_mode,
 			 new_mode);
+
+	/*
+	 * The index line names the two blobs the hunks below are the difference
+	 * between, so it appears exactly when there are two different blobs to
+	 * name: a file that arrived or went has the null id on the side that is
+	 * missing, and a mode that changed on its own, or a file that moved
+	 * whole, has the same id on both and so gets no line at all.
+	 */
+	{
+		const oid_t *o = old_oid ? old_oid : &null_oid;
+		const oid_t *nw = new_oid ? new_oid : &null_oid;
+
+		if (!oid_equal(o, nw)) {
+			char *o1 = abbrev_oid(o);
+			char *o2 = abbrev_oid(nw);
+
+			buf_addf(c->out, "index %s..%s", o1, o2);
+			if (old_oid && new_oid && old_mode == new_mode)
+				buf_addf(c->out, " %06o", new_mode);
+			buf_addch(c->out, '\n');
+			free(o1);
+			free(o2);
+		}
+	}
 
 	alab = old_oid ? xstrfmt("a/%s", path) : xstrdup("/dev/null");
 	blab = new_oid ? xstrfmt("b/%s", path) : xstrdup("/dev/null");
@@ -1892,8 +2220,22 @@ static void tdiff_emit_rename(struct tdiff_ctx *c, const char *from,
 	if (!oid_equal(old_oid, new_oid)) {
 		char *alab = xstrfmt("a/%s", from);
 		char *blab = xstrfmt("b/%s", to);
+		char *o1 = abbrev_oid(old_oid);
+		char *o2 = abbrev_oid(new_oid);
+
+		/* the same rule the pair of names on the line above does not
+		 * change: the ids differ, so the two blobs are named */
+		if (old_mode != new_mode)
+			buf_addf(c->out, "old mode %06o\nnew mode %06o\n",
+				 old_mode, new_mode);
+		buf_addf(c->out, "index %s..%s", o1, o2);
+		if (old_mode == new_mode)
+			buf_addf(c->out, " %06o", new_mode);
+		buf_addch(c->out, '\n');
 
 		diff_buffers(alab, a.b, a.len, blab, b.b, b.len, c->out, 0);
+		free(o1);
+		free(o2);
 		free(alab);
 		free(blab);
 	}
@@ -1957,7 +2299,9 @@ static void tdiff_recurse(struct tdiff_ctx *c, const char *prefix,
 				char *full = xstrfmt("%s/", p);
 				tdiff_recurse(c, full, &ot.e[i].oid, &nt.e[j].oid);
 				free(full);
-			} else if (!oid_equal(&ot.e[i].oid, &nt.e[j].oid)) {
+			} else if (!oid_equal(&ot.e[i].oid, &nt.e[j].oid) ||
+				   ot.e[i].mode != nt.e[j].mode) {
+				/* a mode that changed on its own still changed */
 				tdiff_emit(c, p, &ot.e[i].oid, ot.e[i].mode,
 					   &nt.e[j].oid, nt.e[j].mode);
 			}
@@ -1998,12 +2342,13 @@ void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
 	c.stat_only = stat_only;
 	c.rl = &rl;
 	c.old_ist = &old_ist;
-	c.totals.files = c.totals.adds = c.totals.dels = 0;
+	memset(&c.totals, 0, sizeof c.totals);
 
 	tdiff_recurse(&c, "", old_tree, new_tree);
 
 	if (stat_only && c.totals.files)
-		stat_summary(&c.totals, out);
+		stat_render(&c.totals, out);
+	stat_totals_release(&c.totals);
 
 	rename_list_release(&rl);
 	index_release(&old_ist);
@@ -2019,12 +2364,13 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 	int cached, stat_only;
 	oid_t old_tree, new_tree;
 	int have_old = 0, have_new = 0;
-	struct stat_totals totals = { 0, 0, 0 };
+	struct stat_totals totals;
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"--cached", "--staged", "--stat", NULL });
 	cached = opts_flag(&o, "--cached") || opts_flag(&o, "--staged");
 	stat_only = opts_flag(&o, "--stat");
+	memset(&totals, 0, sizeof totals);
 
 	buf_init(&out);
 
@@ -2079,9 +2425,12 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 			full = xstrfmt("%s/%s", r->root, ist.e[i].path);
 			struct buf w;
 			struct buf piece;
+			struct buf body;
+			oid_t woid;
 			int changed;
 			buf_init(&w);
 			buf_init(&piece);
+			buf_init(&body);
 			if (read_file(full, &w) < 0)
 				buf_reset(&w);
 			{
@@ -2093,20 +2442,22 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 
 					if (looks_binary(old.b, old.len) ||
 					    looks_binary(w.b, w.len)) {
-						stat_binary_line(&out, ist.e[i].path,
-								 old.len, w.len);
-						totals.files++;
+						/* a file the work tree did not
+						 * touch is not a row */
+						if (old.len != w.len ||
+						    memcmp(old.b, w.b, old.len))
+							stat_binary_line(
+								&totals,
+								ist.e[i].path,
+								old.len, w.len);
 					} else {
 						diff_counts(old.b, old.len, w.b,
 							    w.len, &counts);
-						if (counts.add || counts.del) {
-							stat_line(&out, ist.e[i].path,
+						if (counts.add || counts.del)
+							stat_line(&totals,
+								  ist.e[i].path,
 								  counts.add,
 								  counts.del);
-							totals.files++;
-							totals.adds += counts.add;
-							totals.dels += counts.del;
-						}
 					}
 					buf_release(&old);
 					free(full);
@@ -2114,17 +2465,42 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 					buf_release(&piece);
 					continue;
 				}
-				buf_addf(&piece, "diff --git a/%s b/%s\n",
-					 ist.e[i].path, ist.e[i].path);
 				{
 					char *alab = xstrfmt("a/%s", ist.e[i].path);
 					char *blab = xstrfmt("b/%s", ist.e[i].path);
 					changed = diff_buffers(alab, old.b, old.len,
 							       blab, w.b, w.len,
-							       &piece, 0);
+							       &body, 0);
 					free(alab);
 					free(blab);
 				}
+				/*
+				 * The work tree's side of the index line names a
+				 * blob that was never written, so it is hashed
+				 * here and not stored -- which is what git does
+				 * with the file it is diffing, and the only way
+				 * the line can name both ends.
+				 */
+				if (changed) {
+					const oid_t *w2 = &null_oid;
+					char *o1, *o2;
+
+					if (odb_hash(&r->odb, OBJ_BLOB, w.b, w.len,
+						     &woid, 0) == 0)
+						w2 = &woid;
+					o1 = abbrev_oid(&ist.e[i].oid);
+					o2 = abbrev_oid(w2);
+					buf_addf(&piece,
+						 "diff --git a/%s b/%s\n",
+						 ist.e[i].path, ist.e[i].path);
+					buf_addf(&piece,
+						 "index %s..%s %06o\n", o1, o2,
+						 ist.e[i].mode);
+					buf_add(&piece, body.b, body.len);
+					free(o1);
+					free(o2);
+				}
+				buf_release(&body);
 				buf_release(&old);
 			}
 			if (changed)
@@ -2135,8 +2511,9 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 		}
 		index_release(&ist);
 		if (stat_only && totals.files)
-			stat_summary(&totals, &out);
+			stat_render(&totals, &out);
 	}
+	stat_totals_release(&totals);
 
 	fwrite(out.b, 1, out.len, stdout);
 	buf_release(&out);
