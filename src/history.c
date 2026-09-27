@@ -351,6 +351,59 @@ static int session_cmp(const void *a, const void *b)
 	return strcmp(x->id ? x->id : "", y->id ? y->id : "");
 }
 
+/* the lowest sequence number a group holds, or -1 if it holds none */
+static int group_first_seq(const struct session_group *g)
+{
+	int best = -1;
+	size_t i;
+
+	for (i = 0; i < g->prompts.nr; i++) {
+		int s = g->prompts.e[i].prompt->seq;
+
+		if (best < 0 || s < best)
+			best = s;
+	}
+	return best;
+}
+
+/*
+ * Sessions in start order, and two that started in the same second in the
+ * order their prompts were written.
+ *
+ * The tie-break is the point.  It used to be the session id, whose tail is
+ * random -- so two sessions begun back to back, which is what ending one and
+ * beginning the next does, came out in whichever order their random suffixes
+ * happened to fall, and a conversation recorded into a repository (every
+ * session in the same second) came back with its sessions shuffled.  The
+ * sequence number is repository-wide and is what the file layout promises the
+ * order is recoverable from; it is the right thing to fall back to.
+ */
+static int session_group_cmp(const void *a, const void *b)
+{
+	const struct session_group *x = a, *y = b;
+	int xs, ys;
+
+	/* the unattributed prompts are not a session, and stay last */
+	if (!x->session || !y->session) {
+		if (!x->session && !y->session)
+			return 0;
+		return x->session ? -1 : 1;
+	}
+	if (x->session->started_ts != y->session->started_ts)
+		return x->session->started_ts < y->session->started_ts ? -1 : 1;
+	xs = group_first_seq(x);
+	ys = group_first_seq(y);
+	if (xs != ys) {
+		if (xs < 0)
+			return 1;
+		if (ys < 0)
+			return -1;
+		return xs < ys ? -1 : 1;
+	}
+	return strcmp(x->session->id ? x->session->id : "",
+		      y->session->id ? y->session->id : "");
+}
+
 /* append a group; a NULL session means the unattributed bucket */
 static struct session_group *group_append(struct session_groups *out,
 					  struct session *s)
@@ -438,6 +491,15 @@ void group_by_session(struct repo *r, const struct prompt_list *in,
 
 		group_take_prompt(target, &in->e[i]);
 	}
+
+	/*
+	 * The groups are placed in the order sessions started, which the loop
+	 * above cannot know until the prompts are in them: a session that
+	 * started in the same second as another is told apart by the sequence
+	 * numbers its prompts carry, and those live on the prompts.
+	 */
+	if (out->nr > 1)
+		qsort(out->g, out->nr, sizeof(*out->g), session_group_cmp);
 
 	for (i = 0; i < out->nr; i++)
 		if (out->g[i].prompts.nr > 1)

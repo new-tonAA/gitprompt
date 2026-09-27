@@ -2055,6 +2055,33 @@ expect "the new branch records where it came from" "Created from origin/side" \
 expect "the new branch has the remote's work" "side work" gp log --oneline
 
 # ------------------------------------------------------------------
+say "two sessions begun in the same second"
+
+# Ending one session and beginning the next takes far less than a second, so
+# the two carry the same start time and only the sequence numbers tell them
+# apart.  The order used to fall back on the session id, whose tail is random
+# -- so a conversation recorded into a repository, where every session starts
+# in the same second, came back with its sessions shuffled.
+twos=$work/twosessions
+rm -rf "$twos"
+mkdir -p "$twos" || exit 2
+cd "$twos" || exit 2
+gp init . >/dev/null 2>&1
+gp session start -t "the first session" >/dev/null 2>&1
+gp prompt -m "the first thing said" >/dev/null 2>&1
+gp session end >/dev/null 2>&1
+gp session start -t "the second session" >/dev/null 2>&1
+gp prompt -m "the second thing said" >/dev/null 2>&1
+gp session end >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "two sessions" >/dev/null 2>&1
+gp replay -o "$work/twos.md" >/dev/null 2>&1
+expect "the first session is replayed first" "## 1. the first session" cat "$work/twos.md"
+expect "and the session begun after it follows" "## 2. the second session" \
+	cat "$work/twos.md"
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "an argument that is not ASCII"
 
 # Windows hands a C program its arguments in the ANSI code page, so a prompt
