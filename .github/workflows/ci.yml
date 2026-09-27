@@ -1,11 +1,10 @@
-# Build gitprompt and run the suite on the Unix platforms it supports.
+# Build gitprompt and run the suite on every platform it supports.
 #
-# The Windows build is developed on Windows.  These two are the ones the
-# platform code in the source has to satisfy, and they are run here rather than
-# on the development machine because that machine has no Unix toolchain.
-# git is installed on both runners, which the suite's interop section needs --
-# that section is the one that tests the claim the whole design rests on, that
-# a gitprompt repository is an ordinary git repository.
+# These are the three git itself runs on, and they are run here because the
+# development machine has one compiler for one of them.  git is installed on
+# every runner, which the suite's interop section needs -- that section is the
+# one that tests the claim the whole design rests on, that a gitprompt
+# repository is an ordinary git repository.
 name: ci
 
 on:
@@ -36,4 +35,32 @@ jobs:
         run: make
 
       - name: test
+        run: make test
+
+  windows:
+    name: windows-latest
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows ships no compiler and no make, so MSYS2 supplies them.  MINGW64
+      # is picked over UCRT64 deliberately: the vendored third_party/zlib/libz.a
+      # is a msvcrt build of the library, and UCRT64 links a different C
+      # runtime against it.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            git
+            mingw-w64-x86_64-gcc
+
+      - name: build
+        shell: msys2 {0}
+        run: make
+
+      - name: test
+        shell: msys2 {0}
         run: make test
