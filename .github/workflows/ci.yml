@@ -29,7 +29,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: build
-        run: make
+        run: |
+          if make 2>&1 | tee "$RUNNER_TEMP/build.log"; then exit 0; fi
+          # The step's own log needs a token to read, and the machine this is
+          # read from has none; a failed step's annotations do not, so the
+          # compiler's first words are put there.
+          grep -E ': (error|fatal error)' "$RUNNER_TEMP/build.log" | head -20 |
+            while IFS= read -r line; do printf '::error::%s\n' "$line"; done
+          exit 1
 
       - name: test
         run: make test
