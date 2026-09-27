@@ -2611,11 +2611,12 @@ echo STUB ANSWER: %P%
 STUB
 	;;
 *)
+	# `cat` with no operand is stdin everywhere; `< -` is not -- a shell
+	# that does not read `-` as a name for it looks for a file called "-".
 	cat > "$stub/claude" <<'STUB'
 #!/bin/sh
 printf 'STUB ANSWER: '
-tr -d '\n' < -
-printf '\n'
+cat
 STUB
 	chmod +x "$stub/claude"
 	;;
