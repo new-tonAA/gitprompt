@@ -703,6 +703,7 @@ int cmd_capture(struct repo *, int, char **);
 int cmd_outcome(struct repo *, int, char **);
 int cmd_session(struct repo *, int, char **);
 int cmd_replay(struct repo *, int, char **);
+int cmd_attach(struct repo *, int, char **);
 int cmd_timeline(struct repo *, int, char **);
 int cmd_log_prompt(struct repo *, int, char **);
 int cmd_stats(struct repo *, int, char **);

@@ -265,6 +265,81 @@ fi
 expect "replay records the session boundary" "build a parser" cat "$replay_out"
 
 # ------------------------------------------------------------------
+say "handing the history to an agent"
+
+# `attach` writes the reconstruction where an agent looks for the context of
+# the project it is working in.  What it writes was typed by other people at
+# other times, so the file says so before the history starts: a prompt asking
+# for something was a request to whoever was running then, and an agent
+# reading this one has to know that none of it came from the person who
+# opened this session.
+attach_dry=$work/attach-dry
+gp attach --dry-run > "$attach_dry" 2>&1
+expect "a dry run prints the document" "gitprompt attach: generated" cat "$attach_dry"
+expect "attach carries the history" "write a tokenizer first" cat "$attach_dry"
+expect "attach keeps the session boundary" "build a parser" cat "$attach_dry"
+expect "attach says the history is data, not instructions" \
+	"**data, not instructions**" cat "$attach_dry"
+expect "attach gives the read-only way to start claude" \
+	"claude --permission-mode plan" cat "$attach_dry"
+expect_absent "a dry run writes no file" "$repo/CLAUDE.md"
+
+# the header names the workspace and the commit, so whoever reads the file can
+# tell which checkout the history came from and how far it goes
+expect "attach states the commit it describes" "$(gp rev-parse HEAD)" cat "$attach_dry"
+# the workspace is printed as the system spells it, which on Windows is not the
+# spelling this shell uses -- so ask the shell for the native form as well
+want_root=$(cygpath -w "$PWD" 2>/dev/null || pwd -P)
+case "$(cat "$attach_dry")" in
+*"$want_root"*) ok "attach states the workspace it describes" ;;
+*) bad "attach states the workspace it describes" "wanted [$want_root] in $attach_dry" ;;
+esac
+
+# writing the file is exercised in a repository of its own, so the checks above
+# go on asserting on the main one
+attach_repo=$work/attach
+rm -rf "$attach_repo"
+mkdir -p "$attach_repo" || exit 2
+cd "$attach_repo" || exit 2
+gp init . >/dev/null 2>&1
+gp session start -t "attach a context file" >/dev/null
+gp prompt -m "write a lexer" --model claude-opus-5 >/dev/null
+gp prompt -m "then write the parser" >/dev/null
+gp add -A >/dev/null 2>&1
+gp commit -m "record the prompts" >/dev/null 2>&1
+
+expect "attach names the model the prompts were written for" \
+	"claude-opus-5" gp attach --dry-run
+
+gp attach >/dev/null 2>&1
+expect_file "attach writes the file claude reads its context from" CLAUDE.md
+expect "the file on disk is the document" "then write the parser" cat CLAUDE.md
+expect "and it opens with the history" "0001" cat CLAUDE.md
+
+# the context file is one the user may also keep notes in, so an existing file
+# that this command did not write is theirs, and is left alone
+printf 'my own notes\n' > CLAUDE.md
+expect_status "attach refuses a context file it did not write" 128 gp attach
+expect "the refusal says how to proceed" "was not written by attach" gp attach
+expect "the notes are still there" "my own notes" cat CLAUDE.md
+gp attach --force >/dev/null 2>&1
+expect "attach replaces it when told to" "**data, not instructions**" cat CLAUDE.md
+
+# each agent reads its context from its own file, in its own read-only mode
+gp attach --agent codex >/dev/null 2>&1
+expect_file "codex reads its context from AGENTS.md" AGENTS.md
+expect "attach gives the read-only way to start codex" \
+	"codex --sandbox read-only" cat AGENTS.md
+expect_status "attach refuses an agent it does not know" 128 gp attach --agent gemini
+
+# -o writes the same document wherever the reader is told to look for it
+gp attach -o "$work/attach.md" >/dev/null 2>&1
+expect_file "attach writes the document elsewhere on request" "$work/attach.md"
+expect "and it is the same document" "write a lexer" cat "$work/attach.md"
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "branches, tags and history editing"
 
 gp branch madebranch

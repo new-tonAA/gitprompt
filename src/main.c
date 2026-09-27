@@ -238,6 +238,8 @@ const struct command commands[] = {
 	  "timeline [<ref>]" },
 	{ "log-prompt", cmd_log_prompt, "List prompts without commit noise",
 	  "log-prompt [<ref>] [--oneline]" },
+	{ "attach",     cmd_attach,     "Write the history where an agent reads its context",
+	  "attach [--agent=claude|codex] [<ref>] [-o FILE] [--dry-run] [--force]" },
 
 	/* examine the history */
 	{ "status",     cmd_status,     "Show the working tree status",
