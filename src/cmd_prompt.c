@@ -390,6 +390,176 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 	return rc < 0 ? 1 : 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* recording a response                                                */
+
+/*
+ * The prompt an answer belongs to: the one named, or the last one written.
+ * Returns its index in `e`, or -1 when the history holds no such prompt.
+ */
+static long pick_prompt(const struct prompt_list *pl,
+			const struct prompt_ref *e, const char *id)
+{
+	size_t i;
+
+	if (id) {
+		for (i = 0; i < pl->nr; i++)
+			if (e[i].prompt->id && !strcmp(e[i].prompt->id, id))
+				return (long)i;
+		return -1;
+	}
+	return pl->nr ? (long)(pl->nr - 1) : -1;
+}
+
+/* the file an answer to this prompt is kept in */
+static char *response_path(struct repo *r, const char *prompt_id)
+{
+	const char *dir = repo_prompt_dir(r);
+
+	/* the key is the prompt, not the answer, so that answering the same
+	 * prompt again replaces the file rather than accumulating them */
+	if (!dir[0])
+		return xstrfmt("responses/%s.md", prompt_id);
+	return xstrfmt("%s/responses/%s.md", dir, prompt_id);
+}
+
+int record_response(struct repo *r, const char *prompt_id, const char *body,
+		    const char *model, const char *date, int force)
+{
+	struct prompt_list pl = PROMPT_LIST_INIT;
+	struct prompt_ref *e;
+	const struct prompt *target;
+	struct response resp;
+	struct buf file, text;
+	char *rel;
+	long which;
+	int rc;
+
+	collect_prompts(r, &pl);
+	e = flat_order_alloc(&pl);
+	which = pick_prompt(&pl, e, prompt_id);
+	if (which < 0) {
+		if (prompt_id)
+			gp_error("response: no prompt with id %s in this history",
+				 prompt_id);
+		else
+			gp_error("response: no prompt to answer yet -- record one "
+				 "with 'gitprompt prompt'");
+		free(e);
+		prompt_list_release(&pl);
+		return 1;
+	}
+	target = e[which].prompt;
+
+	/*
+	 * An answer is somebody's work, so replacing one is asked for rather
+	 * than assumed -- the same rule `attach` and `session use` keep about
+	 * the state they would otherwise overwrite.
+	 */
+	if (!force && target->response) {
+		gp_error("response: %s is already answered (use --force to replace "
+			 "it)", target->id);
+		free(e);
+		prompt_list_release(&pl);
+		return 1;
+	}
+
+	memset(&resp, 0, sizeof resp);
+	resp.id = new_response_id();
+	resp.prompt = xstrdup(target->id);
+	resp.session = target->session ? xstrdup(target->session) : NULL;
+	resp.timestamp = record_time(date);
+	if (!resp.timestamp) {
+		const char *bad = date ? date : getenv("GIT_AUTHOR_DATE");
+
+		gp_error("response: cannot read the date '%s'", bad ? bad : "");
+		response_release(&resp);
+		free(e);
+		prompt_list_release(&pl);
+		return 1;
+	}
+	if (model)
+		resp.model = xstrdup(model);
+
+	/* the body always ends in a newline, so a diff of two answers is a diff
+	 * of their text and nothing else */
+	buf_init(&text);
+	buf_addstr(&text, body ? body : "");
+	if (text.len && text.b[text.len - 1] != '\n')
+		buf_addch(&text, '\n');
+	resp.body = xstrdup(buf_cstr(&text));
+	buf_release(&text);
+
+	rel = response_path(r, resp.prompt);
+	resp.path = xstrdup(rel);
+
+	buf_init(&file);
+	response_to_file(&resp, &file);
+	rc = write_worktree_file(r, rel, file.b, file.len);
+	if (rc == 0) {
+		if (stage_worktree_path(r, rel) < 0)
+			gp_warn("recorded %s but could not stage it", rel);
+		printf("%s %s\n", resp.id, rel);
+	}
+
+	buf_release(&file);
+	free(rel);
+	response_release(&resp);
+	free(e);
+	prompt_list_release(&pl);
+	return rc < 0 ? 1 : 0;
+}
+
+int cmd_response(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	struct buf body;
+	const char *id, *model, *date;
+	int rc;
+
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-m=", "-F=", "--model=", "--date=", "--force", NULL });
+
+	if (opts_count(&o) > 1)
+		gp_die("response: at most one prompt id");
+
+	/*
+	 * A bare argument names the prompt being answered rather than being the
+	 * text.  The text arrives from an agent as often as from a person, so it
+	 * comes on -m, on -F or down a pipe, and the free argument is left for
+	 * the one thing a pipe cannot supply.
+	 */
+	id = opts_arg(&o, 0);
+
+	buf_init(&body);
+	if (opts_value(&o, "-m")) {
+		buf_addstr(&body, opts_value(&o, "-m"));
+	} else if (opts_value(&o, "-F")) {
+		if (read_file(opts_value(&o, "-F"), &body) < 0) {
+			gp_error("response: cannot read %s", opts_value(&o, "-F"));
+			buf_release(&body);
+			return 1;
+		}
+	} else {
+		read_stdin_all(&body);
+		if (!body.len) {
+			gp_error("response: nothing to record\n"
+				 "usage: gitprompt response -m \"<text>\" "
+				 "[<prompt-id>]\n"
+				 "   or pipe the answer in: ... | gitprompt response");
+			buf_release(&body);
+			return 1;
+		}
+	}
+
+	model = opts_value(&o, "--model");
+	date = opts_value(&o, "--date");
+	rc = record_response(r, id, buf_cstr(&body), model, date,
+			     opts_flag(&o, "--force"));
+	buf_release(&body);
+	return rc;
+}
+
 static void collect_tags(const struct opts *o, const char ***out, size_t *nr)
 {
 	size_t n = 0, i;
@@ -1407,6 +1577,13 @@ int cmd_log_prompt(struct repo *r, int argc, char **argv)
 			if (p->model)
 				printf("  %s", p->model);
 			printf("\n    %.*s\n", (int)len, b);
+			if (p->response) {
+				const char *rb = p->response->body
+						 ? p->response->body : "";
+				size_t rlen = strcspn(rb, "\n");
+
+				printf("    response: %.*s\n", (int)rlen, rb);
+			}
 			if (p->outcome)
 				printf("    outcome: %s\n", p->outcome);
 		}

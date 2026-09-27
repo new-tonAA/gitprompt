@@ -15,11 +15,14 @@
  * was.
  *
  * It reconstructs the prompts, not the project.  The prompts are stored exactly
- * and are handed over verbatim; what the agent answered is not stored at all, so
- * an agent doing the work a second time may do it differently, and nothing here
- * can promise otherwise.  The project itself is restored exactly by checking out
- * the commit, which is what `checkout` is for; this is for the other thing --
- * making the history go again, in front of someone who can watch it happen.
+ * and are handed over verbatim; an agent doing the work a second time may do it
+ * differently, and nothing here can promise otherwise.  Answers are stored only
+ * when somebody kept them -- `response`, or `--record`, which keeps what the
+ * agent prints here -- so a replay can carry the answers the history already has
+ * and can add the new ones to it.  The project itself is restored exactly by
+ * checking out the commit, which is what `checkout` is for; this is for the
+ * other thing -- making the history go again, in front of someone who can watch
+ * it happen.
  *
  * Nothing is run unless it is asked for.  A rerun starts processes that edit the
  * work tree, so the default is to print what would be run and `--yes` is what
@@ -72,6 +75,38 @@ static void rerun_agent_names(void)
 
 	for (i = 0; i < sizeof rerun_agents / sizeof rerun_agents[0]; i++)
 		fprintf(stderr, "%s%s", i ? ", " : "", rerun_agents[i].name);
+}
+
+/*
+ * Run one prompt's command.  With no `answer` this is `system`, and the agent
+ * writes to the terminal itself.  With one it is `popen`, so the agent's output
+ * comes back to us: printed through unchanged, and kept, which is what makes the
+ * answer a thing that can be recorded.
+ *
+ * `popen` is safe here for the same reason the redirect is: the shell does the
+ * work, and `< file` is applied whether or not stdout was redirected, so the
+ * prompt reaches the agent on its standard input either way.  Returns 0 on
+ * success, and anything else -- a shell status on Unix -- on failure.
+ */
+static int rerun_run(const char *cmd, struct buf *answer)
+{
+	FILE *f;
+	char chunk[4096];
+	size_t n;
+	int rc;
+
+	if (!answer)
+		return system(cmd);
+
+	f = popen(cmd, "r");
+	if (!f)
+		return -1;
+	while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) {
+		fwrite(chunk, 1, n, stdout);
+		buf_add(answer, chunk, n);
+	}
+	rc = pclose(f);
+	return rc;
 }
 
 /*
@@ -198,17 +233,17 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	struct prompt_list pl;
 	struct session_groups sg;
 	struct prompt_ref *order;
-	struct buf cmd;
+	struct buf cmd, answer;
 	struct rerun_conv *convs = NULL;
 	size_t nr_convs = 0, i, n = 0, selected = 0;
 	const struct rerun_agent *agent;
 	const char *name, *model, *mode, *salt, *from, *only;
 	char *msg_path;
-	int run;
+	int run, record;
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"--agent=", "--model=", "--permission-mode=", "--salt=",
-		"--from=", "--only-session=", "--yes", "-y", NULL });
+		"--from=", "--only-session=", "--yes", "-y", "--record", NULL });
 
 	name = opts_value(&o, "--agent");
 	if (!name)
@@ -263,6 +298,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	from = opts_value(&o, "--from");
 	only = opts_value(&o, "--only-session");
 	run = opts_flag(&o, "--yes") || opts_flag(&o, "-y");
+	record = opts_flag(&o, "--record");
 
 	if (opts_count(&o) > 1)
 		gp_die("rerun: at most one revision");
@@ -277,6 +313,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	order = flat_order_alloc(&pl);
 	msg_path = xstrfmt("%s/RERUN_MSG", r->gpdir);
 	buf_init(&cmd);
+	buf_init(&answer);
 
 	if (!pl.nr) {
 		printf("no prompts recorded yet\n");
@@ -316,6 +353,9 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	if (!run)
 		printf("       dry run -- nothing will be run; pass --yes to run "
 		       "it\n");
+	if (record)
+		printf("       each answer will be recorded against its prompt%s\n",
+		       run ? "" : " when run");
 	printf("\n");
 
 	for (i = 0; i < pl.nr; i++) {
@@ -372,12 +412,14 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 		 * answer came before the question.
 		 */
 		fflush(stdout);
-		rc = system(buf_cstr(&cmd));
+		buf_reset(&answer);
+		rc = rerun_run(buf_cstr(&cmd), record ? &answer : NULL);
 		if (rc != 0) {
 			char *id = xstrdup(p->id ? p->id : "?");
 
 			remove(msg_path);
 			buf_release(&cmd);
+			buf_release(&answer);
 			free(msg_path);
 			free(order);
 			rerun_convs_release(convs, nr_convs);
@@ -390,6 +432,21 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 			       agent->name, id, rc, agent->name,
 			       (unsigned long)(n - 1), id);
 		}
+
+		/*
+		 * The answer is recorded only now that the run of it has
+		 * finished, so a half-written one is never kept.  An empty
+		 * answer is no answer: an agent that said nothing has nothing
+		 * to record, and recording an empty body would make it look as
+		 * though it had replied.
+		 */
+		if (record && answer.len) {
+			if (record_response(r, p->id, buf_cstr(&answer),
+					    model ? model : agent->name, NULL,
+					    1) != 0)
+				gp_warn("rerun: could not record the answer to "
+					"%s", p->id ? p->id : "?");
+		}
 	}
 
 	if (run)
@@ -400,6 +457,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 
 done:
 	buf_release(&cmd);
+	buf_release(&answer);
 	free(msg_path);
 	free(order);
 	rerun_convs_release(convs, nr_convs);

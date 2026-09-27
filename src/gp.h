@@ -197,6 +197,38 @@ void commit_format(const struct commit *c, struct buf *out);
 /* ------------------------------------------------------------------ */
 /* prompt and session objects                                          */
 
+/*
+ * What the agent answered a prompt, stored as its own file at
+ * prompts/responses/<prompt id>.md.
+ *
+ * It is a separate object because a prompt file is text somebody may have
+ * written by hand, and there is no delimiter inside it that could be trusted to
+ * mean "the answer starts here".  It is also separate because of when it
+ * arrives: the prompt is recorded as it is said, and the answer exists, if at
+ * all, only once the agent has replied -- and may never.
+ *
+ * `prompt` is the id of the prompt being answered and is what ties the two
+ * together; the file's name repeats it, so an answer can be found without
+ * opening every file.  `session` is copied from that prompt, so an answer is
+ * placed in the conversation even when the prompt it belongs to is not at hand.
+ */
+struct response {
+	char *id;               /* r_... */
+	char *prompt;           /* the prompt being answered */
+	char *session;          /* s_... or NULL, copied from that prompt */
+	char *timestamp;        /* ISO 8601 with offset, as written */
+	i64 ts;                 /* epoch seconds */
+	char *model;            /* the agent that answered, or NULL */
+	char *body;             /* the answer text itself */
+	char *path;             /* repo-relative path of the file form */
+};
+#define RESPONSE_INIT { NULL,NULL,NULL,NULL,0,NULL,NULL,NULL }
+void response_release(struct response *r);
+void response_to_file(const struct response *r, struct buf *out);
+int response_from_file(struct response *r, const void *data, size_t len);
+void response_to_json(const struct response *r, struct buf *out);
+char *new_response_id(void);
+
 struct prompt {
 	char *id;               /* p_... */
 	char *session;          /* s_... or NULL */
@@ -211,8 +243,14 @@ struct prompt {
 	char **attachments; size_t nr_attachments;
 	char *path;             /* repo-relative path of the file form */
 	char *body;             /* the prompt text itself */
+	/*
+	 * The answer, when one has been recorded.  Not part of the prompt
+	 * file: it is folded on at load time, so that everything which reads
+	 * the history sees the prompt and what came back together.
+	 */
+	struct response *response;
 };
-#define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL }
+#define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL }
 void prompt_release(struct prompt *p);
 
 /*
@@ -753,6 +791,15 @@ int cmd_describe(struct repo *, int, char **);
 
 int cmd_prompt(struct repo *, int, char **);
 int cmd_capture(struct repo *, int, char **);
+int cmd_response(struct repo *, int, char **);
+/*
+ * Record an answer against the prompt it belongs to: the newest one in the
+ * history, or the one named.  `force` replaces an answer that is already there.
+ * Shared with `rerun --record`, which has the answer in hand rather than on a
+ * command line, so this is the recording itself and not the argument parsing.
+ */
+int record_response(struct repo *r, const char *prompt_id, const char *body,
+		    const char *model, const char *date, int force);
 int cmd_outcome(struct repo *, int, char **);
 int cmd_session(struct repo *, int, char **);
 int cmd_replay(struct repo *, int, char **);

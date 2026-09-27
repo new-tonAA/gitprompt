@@ -226,6 +226,9 @@ is accepted wherever a date is.
 
 Both `tags` and `attachments` are inline bracketed lists, comma-separated.
 
+What an agent answered the prompt is not in this file: it is an object of its
+own, named after this prompt's id (§6).
+
 ## 5. Session files
 
 A session is a blob at `prompts/sessions/<id>.md`. It has frontmatter and no
@@ -269,16 +272,63 @@ A session is left either by `session end` or by another session being started or
 used, and the stretch that ends is closed at the instant the next one opens, so
 consecutive stretches meet exactly and no time is counted twice or lost.
 
-Session ids are `s_<epoch>_<6 characters>`; prompt ids are `p_` followed by
-8 characters, where the characters are drawn from `a`–`z0`–`9`. Uniqueness
-comes from the epoch, the process id and an in-process counter hashed together
-— not from a cryptographic random source, because ids only have to distinguish
-prompts within one repository.
+Session ids are `s_<epoch>_<6 characters>`; prompt ids are `p_` and response
+ids are `r_`, each followed by 8 characters, where the characters are drawn from
+`a`–`z0`–`9`. Uniqueness comes from the epoch, the process id and an in-process
+counter hashed together — not from a cryptographic random source, because ids
+only have to distinguish prompts within one repository.
 
-A file's prefix says which it is: `p_` is a prompt, `s_` is a session. Nothing
-else needs to be inspected to tell them apart.
+A file's prefix says which it is: `p_` is a prompt, `s_` is a session, `r_` is a
+response. Nothing else needs to be inspected to tell them apart.
 
-## 6. Repository state files
+## 6. Response files
+
+A response is what an agent answered a prompt, and it is a blob at
+`prompts/responses/<prompt id>.md` — named after the prompt it answers.
+
+```
+---
+id: r_xxxxxxxx
+prompt: p_yyyyyyyy
+session: s_1790354733_42fkw2
+timestamp: 2026-09-26T00:47:11+08:00
+model: claude-sonnet-5
+---
+Created login.html. Validation misses empty input.
+
+I put the check in the submit handler, so a paste into the field still slips
+through.
+```
+
+The body is the answer's text, verbatim, and is everything after the closing
+`---`; the frontmatter carries only what is needed to place it. `prompt` is the
+id of the prompt being answered and is what the two are joined on — reading
+either side alone is enough to know the answer belongs to that prompt, and the
+file's name repeats it so that an answer can be found without opening every
+file. `session` is copied from that prompt, so an answer is placed in a
+conversation even when the prompt it belongs to is not at hand. `model` names
+the agent that answered and is omitted when it is not known. The form is the
+prompt file's, with the same rules: `timestamp` is the wall clock at a written
+offset (§4), and `session` is written as `-` when there is none.
+
+Being a separate file is the point of the design, and it is not a formatting
+convenience:
+
+- A prompt file is text somebody may have written by hand. There is no
+  delimiter inside it that could be trusted to mean "the answer starts here",
+  so an answer cannot live in it.
+- The two arrive at different times. The prompt is recorded as it is said; the
+  answer exists only once an agent has replied, and may never.
+- It is a tree of ordinary files, so a clone, a push and a `checkout` carry the
+  answers with the prompts, and `git --git-dir=.gitprompt ls-tree` shows them
+  (§8).
+
+Re-answering replaces the file rather than adding a second one, since the name
+is the prompt: a prompt has one answer at a time, and the last one recorded is
+the one the history shows. An answer whose prompt is not in the history is
+ignored, the way a session no prompt names is not shown.
+
+## 7. Repository state files
 
 Inside `.gitprompt/`:
 
@@ -310,12 +360,13 @@ it is staged, which is the same thing `git add` does to declare a conflict
 resolved, and `MERGE_HEAD` deliberately outlives that: the resolution is staged,
 but the merge is not finished until it is committed.
 
-## 7. What a gitprompt repository looks like to git
+## 8. What a gitprompt repository looks like to git
 
 ```
 $ git --git-dir=.gitprompt log --oneline
 $ git --git-dir=.gitprompt ls-tree -r --name-only HEAD
 prompts/0001-write-a-tokenizer-first.md
+prompts/responses/p_yyyyyyyy.md
 prompts/sessions/s_1790354733_42fkw2.md
 $ git --git-dir=.gitprompt show HEAD:prompts/0001-write-a-tokenizer-first.md
 ```
@@ -324,4 +375,4 @@ All of it works, unmodified, because there is nothing special to read: the
 prompts are blobs in trees at mode `100644` and the history is ordinary commits.
 A conflicted index is git's too — `git ls-files -u` in a gitprompt store lists
 the same stages, for the same paths, that `gitprompt status` reports — and a
-merge stopped half-way is the `MERGE_HEAD` git itself would have left (§6).
+merge stopped half-way is the `MERGE_HEAD` git itself would have left (§7).

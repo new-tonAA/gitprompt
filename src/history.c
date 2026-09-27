@@ -40,6 +40,58 @@ static struct session *session_list_get(struct session_list *l, const char *id)
 	return NULL;
 }
 
+/*
+ * Answers, gathered while the scan runs and attached to their prompts once it
+ * has finished.  They cannot be attached as they are met: a scan reaches the
+ * files in whatever order the tree holds them, and nothing makes an answer come
+ * after the prompt it answers -- `responses/` sorts before most prompt files,
+ * so in practice they usually arrive first.  A later answer to the same prompt
+ * replaces an earlier one, which is what makes the work tree win over a commit.
+ */
+struct response_list {
+	struct response **e;
+	size_t nr, alloc;
+};
+
+static void response_list_push(struct response_list *l, struct response *r)
+{
+	if (l->nr == l->alloc) {
+		l->alloc = l->alloc ? l->alloc * 2 : 8;
+		l->e = xrealloc(l->e, l->alloc * sizeof(*l->e));
+	}
+	l->e[l->nr++] = r;
+}
+
+static struct response *response_list_get(struct response_list *l,
+					  const char *prompt)
+{
+	size_t i;
+	for (i = 0; i < l->nr; i++)
+		if (l->e[i] && l->e[i]->prompt &&
+		    !strcmp(l->e[i]->prompt, prompt))
+			return l->e[i];
+	return NULL;
+}
+
+/*
+ * Anything still here was handed to no prompt -- an answer whose prompt is not
+ * in this history, which an older branch or a rewritten one can leave behind.
+ * It is dropped, the way a session no prompt names is simply not shown.
+ */
+static void response_list_release(struct response_list *l)
+{
+	size_t i;
+
+	for (i = 0; i < l->nr; i++) {
+		if (!l->e[i])
+			continue;       /* handed to a prompt, which owns it now */
+		response_release(l->e[i]);
+		free(l->e[i]);
+	}
+	free(l->e);
+	memset(l, 0, sizeof *l);
+}
+
 /* ------------------------------------------------------------------ */
 /* list bookkeeping                                                    */
 
@@ -136,6 +188,7 @@ struct scan_ctx {
 	struct repo *r;
 	struct prompt_list *prompts;     /* may be NULL */
 	struct session_list *sessions;   /* may be NULL */
+	struct response_list *responses; /* may be NULL, and only with prompts */
 	const oid_t *commit;
 };
 
@@ -193,6 +246,32 @@ static void scan_bytes(struct scan_ctx *c, const void *data, size_t len,
 			return;
 		}
 		session_list_push(c->sessions, s);
+		return;
+	}
+
+	if (!strncmp(id, "r_", 2) && c->responses) {
+		struct response *r = xcalloc(1, sizeof(*r));
+		struct response *existing;
+
+		response_from_file(r, data, len);
+		/* an answer has to name the prompt it answers; without one there
+		 * is nothing it could be shown with */
+		if (!r->id || !r->prompt) {
+			response_release(r);
+			free(r);
+			return;
+		}
+		free(r->path);
+		r->path = xstrdup(path);
+
+		existing = response_list_get(c->responses, r->prompt);
+		if (existing) {
+			response_release(existing);
+			*existing = *r;
+			free(r);
+			return;
+		}
+		response_list_push(c->responses, r);
 	}
 }
 
@@ -276,11 +355,15 @@ static void scan_all(struct repo *r, const oid_t *only_tree,
 {
 	struct scan_ctx c;
 	struct tip_ctx t;
+	struct response_list responses;
 
 	memset(&c, 0, sizeof c);
 	c.r = r;
 	c.prompts = prompts;
 	c.sessions = sessions;
+	/* answers are only worth gathering to put them with their prompts */
+	memset(&responses, 0, sizeof responses);
+	c.responses = prompts ? &responses : NULL;
 
 	if (only_tree) {
 		load_tree_flat(r, only_tree, "", scan_tree_cb, &c);
@@ -302,6 +385,29 @@ static void scan_all(struct repo *r, const oid_t *only_tree,
 	 * nothing in any working tree that has one. */
 	if (!only_tree && r->root)
 		walk_worktree(r, scan_worktree_file, &c);
+
+	/*
+	 * Now that every file has been read, each answer can be given to the
+	 * prompt it names.  Ownership moves to the prompt, so the list is left
+	 * holding only answers whose prompt this history does not contain.
+	 */
+	if (prompts) {
+		size_t i;
+
+		for (i = 0; i < responses.nr; i++) {
+			struct prompt_ref *pref;
+
+			if (!responses.e[i])
+				continue;
+			pref = prompt_list_find_by_id(prompts,
+						      responses.e[i]->prompt);
+			if (!pref)
+				continue;
+			pref->prompt->response = responses.e[i];
+			responses.e[i] = NULL;
+		}
+		response_list_release(&responses);
+	}
 }
 
 void collect_prompts(struct repo *r, struct prompt_list *out)
@@ -582,11 +688,31 @@ static void markdown_prompt_fields(struct buf *out, const struct prompt *p)
 		buf_addf(out, "- follows: `%s`\n", p->parent_prompt);
 }
 
-/* the quoted prompt and what it led to, which both documents print alike */
+/*
+ * The answer, under a label.  Prompt and answer are both quoted blocks, so
+ * without the label a reader could not tell where the prompt stopped and the
+ * agent began -- which is the whole reason the answer is a separate file.
+ */
+static void markdown_response(struct buf *out, const struct response *r)
+{
+	buf_addstr(out, "\n**Response.**");
+	if (r->model)
+		buf_addf(out, " %s", r->model);
+	if (r->timestamp)
+		buf_addf(out, "%s %s", r->model ? "," : "", r->timestamp);
+	buf_addch(out, '\n');
+	quote_block(out, r->body);
+	buf_addch(out, '\n');
+}
+
+/* the quoted prompt, the answer, and what it led to, which both documents
+ * print alike */
 static void markdown_prompt_text(struct buf *out, const struct prompt *p)
 {
 	buf_addch(out, '\n');
 	quote_block(out, p->body);
+	if (p->response)
+		markdown_response(out, p->response);
 	if (p->outcome) {
 		buf_addstr(out, "\n**Outcome.** ");
 		buf_addstr(out, p->outcome);
@@ -703,6 +829,14 @@ void replay_text(struct repo *r, const struct session_groups *g,
 			size_t len = strcspn(b, "\n");
 			buf_addf(out, "  %s  %.*s\n", p->id ? p->id : "?", (int)len,
 				 b);
+			if (p->response) {
+				const char *rb = p->response->body
+						 ? p->response->body : "";
+				size_t rlen = strcspn(rb, "\n");
+
+				buf_addf(out, "      response: %.*s\n", (int)rlen,
+					 rb);
+			}
 			if (p->outcome)
 				buf_addf(out, "      outcome: %s\n", p->outcome);
 		}
@@ -950,6 +1084,12 @@ void replay_flat_text(struct repo *r, const struct prompt_list *pl,
 		buf_addf(out, "%s  %s  %s  %.*s\n", p->id ? p->id : "?",
 			 p->timestamp ? p->timestamp : "(no time)",
 			 p->session ? p->session : "(no session)", (int)len, b);
+		if (p->response) {
+			const char *rb = p->response->body ? p->response->body : "";
+			size_t rlen = strcspn(rb, "\n");
+
+			buf_addf(out, "    response: %.*s\n", (int)rlen, rb);
+		}
 		if (p->outcome)
 			buf_addf(out, "    outcome: %s\n", p->outcome);
 	}

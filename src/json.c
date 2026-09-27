@@ -479,6 +479,10 @@ void prompt_release(struct prompt *p)
 	free(p->attachments);
 	free(p->path);
 	free(p->body);
+	if (p->response) {
+		response_release(p->response);
+		free(p->response);
+	}
 	memset(p, 0, sizeof *p);
 }
 
@@ -602,6 +606,116 @@ void prompt_to_json(const struct prompt *p, struct buf *out)
 	json_quote_array(out, p->tags, p->nr_tags);
 	buf_addstr(out, ",\"timestamp\":");
 	json_quote(out, p->timestamp ? p->timestamp : "");
+
+	buf_addstr(out, ",\"response\":");
+	if (p->response) {
+		/* rendered aside, because every *_to_json resets the buffer it
+		 * is handed and this one is already half written */
+		struct buf rj;
+
+		buf_init(&rj);
+		response_to_json(p->response, &rj);
+		buf_add(out, rj.b, rj.len);
+		buf_release(&rj);
+	} else {
+		buf_addstr(out, "null");
+	}
+
+	buf_addch(out, '}');
+}
+
+/* ------------------------------------------------------------------ */
+/* responses                                                           */
+
+void response_release(struct response *r)
+{
+	free(r->id);
+	free(r->prompt);
+	free(r->session);
+	free(r->timestamp);
+	free(r->model);
+	free(r->body);
+	free(r->path);
+	memset(r, 0, sizeof *r);
+}
+
+void response_to_file(const struct response *r, struct buf *out)
+{
+	buf_reset(out);
+	buf_addstr(out, "---\n");
+	buf_addf(out, "id: %s\n", r->id ? r->id : "");
+	buf_addf(out, "prompt: %s\n", r->prompt ? r->prompt : "");
+	buf_addf(out, "session: %s\n", (r->session && r->session[0])
+					? r->session : "-");
+	buf_addf(out, "timestamp: %s\n", r->timestamp ? r->timestamp : "");
+	if (r->model)
+		buf_addf(out, "model: %s\n", r->model);
+	buf_addstr(out, "---\n");
+	if (r->body)
+		buf_addstr(out, r->body);
+}
+
+struct response_fm_ctx {
+	struct response *r;
+};
+
+static void response_fm_kv(const char *key, const char *val, void *ud)
+{
+	struct response_fm_ctx *c = ud;
+	struct response *r = c->r;
+
+	if (!strcmp(key, "id"))
+		r->id = xstrdup(val);
+	else if (!strcmp(key, "prompt") && val[0])
+		r->prompt = xstrdup(val);
+	else if (!strcmp(key, "session")) {
+		if (strcmp(val, "-") && val[0])
+			r->session = xstrdup(val);
+	} else if (!strcmp(key, "timestamp"))
+		r->timestamp = xstrdup(val);
+	else if (!strcmp(key, "model") && val[0])
+		r->model = xstrdup(val);
+}
+
+int response_from_file(struct response *r, const void *data, size_t len)
+{
+	struct response_fm_ctx c;
+	const char *body = NULL;
+	int had;
+
+	response_release(r);
+	c.r = r;
+	had = read_frontmatter(data, len, response_fm_kv, &c, &body);
+	if (had && body)
+		r->body = xstrndup(body, (size_t)((const char *)data + len - body));
+	else if (had)
+		r->body = xstrdup("");
+	else
+		r->body = xstrndup((const char *)data, len);
+	if (r->timestamp)
+		r->ts = parse_timestamp(r->timestamp);
+	return had;
+}
+
+void response_to_json(const struct response *r, struct buf *out)
+{
+	buf_reset(out);
+	buf_addch(out, '{');
+
+	buf_addstr(out, "\"body\":");
+	json_quote(out, r->body ? r->body : "");
+	buf_addstr(out, ",\"id\":");
+	json_quote(out, r->id ? r->id : "");
+	buf_addstr(out, ",\"model\":");
+	json_quote(out, r->model ? r->model : "");
+	buf_addstr(out, ",\"path\":");
+	json_quote(out, r->path ? r->path : "");
+	buf_addstr(out, ",\"prompt\":");
+	json_quote(out, r->prompt ? r->prompt : "");
+	buf_addstr(out, ",\"session\":");
+	json_quote(out, r->session ? r->session : "");
+	buf_addstr(out, ",\"timestamp\":");
+	json_quote(out, r->timestamp ? r->timestamp : "");
 
 	buf_addch(out, '}');
 }
@@ -868,7 +982,11 @@ static void id_rand_bytes(u8 *out, size_t n)
 	}
 }
 
-char *new_prompt_id(void)
+/*
+ * The one shape the short ids share: a two-character prefix saying what kind of
+ * thing this is, then eight characters from a-z0-9.
+ */
+static char *new_short_id(const char *prefix)
 {
 	static const char alpha[] = "abcdefghijklmnopqrstuvwxyz0123456789";
 	u8 rnd[8];
@@ -876,11 +994,21 @@ char *new_prompt_id(void)
 	int i;
 
 	id_rand_bytes(rnd, sizeof rnd);
-	memcpy(out, "p_", 2);
+	memcpy(out, prefix, 2);
 	for (i = 0; i < 8; i++)
 		out[2 + i] = alpha[rnd[i] % (sizeof alpha - 1)];
 	out[10] = '\0';
 	return xstrdup(out);
+}
+
+char *new_prompt_id(void)
+{
+	return new_short_id("p_");
+}
+
+char *new_response_id(void)
+{
+	return new_short_id("r_");
 }
 
 char *new_session_id(void)

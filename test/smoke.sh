@@ -2490,6 +2490,161 @@ expect_status "and that is not a failure" 0 gp rerun
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "recording what the agent answered"
+
+# A prompt is said and the answer comes back later, so the answer is kept as
+# its own file, named after the prompt it answers rather than after itself.
+# That is what puts it in the history with the prompt: the two are committed
+# together, a clone carries both, and a reader of the history is handed the
+# question and what came back.
+rn=$work/response
+rm -rf "$rn"
+mkdir -p "$rn" || exit 2
+cd "$rn" || exit 2
+gp init . >/dev/null 2>&1
+
+gp session start -t "the conversation" >/dev/null 2>&1
+sid=$(gp session current)
+pid=$(gp prompt -m "build a login page" | cut -d' ' -f1)
+pid2=$(gp prompt -m "and make the fields validate" | cut -d' ' -f1)
+
+expect "an answer is recorded against the prompt it names" \
+	"prompts/responses/$pid.md" \
+	gp response -m "Created login.html; empty input still gets through." "$pid"
+expect_file "and kept as a file of its own" "prompts/responses/$pid.md"
+expect "the file says which prompt it answers" "prompt: $pid" \
+	cat "prompts/responses/$pid.md"
+expect "the answer carries the session it was said in" "session: $sid" \
+	cat "prompts/responses/$pid.md"
+
+rid=$(sed -n 's/^id: //p' "prompts/responses/$pid.md")
+case "$rid" in
+r_????????) ok "an answer gets an id of its own" ;;
+*) bad "an answer gets an id of its own" "got [$rid]" ;;
+esac
+
+# The point of keeping them: giving the history back has to include what came
+# back, in every form the history is rendered in.
+expect "the document shows the answer under a label" "**Response.**" \
+	gp replay --flat
+expect "with the answer's text, not just the label" "Created login.html" \
+	gp replay --flat
+expect "the grouped document does too" "**Response.**" gp replay
+expect "the plain listing shows it" "response: Created login.html" \
+	gp replay --flat --format=txt
+expect "and so does the prompt log" "response: Created login.html" \
+	gp log-prompt
+expect "it is an object in the json, not a string" '"response":{' \
+	gp replay --flat --format=json
+
+# An answer is somebody's work: replacing it is asked for, not assumed.
+expect "a second answer is refused" "already answered" \
+	gp response -m "a second attempt" "$pid"
+expect_status "and the refusal is a failure" 1 \
+	gp response -m "a second attempt" "$pid"
+gp response -m "a second attempt" --force "$pid" >/dev/null 2>&1
+expect "with --force the answer is replaced in place" "second attempt" \
+	cat "prompts/responses/$pid.md"
+count=$(ls prompts/responses | wc -l | tr -d ' ')
+if [ "$count" = "1" ]; then
+	ok "replacing an answer does not leave the old file behind"
+else
+	bad "replacing an answer does not leave the old file behind" \
+		"$count files in prompts/responses"
+fi
+
+# With no id the newest prompt is the one being answered, which is the case a
+# person recording an answer by hand is normally in.
+expect "with no id the newest prompt is answered" \
+	"prompts/responses/$pid2.md" gp response -m "validation added"
+expect "and its text is what was recorded" "validation added" \
+	cat "prompts/responses/$pid2.md"
+
+expect "an id that is not in the history is refused" "no prompt with id" \
+	gp response -m x p_nosuchid
+expect_status "and that is a failure" 1 gp response -m x p_nosuchid
+expect "a date that cannot be read is refused" "cannot read the date" \
+	gp response -m x --date "not a date" --force
+
+# Three ways in, because an answer comes from an agent as often as from a
+# person: on the command line, out of a file, or down a pipe.
+printf 'an answer from a file\n' > ans.txt
+gp response -F ans.txt --force >/dev/null 2>&1
+expect "an answer can come from a file" "an answer from a file" \
+	cat "prompts/responses/$pid2.md"
+printf 'an answer down a pipe\n' | gp response --force >/dev/null 2>&1
+expect "and it can come down a pipe" "an answer down a pipe" \
+	cat "prompts/responses/$pid2.md"
+out=$(printf '' | gp response 2>&1)
+case "$out" in
+*"nothing to record"*) ok "an empty pipe is refused rather than recorded" ;;
+*) bad "an empty pipe is refused rather than recorded" "got [$out]" ;;
+esac
+
+# An answer is read out of the commit as well as the work tree, so moving the
+# file away leaves the history complete.
+gp add -A >/dev/null 2>&1
+gp commit -m "record the answers" >/dev/null 2>&1
+mv prompts/responses "$work/response-aside"
+expect "an answer is read out of the commit" "an answer down a pipe" \
+	gp replay --flat
+mv "$work/response-aside" prompts/responses
+
+gp prompt -m "a third thing nobody answered" >/dev/null 2>&1
+case "$(gp replay --flat --format=json)" in
+*'"response":null'*) ok "a prompt that was never answered carries none" ;;
+*) bad "a prompt that was never answered carries none" "no null in the json" ;;
+esac
+
+# `--record` is what keeps an answer nobody typed in.  The agent is a stub
+# that echoes the prompt back, so what was kept can be checked exactly; on
+# Windows the shell that runs it is cmd.exe, which needs the .bat spelling.
+stub=$work/agent-bin
+rm -rf "$stub"
+mkdir -p "$stub" || exit 2
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+	cat > "$stub/claude.bat" <<'STUB'
+@echo off
+set /p P=
+echo STUB ANSWER: %P%
+STUB
+	;;
+*)
+	cat > "$stub/claude" <<'STUB'
+#!/bin/sh
+printf 'STUB ANSWER: '
+tr -d '\n' < -
+printf '\n'
+STUB
+	chmod +x "$stub/claude"
+	;;
+esac
+
+expect "--record says the answers will be kept" "each answer will be recorded" \
+	gp rerun --record
+
+oldpath=$PATH
+PATH="$stub:$PATH"
+gp rerun --record --yes > "$work/rerun-record.log" 2>&1
+rc=$?
+PATH=$oldpath
+if [ "$rc" = "0" ]; then
+	ok "a recorded rerun finishes"
+else
+	bad "a recorded rerun finishes" "exit $rc: $(cat "$work/rerun-record.log")"
+fi
+expect "the agent's answer is printed through as it comes" \
+	"STUB ANSWER: build a login page" cat "$work/rerun-record.log"
+expect "and it is what gets recorded" "STUB ANSWER: build a login page" \
+	cat "prompts/responses/$pid.md"
+expect "the answer to the newest prompt is recorded too" \
+	"STUB ANSWER: a third thing nobody answered" \
+	cat "$work/rerun-record.log"
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

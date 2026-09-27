@@ -223,6 +223,10 @@ const struct command commands[] = {
 	{ "capture",    cmd_capture,    "Record a prompt read from stdin",
 	  "capture [-t TAG]... [--model M] [--parent ID] [-s SESSION]"
 	  " [--date WHEN] [--no-stage]" },
+	{ "response",   cmd_response,   "Record what an agent answered a prompt",
+	  "response [-m TEXT | -F FILE] [--model M] [--date WHEN] [--force]\n"
+	  "   response [<prompt-id>]            (default: the newest prompt)\n"
+	  "   ... | response [<prompt-id>]      (the answer read from stdin)" },
 	{ "outcome",    cmd_outcome,    "Attach a note about what a prompt produced",
 	  "outcome <prompt-id> <text>\n   outcome --last <text>" },
 	{ "add",        cmd_add,        "Add file contents to the index",
@@ -248,7 +252,8 @@ const struct command commands[] = {
 	  "attach [--agent=claude|codex] [<ref>] [-o FILE] [--dry-run] [--force]" },
 	{ "rerun",      cmd_rerun,      "Give the prompts back to an agent, in order",
 	  "rerun [<ref>] [--agent=claude] [--model M] [--permission-mode M]\n"
-	  "   rerun [<ref>] [--from ID] [--only-session ID] [--salt S] [--yes]" },
+	  "   rerun [<ref>] [--from ID] [--only-session ID] [--salt S] [--yes]"
+	  " [--record]" },
 
 	/* examine the history */
 	{ "status",     cmd_status,     "Show the working tree status",

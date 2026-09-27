@@ -30,6 +30,9 @@ Three things make that work, and each is a thing a chat log cannot do:
   in the sequence it belongs.
 - **Session boundaries are stored, not inferred.** Where context was reset is a
   file in the tree, not something a reader guesses from timestamps.
+- **What came back can be kept too.** The agent's answer is a file of its own
+  beside the prompt, so a history read later carries both the question and what
+  it got — and a replay can add to them.
 - **Ordinary git all the way down.** A gitprompt repository *is* a git
   repository: `git clone`, `git push`, GitHub's file view, `git reset --hard`
   and `git gc` all work on it unchanged.
@@ -73,6 +76,8 @@ my-project/
   prompts/
     0001-write-a-tokenizer-first.md
     0002-add-bpe-encoding.md
+    responses/
+      p_yyyyyyyy.md                 what the agent answered 0001
     sessions/
       s_1790354733_42fkw2.md
   README.md  src/  ...              the project the prompts describe
@@ -131,11 +136,32 @@ segments: 2026-09-10T09:00:00+08:00..2026-09-10T12:00:00+08:00, 2026-09-10T15:00
 that knows nothing of `segments` still gets the right answer; `segments` is what
 keeps the hours in between from being swallowed by it.
 
+An answer is its own file too, `prompts/responses/<prompt id>.md`, named after
+the prompt rather than after itself:
+
+```
+---
+id: r_xxxxxxxx
+prompt: p_yyyyyyyy
+session: s_1790354733_42fkw2
+timestamp: 2026-09-26T00:47:11+08:00
+model: claude-sonnet-5
+---
+Created login.html. Validation misses empty input.
+```
+
+It is separate because of what a prompt file is: prompt text is somebody's own
+words, with no delimiter in it that could be trusted to mean "the answer starts
+here". And because of when it arrives -- the prompt is recorded as it is said,
+the answer only once an agent has replied, and it may never. `prompt` is the id
+the two are joined on, and the file's name repeats it so an answer can be found
+without opening every file.
+
 So an agent handed only the checkout can reconstruct the run: `NNNN` and `seq`
-fix the order, `session` places each prompt in a session, and the session file
-says when that session ran. Everything else -- who wrote what, when, and what
-came before -- is ordinary git history, which is why `git log` and
-`gitprompt log` tell the same story.
+fix the order, `session` places each prompt in a session, the session file says
+when that session ran, and a response file says what the agent said back.
+Everything else -- who wrote what, when, and what came before -- is ordinary git
+history, which is why `git log` and `gitprompt log` tell the same story.
 
 `docs/format.md` is the byte-level version of this: the object encodings, the
 index, the refs, and the state files a merge leaves behind.
@@ -184,7 +210,8 @@ $ gitprompt replay -o PROMPTS.md
 
 This is the point of the whole thing. A prompt history is not a chat log: it
 spans sessions, prompts revise earlier prompts rather than only appending to
-them, and the outcome of each prompt is part of the record. `gitprompt replay`
+them, and the outcome of each prompt is part of the record -- as is what the
+agent answered, when somebody kept it. `gitprompt replay`
 renders that history as one document, with an agent-facing preamble, in
 chronological order, marking where each session begins and ends:
 
@@ -286,20 +313,68 @@ $ gitprompt rerun --only-session s_1790510692_39lroz
 ```
 
 **It reconstructs the prompts, not the project.** The prompts are stored exactly
-and are handed over verbatim; what the agent answered is not stored at all, so an
-agent doing the work a second time may do it differently, and nothing here can
-promise otherwise. The project itself is restored exactly by checking out the
-commit, which is what `checkout` is for — the prompts are the *how it was made*,
-the commits are the *what was made*, and only the second is byte-exact.
+and are handed over verbatim; an agent doing the work a second time may do it
+differently, and nothing here can promise otherwise. Answers are kept only when
+somebody kept them — see the next section — so a replay carries the ones the
+history already has and can add the new ones to it. The project itself is
+restored exactly by checking out the commit, which is what `checkout` is for —
+the prompts are the *how it was made*, the commits are the *what was made*, and
+only the second is byte-exact.
 
 `codex` is refused rather than half-supported. Its conversations cannot be given
 an id to resume by, so an interrupted history could not be played back as the
 conversations it was — and running each session as a string of unrelated ones
 would not be a replay of anything.
 
-The run path was verified by hand against the real CLI and against a stub agent
-that records what it is handed; the suite covers the plan, because no runner has
-an agent installed and one that did would not answer the same twice.
+### Keeping what the agent answered
+
+A prompt on its own is half of what happened. `response` records the other half,
+against the prompt it belongs to:
+
+```console
+$ gitprompt prompt -m "Build a login page with email and password fields."
+p_ibd076r6 prompts/0001-build-a-login-page-with-email-and-passwo.md
+$ gitprompt response -m "Created login.html. Validation misses empty input."
+r_vql9qir6 prompts/responses/p_ibd076r6.md
+$ gitprompt response -m "Added the check; empty input is refused now." p_ibd076r6
+error: response: p_ibd076r6 is already answered (use --force to replace it)
+```
+
+The answer goes in a file of its own, `prompts/responses/<prompt id>.md`, rather
+than inside the prompt file. A prompt file is text somebody may have written by
+hand, so there is no delimiter in it that could be trusted to mean "the answer
+starts here" — and the two arrive at different times, since the answer exists
+only once an agent has replied, and may never. Being an ordinary file in the
+tree is what makes it travel: a clone, a push and a `checkout` carry the answers
+with the prompts, and `git --git-dir=.gitprompt ls-tree` shows both.
+
+With no prompt id the newest prompt is the one being answered, and the text can
+also come from a file or down a pipe, which is how it normally arrives:
+
+```console
+$ claude -p < notes.md | gitprompt response p_ibd076r6
+```
+
+Nothing else has to change for the answer to be part of the history:
+
+```console
+$ gitprompt replay --flat          # the document gains **Response.** blocks
+$ gitprompt log-prompt             # the listing gains a response line
+$ gitprompt attach                 # the agent's context file carries them
+$ gitprompt replay --flat --format=json   # "response" is an object, or null
+```
+
+`rerun --record` is the same thing without a second step: it runs the agent with
+its output coming back rather than going only to the terminal, prints it through
+unchanged, and records it against the prompt it was answering. A run that
+finishes records; a run that fails or is interrupted records nothing for the
+prompt it was on, so an answer is never half a one. Recording replaces an answer
+that is already there, because a rerun is what is being kept now.
+
+The run path was verified by hand against the real CLI, and the suite runs a
+stub agent for it: the plan `rerun` would execute, the conversations it maps
+sessions to, and what `--record` keeps. No runner has a real agent installed,
+and one that did would not answer the same twice.
 
 ### Recording a conversation that happened earlier
 
@@ -332,7 +407,8 @@ comes back in the order it happened.
 names are git's, and the behaviour is meant to match:
 
 - **start** — `init`, `clone`, `config`
-- **record prompts** — `session`, `prompt`, `capture`, `outcome`, `add`, `rm`,
+- **record prompts** — `session`, `prompt`, `capture`, `response`, `outcome`,
+  `add`, `rm`,
   `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
@@ -378,6 +454,12 @@ one that says no:
   share of lines the two files still have in common rather than git's byte
   estimate, so the number can read differently from git's even where the
   judgement behind it does not.
+- **What an answer is.** `response` and `rerun --record` keep what the agent
+  wrote to standard output, verbatim — its own formatting, progress lines and
+  all, or a JSON envelope if that is what it was asked for. Nothing else about
+  the run is kept: not its standard error, not the files it changed, not what it
+  cost. And an agent nobody asked to record is not recorded, so a history is as
+  complete as whoever kept it.
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
@@ -387,7 +469,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **505 checks, 0 failures**.
+The end-to-end suite passes: **535 checks, 0 failures**.
 
 ```console
 $ make test
@@ -396,8 +478,9 @@ $ make test
 `test/smoke.sh` covers the object model, sessions and prompts, the dates a
 prompt and a session can be given, a task recorded in sessions that were
 interleaved and returned to, committing, reconstruction (ordering, session
-boundaries, and the flat chronology), the plan `rerun` would execute and the
-agent conversations it maps sessions to, branches, tags, history editing, merges
+boundaries, and the flat chronology), the plan `rerun` would execute, the agent
+conversations it maps sessions to, and what `response` and `rerun --record` keep
+and how every rendering shows it, branches, tags, history editing, merges
 including conflicts
 and `--abort`, merges that follow a file that moved, `status` and `diff` on a
 move, the commit editor, per-command option validation, local remotes, serving
