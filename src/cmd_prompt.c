@@ -808,15 +808,6 @@ static int session_end(struct repo *r, int argc, char **argv)
 	return rc;
 }
 
-static void load_groups(struct repo *r, struct prompt_list *pl,
-			struct session_groups *sg)
-{
-	memset(pl, 0, sizeof *pl);
-	memset(sg, 0, sizeof *sg);
-	collect_prompts(r, pl);
-	group_by_session(r, pl, sg);
-}
-
 /* one line per session; `session list` and `replay --list-sessions` both
  * print this, so the two never drift apart */
 static void print_session_groups(struct repo *r, const struct session_groups *sg)
@@ -1174,21 +1165,6 @@ static const char *attach_context_file(const char *name, const char **read_only)
 }
 
 /*
- * The work tree's own path.  Discovery is handed ".", so the root it settles on
- * carries that on the end; the header states this path for a reader, and
- * "<root>/." is a path to the same place that reads as a mistake.
- */
-static char *attach_root(const struct repo *r)
-{
-	char *p = xstrdup(r->root ? r->root : ".");
-	size_t n = strlen(p);
-
-	if (n > 2 && p[n - 1] == '.' && p[n - 2] == '/')
-		p[n - 2] = '\0';
-	return p;
-}
-
-/*
  * The model the prompts were written for, taken from the last prompt that named
  * one.  It is reported as a hint and nothing more: a history written for one
  * model is still readable by another, and which model wrote it is not something
@@ -1264,7 +1240,7 @@ int cmd_attach(struct repo *r, int argc, char **argv)
 	oid_hex(&commit, full);
 	abbrev = abbrev_oid(&commit);
 	model = attach_model_hint(&sg);
-	root = attach_root(r);
+	root = repo_root_display(r);
 
 	/* rendered on its own, because the renderer resets the buffer first */
 	buf_init(&body);

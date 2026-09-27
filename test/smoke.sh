@@ -2340,6 +2340,146 @@ expect "a commit message that is not ASCII is stored as written" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "handing the prompts back to an agent"
+
+# `rerun` gives the history to an agent that may act on it, one prompt at a
+# time, and maps each session to one agent conversation -- so a task that moved
+# between sessions and back is replayed the same way, the prompt that returns
+# resuming the conversation that session began.  Nothing is actually run here:
+# no runner has an agent installed, and one that did would not answer the same
+# twice.  What these checks cover is the plan, which is what decides what would
+# run, and the refusals.
+rr=$work/rerun
+rm -rf "$rr"
+mkdir -p "$rr" || exit 2
+cd "$rr" || exit 2
+gp init . >/dev/null 2>&1
+
+gp session start -t "the first conversation" >/dev/null 2>&1
+first=$(gp session current)
+gp prompt -m "work began here" >/dev/null 2>&1
+
+gp session start -t "a second conversation" >/dev/null 2>&1
+second=$(gp session current)
+gp prompt -m "other work in between" >/dev/null 2>&1
+
+gp session use "$first" >/dev/null 2>&1
+gp prompt -m "and back to the first" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "two conversations, interleaved" >/dev/null 2>&1
+
+plan=$(gp rerun | sed -n \
+	's/^would  *[0-9]*  *p_[a-z0-9]*  *[^ ]*  *\(start\|resume\)$/\1/p')
+want="start
+start
+resume"
+if [ "$plan" = "$want" ]; then
+	ok "the conversation is begun, another begun, and the first resumed"
+else
+	bad "the conversation is begun, another begun, and the first resumed" \
+		"wanted [$want] got [$plan]"
+fi
+
+# The whole point is that the third prompt reaches the *same* conversation the
+# first one opened, and not a fresh one that happens to be about the same work.
+opened=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | sed -n 1p)
+resumed=$(gp rerun | sed -n 's/.*--resume \([0-9a-f-]*\)$/\1/p')
+if [ -n "$opened" ] && [ "$opened" = "$resumed" ]; then
+	ok "coming back to a session resumes the conversation it began"
+else
+	bad "coming back to a session resumes the conversation it began" \
+		"opened [$opened] resumed [$resumed]"
+fi
+
+# Two sessions, two conversations: the second must not be handed the first
+# one's, or the two stretches of work would share one agent context.
+opens=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | wc -l)
+distinct=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | sort -u | wc -l)
+if [ "$opens" = "2" ] && [ "$distinct" = "2" ]; then
+	ok "each session gets a conversation of its own"
+else
+	bad "each session gets a conversation of its own" \
+		"$opens opened, $distinct distinct"
+fi
+
+# Derived, not random: a run that has to be started again from where it
+# stopped must reach the conversations the first attempt made.
+same=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p')
+if [ "$same" = "$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p')" ]; then
+	ok "the same history replays into the same conversations"
+else
+	bad "the same history replays into the same conversations" "the ids moved"
+fi
+if [ "$same" != "$(gp rerun --salt fresh | sed -n \
+	's/.*--session-id \([0-9a-f-]*\)$/\1/p')" ]; then
+	ok "--salt asks for a fresh set instead"
+else
+	bad "--salt asks for a fresh set instead" "the ids did not move"
+fi
+
+# Nothing may run unless it was asked for.  A rerun starts processes that edit
+# the work tree, so the default has to be to say what would run.
+out=$(gp rerun)
+case "$out" in
+*"dry run"*) ok "a rerun with no --yes runs nothing" ;;
+*) bad "a rerun with no --yes runs nothing" "got [$out]" ;;
+esac
+expect_absent "and leaves no message file behind" .gitprompt/RERUN_MSG
+
+expect "the header counts what will run against the whole history" \
+	"rerun: 3 of 3 prompt(s)" gp rerun
+expect "the model reaches the agent" "--model opus" gp rerun --model opus
+expect "and the permission mode does too" "--permission-mode plan" \
+	gp rerun --permission-mode plan
+
+# --from is what a run that stopped uses to start again, so it selects the
+# prompt it names and everything after it, in written order.
+expect "a run can start again from a prompt" "rerun: 1 of 3 prompt(s)" \
+	gp rerun --from "$(gp log-prompt --oneline | sed -n 1p | sed 's/ .*//')"
+expect "and a filter that matches nothing is refused" \
+	"no prompt with id p_nosuchid" gp rerun --from p_nosuchid
+expect_status "--from with an unknown id fails" 128 gp rerun --from p_nosuchid
+
+only=$(gp rerun --only-session "$first" | sed -n \
+	's/^would  *[0-9]*  *p_[a-z0-9]*  *[^ ]*  *\(start\|resume\)$/\1/p')
+want="start
+resume"
+if [ "$only" = "$want" ]; then
+	ok "--only-session keeps one conversation and resumes within it"
+else
+	bad "--only-session keeps one conversation and resumes within it" \
+		"wanted [$want] got [$only]"
+fi
+expect_status "--only-session naming no session fails" 128 \
+	gp rerun --only-session s_nosuchid
+
+# An agent that cannot be told which conversation to use cannot play back a
+# history whose conversations are interrupted, and saying so beats running
+# something that is not the history.
+expect "an agent that cannot resume is refused with the reason" \
+	"cannot be told which conversation to continue" gp rerun --agent=codex
+expect_status "and the refusal is fatal" 128 gp rerun --agent=codex
+expect_status "an agent that does not exist is a usage error" 2 \
+	gp rerun --agent=emacs
+expect_status "so is a permission mode the agent does not take" 2 \
+	gp rerun --permission-mode=bogus
+
+# A model name goes on a command line a shell will read, so it is held to what
+# a model name can be rather than passed through.
+expect "a model name with shell syntax in it is refused" \
+	"takes a model name" gp rerun --model 'a;rm -rf /'
+expect_status "and that is fatal" 128 gp rerun --model 'a;rm -rf /'
+
+cd "$rr" || exit 2
+rm -rf "$work/rerun-empty"
+mkdir -p "$work/rerun-empty" || exit 2
+cd "$work/rerun-empty" || exit 2
+gp init . >/dev/null 2>&1
+expect "a history with nothing in it says so" "no prompts recorded yet" gp rerun
+expect_status "and that is not a failure" 0 gp rerun
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

@@ -679,6 +679,21 @@ void repo_ident_with_time(struct repo *r, struct buf *out)
 /* ------------------------------------------------------------------ */
 /* gitprompt settings                                                  */
 
+/*
+ * The work tree's path as it should be shown to a person.  Discovery is handed
+ * ".", so the root it settles on carries that on the end, and "<root>/." is a
+ * path to the same place that reads as a mistake.  The caller owns the result.
+ */
+char *repo_root_display(const struct repo *r)
+{
+	char *p = xstrdup(r->root ? r->root : ".");
+	size_t n = strlen(p);
+
+	if (n > 2 && p[n - 1] == '.' && p[n - 2] == '/')
+		p[n - 2] = '\0';
+	return p;
+}
+
 const char *repo_prompt_dir(struct repo *r)
 {
 	static char *cached = NULL;

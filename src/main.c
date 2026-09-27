@@ -246,6 +246,9 @@ const struct command commands[] = {
 	  "log-prompt [<ref>] [--oneline]" },
 	{ "attach",     cmd_attach,     "Write the history where an agent reads its context",
 	  "attach [--agent=claude|codex] [<ref>] [-o FILE] [--dry-run] [--force]" },
+	{ "rerun",      cmd_rerun,      "Give the prompts back to an agent, in order",
+	  "rerun [<ref>] [--agent=claude] [--model M] [--permission-mode M]\n"
+	  "   rerun [<ref>] [--from ID] [--only-session ID] [--salt S] [--yes]" },
 
 	/* examine the history */
 	{ "status",     cmd_status,     "Show the working tree status",

@@ -852,7 +852,7 @@ void replay_layout(struct repo *r, const struct session_groups *g, const char *d
  * was filed under, and only the number says what came after what; a conversation
  * imported after a later one is full of timestamps that run backwards.
  */
-static struct prompt_ref *flat_order(const struct prompt_list *pl)
+struct prompt_ref *flat_order_alloc(const struct prompt_list *pl)
 {
 	struct prompt_ref *e;
 
@@ -865,8 +865,8 @@ static struct prompt_ref *flat_order(const struct prompt_list *pl)
 }
 
 /* the session a prompt names, when its file is in the store */
-static const struct session *session_by_id(const struct session_groups *g,
-					   const char *id)
+const struct session *session_by_id(const struct session_groups *g,
+				    const char *id)
 {
 	size_t i;
 
@@ -878,10 +878,25 @@ static const struct session *session_by_id(const struct session_groups *g,
 	return NULL;
 }
 
+/*
+ * The history as it stands: every prompt reachable from every ref, folded with
+ * the work tree, then grouped into its sessions.  This is what "the whole
+ * history" means for every command that shows or acts on all of it, so it is
+ * spelled once.
+ */
+void load_groups(struct repo *r, struct prompt_list *pl,
+		 struct session_groups *sg)
+{
+	memset(pl, 0, sizeof *pl);
+	memset(sg, 0, sizeof *sg);
+	collect_prompts(r, pl);
+	group_by_session(r, pl, sg);
+}
+
 void replay_flat_markdown(struct repo *r, const struct prompt_list *pl,
 			  const struct session_groups *sg, struct buf *out)
 {
-	struct prompt_ref *e = flat_order(pl);
+	struct prompt_ref *e = flat_order_alloc(pl);
 	const char *dir = repo_prompt_dir(r);
 	size_t i;
 
@@ -918,7 +933,7 @@ void replay_flat_markdown(struct repo *r, const struct prompt_list *pl,
 void replay_flat_text(struct repo *r, const struct prompt_list *pl,
 		      const struct session_groups *sg, struct buf *out)
 {
-	struct prompt_ref *e = flat_order(pl);
+	struct prompt_ref *e = flat_order_alloc(pl);
 	size_t i;
 
 	(void)r;
@@ -943,7 +958,7 @@ void replay_flat_text(struct repo *r, const struct prompt_list *pl,
 
 void replay_flat_json(const struct prompt_list *pl, struct buf *out)
 {
-	struct prompt_ref *e = flat_order(pl);
+	struct prompt_ref *e = flat_order_alloc(pl);
 	struct buf scratch;
 	size_t i;
 

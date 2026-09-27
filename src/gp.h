@@ -475,6 +475,8 @@ void repo_ident_with_time(struct repo *r, struct buf *out);  /* with " 123 +0800
 
 /* gitprompt configuration */
 const char *repo_prompt_dir(struct repo *r);           /* default "prompts" */
+/* the work tree's path, with the trailing "/." discovery leaves off */
+char *repo_root_display(const struct repo *r);
 const char *repo_default_branch(struct repo *r);
 /* the next repository-wide file number */
 long repo_next_file_seq(struct repo *r);
@@ -632,6 +634,19 @@ void replay_flat_text(struct repo *r, const struct prompt_list *pl,
 		      const struct session_groups *sg, struct buf *out);
 void replay_flat_json(const struct prompt_list *pl, struct buf *out);
 
+/*
+ * Every prompt in the order it was written, whatever session it was said in.
+ * The order is the sequence number, not the timestamp -- see history.c for why
+ * -- and the caller owns the result.
+ */
+struct prompt_ref *flat_order_alloc(const struct prompt_list *pl);
+/* the session a prompt names, when its file is in the store */
+const struct session *session_by_id(const struct session_groups *g,
+				    const char *id);
+/* the whole history as it stands, gathered and grouped */
+void load_groups(struct repo *r, struct prompt_list *pl,
+		 struct session_groups *sg);
+
 /* ------------------------------------------------------------------ */
 /* transports                                                          */
 
@@ -742,6 +757,7 @@ int cmd_outcome(struct repo *, int, char **);
 int cmd_session(struct repo *, int, char **);
 int cmd_replay(struct repo *, int, char **);
 int cmd_attach(struct repo *, int, char **);
+int cmd_rerun(struct repo *, int, char **);
 int cmd_timeline(struct repo *, int, char **);
 int cmd_log_prompt(struct repo *, int, char **);
 int cmd_stats(struct repo *, int, char **);

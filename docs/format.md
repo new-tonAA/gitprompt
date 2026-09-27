@@ -290,6 +290,12 @@ Inside `.gitprompt/`:
 | `MERGE_HEAD` | the id of the revision being merged in; present only during an unfinished merge |
 | `MERGE_MSG` | the message the concluding commit should default to |
 | `COMMIT_EDITMSG` | the buffer an editor was given, left behind afterwards as git leaves it |
+| `RERUN_MSG` | the prompt being handed to an agent during `rerun`, and removed when the run ends |
+
+`RERUN_MSG` exists only while `rerun` is running and is not part of the history:
+it is how a prompt reaches an agent's standard input without being put on a
+command line, where its quotes and newlines would have to be escaped. A run
+killed part way leaves it behind, and the next run overwrites it.
 
 `MERGE_HEAD` is what makes an unfinished merge a fact on disk rather than a
 matter of memory: `merge --abort` uses it to restore the tree, the commit that

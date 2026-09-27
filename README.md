@@ -238,6 +238,69 @@ The order there is the sequence number rather than the timestamp, which is what
 makes a conversation imported after a later one come out in the order it was
 filed rather than the order its dates happen to run.
 
+### Handing the history back to an agent
+
+`attach` writes the history where an agent reads it, in the mode where reading
+is all it does. `rerun` is the other half: the same history given to an agent
+that is allowed to act on it, one prompt at a time.
+
+What makes it more than a loop over the prompt files is the conversations. Each
+session is mapped to one agent conversation, and the prompts are handed over in
+written order — so a task that moved between sessions and back is replayed the
+same way, the prompt that returns resuming the conversation that session began:
+
+```console
+$ gitprompt rerun
+rerun: 3 of 3 prompt(s), agent claude, permission mode acceptEdits
+       the agent works in /home/you/project and may change it
+       dry run -- nothing will be run; pass --yes to run it
+
+would  1  p_crmwszhq  s_1790510692_39lroz      start
+         claude -p --permission-mode acceptEdits --session-id a98290df-4cec-4dba-b224-3823194bc4b6
+would  2  p_gy32kr9c  s_1790510692_2fb6jq      start
+         claude -p --permission-mode acceptEdits --session-id d096e643-bbdd-4cd1-bb2f-008507a2aa89
+would  3  p_xbr72wvy  s_1790510692_39lroz      resume
+         claude -p --permission-mode acceptEdits --resume a98290df-4cec-4dba-b224-3823194bc4b6
+
+rerun: 3 prompt(s) across 2 conversation(s), nothing run
+```
+
+The conversation ids are derived from the session ids rather than handed out at
+random, so the same history replays into the same conversations and a run that
+stopped half way can be started again from where it stopped with
+`--from <prompt id>`. `--salt` asks for a fresh set instead.
+
+A prompt is arbitrary text, so it is never put on a command line: it is written
+to a file in the store and handed to the agent on standard input, which is what
+removes the question of what a quote or a percent sign in someone's prompt would
+have done to the shell.
+
+Nothing runs unless it is asked for. A rerun starts processes that edit the work
+tree, so the default is the plan above and `--yes` is what runs it:
+
+```console
+$ gitprompt rerun --yes                      # runs it, claude's default mode
+$ gitprompt rerun --yes --permission-mode=bypassPermissions
+$ gitprompt rerun --yes --model opus --from p_xbr72wvy
+$ gitprompt rerun --only-session s_1790510692_39lroz
+```
+
+**It reconstructs the prompts, not the project.** The prompts are stored exactly
+and are handed over verbatim; what the agent answered is not stored at all, so an
+agent doing the work a second time may do it differently, and nothing here can
+promise otherwise. The project itself is restored exactly by checking out the
+commit, which is what `checkout` is for — the prompts are the *how it was made*,
+the commits are the *what was made*, and only the second is byte-exact.
+
+`codex` is refused rather than half-supported. Its conversations cannot be given
+an id to resume by, so an interrupted history could not be played back as the
+conversations it was — and running each session as a string of unrelated ones
+would not be a replay of anything.
+
+The run path was verified by hand against the real CLI and against a stub agent
+that records what it is handed; the suite covers the plan, because no runner has
+an agent installed and one that did would not answer the same twice.
+
 ### Recording a conversation that happened earlier
 
 A prompt recorded today is dated today, which is right for one being typed now
@@ -271,7 +334,7 @@ names are git's, and the behaviour is meant to match:
 - **start** — `init`, `clone`, `config`
 - **record prompts** — `session`, `prompt`, `capture`, `outcome`, `add`, `rm`,
   `mv`, `commit`
-- **reconstruct** — `replay`, `timeline`, `log-prompt`
+- **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`, `tag`,
   `reset`, `describe`
@@ -324,7 +387,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **482 checks, 0 failures**.
+The end-to-end suite passes: **505 checks, 0 failures**.
 
 ```console
 $ make test
@@ -333,7 +396,8 @@ $ make test
 `test/smoke.sh` covers the object model, sessions and prompts, the dates a
 prompt and a session can be given, a task recorded in sessions that were
 interleaved and returned to, committing, reconstruction (ordering, session
-boundaries, and the flat chronology), branches, tags, history editing, merges
+boundaries, and the flat chronology), the plan `rerun` would execute and the
+agent conversations it maps sessions to, branches, tags, history editing, merges
 including conflicts
 and `--abort`, merges that follow a file that moved, `status` and `diff` on a
 move, the commit editor, per-command option validation, local remotes, serving
