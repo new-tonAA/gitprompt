@@ -31,12 +31,18 @@ jobs:
       - name: build
         run: |
           if make 2>&1 | tee "$RUNNER_TEMP/build.log"; then exit 0; fi
-          # The step's own log needs a token to read, and the machine this is
-          # read from has none; a failed step's annotations do not, so the
-          # compiler's first words are put there.
-          grep -E ': (error|fatal error)' "$RUNNER_TEMP/build.log" | head -20 |
+          # A step's own log needs a token to read back and the machine this is
+          # read from has none; its annotations do not, so the failure goes
+          # there -- the compiler's error lines, and then the end of the output
+          # for anything they do not account for.
+          { grep -E ': (error|fatal error)' "$RUNNER_TEMP/build.log" | head -20
+            tail -20 "$RUNNER_TEMP/build.log"; } |
             while IFS= read -r line; do printf '::error::%s\n' "$line"; done
           exit 1
 
       - name: test
-        run: make test
+        run: |
+          if make test 2>&1 | tee "$RUNNER_TEMP/test.log"; then exit 0; fi
+          tail -50 "$RUNNER_TEMP/test.log" |
+            while IFS= read -r line; do printf '::error::%s\n' "$line"; done
+          exit 1
