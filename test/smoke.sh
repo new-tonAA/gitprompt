@@ -10,6 +10,12 @@
 # shape, never by value, so a passing run means what it claims to mean: there
 # are no checks here that cannot fail.
 #
+# It runs on three runners, so everything here is POSIX and nothing may rest on
+# a GNU extension: the macOS runner's sed and grep are BSD, where `\|` is not an
+# alternation and `wc` pads its count to a column, and neither of those is
+# visible from a machine that has GNU tools.  Where a substitution would need
+# one, use `grep -oE` and `tr -d ' '` instead.
+#
 # The git-interop section is skipped when git is not on PATH.  It is the
 # section that matters most, because it tests the design claim that a
 # gitprompt repository is an ordinary git repository.
@@ -2368,8 +2374,10 @@ gp prompt -m "and back to the first" >/dev/null 2>&1
 gp add -A >/dev/null 2>&1
 gp commit -m "two conversations, interleaved" >/dev/null 2>&1
 
-plan=$(gp rerun | sed -n \
-	's/^would  *[0-9]*  *p_[a-z0-9]*  *[^ ]*  *\(start\|resume\)$/\1/p')
+# The word at the end of each plan line.  `grep -oE` rather than a sed
+# substitution, because the alternation in one of those is a GNU extension and
+# the macOS runner's sed is BSD.
+plan=$(gp rerun | grep -oE '(start|resume)$')
 want="start
 start
 resume"
@@ -2393,8 +2401,11 @@ fi
 
 # Two sessions, two conversations: the second must not be handed the first
 # one's, or the two stretches of work would share one agent context.
-opens=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | wc -l)
-distinct=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | sort -u | wc -l)
+# `tr` because BSD wc pads its count to a column, and the comparison below is
+# of the number, not of how it was laid out.
+opens=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | wc -l | tr -d ' ')
+distinct=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' \
+	| sort -u | wc -l | tr -d ' ')
 if [ "$opens" = "2" ] && [ "$distinct" = "2" ]; then
 	ok "each session gets a conversation of its own"
 else
@@ -2440,8 +2451,7 @@ expect "and a filter that matches nothing is refused" \
 	"no prompt with id p_nosuchid" gp rerun --from p_nosuchid
 expect_status "--from with an unknown id fails" 128 gp rerun --from p_nosuchid
 
-only=$(gp rerun --only-session "$first" | sed -n \
-	's/^would  *[0-9]*  *p_[a-z0-9]*  *[^ ]*  *\(start\|resume\)$/\1/p')
+only=$(gp rerun --only-session "$first" | grep -oE '(start|resume)$')
 want="start
 resume"
 if [ "$only" = "$want" ]; then
