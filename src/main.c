@@ -11,6 +11,10 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -370,6 +374,42 @@ static void die_usage(void)
 	exit(129);
 }
 
+#ifdef _WIN32
+/*
+ * Windows hands a C program its arguments in the ANSI code page, so a prompt
+ * typed in anything but ASCII arrives as those bytes -- stored that way, a
+ * prompt file is not the UTF-8 that every other part of the store is, and
+ * `replay` writes a document no reader will decode.  git reads its command
+ * line as UTF-16 and converts it, for the same reason; this does that.  The
+ * split is the one the runtime would have made, so only the encoding differs.
+ */
+static char **argv_as_utf8(int *argcp)
+{
+	wchar_t **wide = CommandLineToArgvW(GetCommandLineW(), argcp);
+	char **out;
+	int i;
+
+	if (!wide)
+		return NULL;
+
+	out = xcalloc((size_t)*argcp + 1, sizeof(*out));
+	for (i = 0; i < *argcp; i++) {
+		int n = WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, NULL, 0,
+					    NULL, NULL);
+
+		if (n <= 0) {
+			LocalFree(wide);
+			return NULL;
+		}
+		out[i] = xmalloc((size_t)n);
+		WideCharToMultiByte(CP_UTF8, 0, wide[i], -1, out[i], n,
+				    NULL, NULL);
+	}
+	LocalFree(wide);
+	return out;
+}
+#endif
+
 int main(int argc, char **argv)
 {
 	const struct command *cmd;
@@ -388,6 +428,16 @@ int main(int argc, char **argv)
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 	_setmode(_fileno(stderr), _O_BINARY);
+
+	{
+		int wargc;
+		char **wargv = argv_as_utf8(&wargc);
+
+		if (wargv) {
+			argc = wargc;
+			argv = wargv;
+		}
+	}
 #endif
 
 	if (argc < 2)

@@ -2055,6 +2055,34 @@ expect "the new branch records where it came from" "Created from origin/side" \
 expect "the new branch has the remote's work" "side work" gp log --oneline
 
 # ------------------------------------------------------------------
+say "an argument that is not ASCII"
+
+# Windows hands a C program its arguments in the ANSI code page, so a prompt
+# typed in Chinese was stored as GBK: a prompt file that was not the UTF-8
+# every other part of the store is, and a document `replay` writes that no
+# reader would decode.  git reads its command line as UTF-16 for the same
+# reason.  The bytes are spelled out rather than written into this file, so
+# that the suite stays ASCII whatever locale it runs under.
+enc=$work/nonascii
+rm -rf "$enc"
+mkdir -p "$enc" || exit 2
+cd "$enc" || exit 2
+gp init . >/dev/null 2>&1
+cn=$(printf '\344\270\255\346\226\207')     # 中文
+gp session start -t "$cn title" >/dev/null 2>&1
+sid=$(gp session current)
+expect "a session title that is not ASCII is stored as written" \
+	"title: $cn title" cat "prompts/sessions/$sid.md"
+expect "a prompt that is not ASCII is recorded" "p_" gp prompt -m "$cn prompt"
+expect "and the text is stored as it was written" "$cn prompt" \
+	cat prompts/0001-prompt.md
+gp add -A >/dev/null 2>&1
+gp commit -m "$cn commit" >/dev/null 2>&1
+expect "a commit message that is not ASCII is stored as written" \
+	"$cn commit" gp log -n 1
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

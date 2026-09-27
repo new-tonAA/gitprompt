@@ -28,6 +28,8 @@ LDLIBS   += -Lthird_party/zlib -lz
 # `serve` and `gp://` use winsock, which the sockets come from on Windows; on
 # Unix they are in libc and nothing extra is needed.
 LDLIBS   += -lws2_32
+# argv is reread from the wide command line, and that comes from shell32.
+LDLIBS   += -lshell32
 else
 # Every system git runs on already has zlib, and git links that one rather than
 # carrying its own; this does the same.  The vendored copy under third_party is
