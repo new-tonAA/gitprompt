@@ -175,8 +175,6 @@ static const char *url_without_file_scheme(const char *url)
 /* ------------------------------------------------------------------ */
 /* running git, for the carrier transports only                        */
 
-#include <process.h>
-
 /*
  * Quote one argument for cmd.exe; refuse anything that could break out.
  *
