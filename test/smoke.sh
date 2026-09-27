@@ -1702,6 +1702,18 @@ say "git interoperability"
 if command -v git >/dev/null 2>&1; then
 	gpdir=$repo/.gitprompt
 
+	# git records nothing without a committer identity, and a runner has none
+	# configured -- its merge would stop before it wrote the conflict this
+	# section exists to read.  git's own suite sets these rather than reading
+	# the machine's identity, and so does this, so that what is verified below
+	# does not depend on whose machine the suite ran on.  gitprompt takes its
+	# identity from the repository, so these reach git alone.
+	GIT_AUTHOR_NAME="gitprompt test"
+	GIT_AUTHOR_EMAIL="gitprompt@example.com"
+	GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
+	GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+	export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
 	expect "git reads our commits" "record the first prompts" \
 		git --git-dir="$gpdir" log --oneline
 	expect "git parses our trees" "a.txt" \
@@ -1867,7 +1879,8 @@ if command -v git >/dev/null 2>&1; then
 		printf 'ours\n' > k.txt
 		gp add k.txt >/dev/null 2>&1
 		gp commit -m ours >/dev/null 2>&1
-		git --git-dir=.gitprompt --work-tree=. merge side >/dev/null 2>&1
+		git --git-dir=.gitprompt --work-tree=. merge side \
+			> "$work/git-merge.out" 2>&1
 		git --git-dir=.gitprompt ls-files -u 2>/dev/null | awk '{print $3}' |
 			tr -d '\r' | sort > "$work/git-made-stages"
 		gp ls-files -s k.txt | awk '{print $3}' | tr -d '\r' | sort \
@@ -1875,8 +1888,11 @@ if command -v git >/dev/null 2>&1; then
 	)
 	merge_head=$gmerge/.gitprompt/MERGE_HEAD
 	if [ ! -e "$merge_head" ]; then
+		# git's own words: if the merge stopped, why it stopped is the whole
+		# of what a reader of this failure needs, and it is not visible from
+		# the absence of one file.
 		bad "gitprompt reads a conflict git made" \
-			"git's merge left no MERGE_HEAD"
+			"git's merge left no MERGE_HEAD: $(tr '\n' ' ' < "$work/git-merge.out")"
 	else
 		expect "gitprompt marks git's conflict UU" "UU k.txt" \
 			sh -c "cd '$gmerge' && '$GP' status --short"
