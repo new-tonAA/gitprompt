@@ -246,6 +246,29 @@ notes: Session context was reset twice.
 `ended_at` and `notes` appear only once set. `ended_at` present means the session
 is closed.
 
+A session that was left and returned to carries a `segments` line as well:
+
+```
+segments: 2026-09-10T09:00:00+08:00..2026-09-10T12:00:00+08:00, 2026-09-10T15:00:00+08:00..
+```
+
+It is one `start..end` pair per stretch, comma-separated, each end written as a
+date in the same form the other fields use and omitted while that stretch is
+still the open one. `segments` appears only when there is more than one, so a
+session that was never left has the plain `started_at`/`ended_at` pair and
+nothing else, and a file with no `segments` and a file written before this field
+existed are the same thing.
+
+Where it is present it is authoritative: `started_at` is its first start and
+`ended_at` is its last end, absent while that stretch is open, and a reader that
+knows nothing of `segments` still gets the session's overall span from those two.
+A writer derives the pair from the stretches rather than writing it separately,
+so the two cannot disagree in a file gitprompt wrote.
+
+A session is left either by `session end` or by another session being started or
+used, and the stretch that ends is closed at the instant the next one opens, so
+consecutive stretches meet exactly and no time is counted twice or lost.
+
 Session ids are `s_<epoch>_<6 characters>`; prompt ids are `p_` followed by
 8 characters, where the characters are drawn from `a`–`z0`–`9`. Uniqueness
 comes from the epoch, the process id and an in-process counter hashed together

@@ -51,6 +51,39 @@ static char *session_path(struct repo *r, const char *id)
 }
 
 /*
+ * A session read back from its file, or NULL when there is no such file.
+ *
+ * The distinction matters: an id that was never recorded has to be told from
+ * one whose file cannot be read, because `session use` used to accept any
+ * string at all.  Pointing the recorder at a session that does not exist
+ * succeeded silently, and every prompt after it was attributed to an id with no
+ * record behind it -- a boundary that reads as a fact and is not one.
+ */
+static struct session *session_load(struct repo *r, const char *id)
+{
+	struct session *s;
+	struct buf b;
+	char *path = session_path(r, id);
+	char *full = xstrfmt("%s/%s", r->root, path);
+	int rc;
+
+	buf_init(&b);
+	rc = read_file(full, &b);
+	free(full);
+	free(path);
+	if (rc < 0) {
+		buf_release(&b);
+		return NULL;
+	}
+	s = xcalloc(1, sizeof(*s));
+	session_from_file(s, b.b, b.len);
+	if (!s->id)
+		s->id = xstrdup(id);
+	buf_release(&b);
+	return s;
+}
+
+/*
  * The time to record against a prompt or a session: what `--date` asked for,
  * else GIT_AUTHOR_DATE, else now.
  *
@@ -601,7 +634,9 @@ int cmd_outcome(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* session                                                            */
 
-static int write_session(struct repo *r, const struct session *s)
+/* write a session's file and stage it; says nothing, so that a caller which
+ * merely updates one in passing does not narrate it */
+static int session_store(struct repo *r, const struct session *s)
 {
 	struct buf b;
 	char *path;
@@ -611,24 +646,84 @@ static int write_session(struct repo *r, const struct session *s)
 	session_to_file(s, &b);
 	path = session_path(r, s->id);
 	rc = write_worktree_file(r, path, b.b, b.len);
-	if (rc == 0) {
+	if (rc == 0)
 		stage_worktree_path(r, path);
-		printf("%s %s\n", s->id, path);
-	}
 	free(path);
 	buf_release(&b);
 	return rc < 0 ? 1 : 0;
+}
+
+/*
+ * Pause whatever session is being recorded into, because another one is about
+ * to take its place.  The visit that ends is closed at `when`, which is the
+ * instant the incoming session opens, so the two meet exactly.
+ *
+ * Switching used to be nothing at all: `session start` and `session use` only
+ * moved the pointer.  The session left behind kept a file that said nothing
+ * after started_at, so a conversation visited in the morning, left for an
+ * afternoon of something else, and visited again came back as one unbroken
+ * stretch with the whole afternoon inside it -- the file gave no sign that
+ * anything had happened, which made the one thing an interrupted session's
+ * record exists to show the one thing it could not show.
+ *
+ * The id comes back for the caller to name in what it prints, since only the
+ * caller knows what came next.  NULL means nothing was open.  Caller frees.
+ */
+static char *session_pause(struct repo *r, const char *when)
+{
+	char *id = repo_current_session(r);
+	struct session *s;
+
+	if (!id)
+		return NULL;
+	s = session_load(r, id);
+	if (!s) {
+		free(id);
+		return NULL;
+	}
+	if (session_is_open(s)) {
+		session_visit_close(s, when);
+		session_store(r, s);
+	}
+	session_release(s);
+	free(s);
+	return id;
 }
 
 static int session_start(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	struct session s;
-	struct buf b, who;
+	struct buf who;
+	char *when, *paused;
+	int rc;
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"-t=", "--title=", "--date=", NULL });
 	memset(&s, 0, sizeof s);
+
+	when = record_time(opts_value(&o, "--date"));
+	if (!when) {
+		const char *bad = opts_value(&o, "--date");
+
+		gp_error("session start: cannot read the date '%s'",
+			 bad ? bad : getenv("GIT_AUTHOR_DATE"));
+		return 1;
+	}
+
+	/*
+	 * Starting a session while another is open is a switch, and the session
+	 * being left is told so rather than being left looking untouched.  The
+	 * warning is the point: without it the recorder has no way to know that
+	 * the prompts about to be written are no longer in the conversation
+	 * they thought they were in.
+	 */
+	paused = session_pause(r, when);
+	if (paused) {
+		gp_warn("pausing session %s; `gitprompt session use %s` records "
+			"into it again", paused, paused);
+		free(paused);
+	}
 
 	s.id = new_session_id();
 	{
@@ -639,46 +734,31 @@ static int session_start(struct repo *r, int argc, char **argv)
 			title = opts_arg(&o, 0);
 		s.title = xstrdup(title ? title : "untitled session");
 	}
-	buf_init(&b);
-	s.started_at = record_time(opts_value(&o, "--date"));
-	if (!s.started_at) {
-		const char *bad = opts_value(&o, "--date");
+	session_visit_add(&s, when);
+	free(when);
 
-		gp_error("session start: cannot read the date '%s'",
-			 bad ? bad : getenv("GIT_AUTHOR_DATE"));
-		free(s.id);
-		free(s.title);
-		buf_release(&b);
-		return 1;
-	}
 	buf_init(&who);
 	repo_ident(r, &who);
 	s.author = xstrdup(buf_cstr(&who));
 	buf_release(&who);
 
-	{
-		int rc;
+	rc = session_store(r, &s);
+	if (rc == 0) {
 		repo_set_current_session(r, s.id);
-		rc = write_session(r, &s);
-		if (rc == 0)
-			printf("session %s started\n", s.id);
-		free(s.id);
-		free(s.title);
-		free(s.started_at);
-		free(s.author);
-		buf_release(&b);
-		return rc;
+		printf("session %s started\n", s.id);
 	}
+	session_release(&s);
+	return rc;
 }
 
 static int session_end(struct repo *r, int argc, char **argv)
 {
 	char *id = repo_current_session(r);
-	char *path;
-	struct buf b;
-	struct session s;
+	struct session *s;
 	struct opts o;
+	char *when;
 	const char *bad;
+	int rc;
 
 	opts_init(&o, argc, argv, (const char *const[]){ "--date=", NULL });
 
@@ -687,57 +767,45 @@ static int session_end(struct repo *r, int argc, char **argv)
 		return 1;
 	}
 
-	memset(&s, 0, sizeof s);
-	path = session_path(r, id);
-	buf_init(&b);
-	{
-		char *full = xstrfmt("%s/%s", r->root, path);
-		int rc = read_file(full, &b);
-		free(full);
-		if (rc < 0) {
-			gp_error("session end: cannot read %s", path);
-			free(id);
-			free(path);
-			buf_release(&b);
-			return 1;
-		}
-	}
-	session_from_file(&s, b.b, b.len);
-	if (!s.id)
-		s.id = xstrdup(id);
-
-	{
-		char *when = record_time(opts_value(&o, "--date"));
-
-		if (!when) {
-			bad = opts_value(&o, "--date");
-			gp_error("session end: cannot read the date '%s'",
-				 bad ? bad : getenv("GIT_AUTHOR_DATE"));
-			session_release(&s);
-			buf_release(&b);
-			free(path);
-			free(id);
-			return 1;
-		}
-		free(s.ended_at);
-		s.ended_at = when;
-	}
-
-	buf_reset(&b);
-	session_to_file(&s, &b);
-	{
-		int rc = write_worktree_file(r, path, b.b, b.len);
-		if (rc == 0) {
-			stage_worktree_path(r, path);
-			repo_set_current_session(r, NULL);
-			printf("session %s ended\n", id);
-		}
-		session_release(&s);
-		buf_release(&b);
-		free(path);
+	s = session_load(r, id);
+	if (!s) {
+		gp_error("session end: cannot read session %s", id);
 		free(id);
-		return rc < 0 ? 1 : 0;
+		return 1;
 	}
+
+	when = record_time(opts_value(&o, "--date"));
+	if (!when) {
+		bad = opts_value(&o, "--date");
+		gp_error("session end: cannot read the date '%s'",
+			 bad ? bad : getenv("GIT_AUTHOR_DATE"));
+		session_release(s);
+		free(s);
+		free(id);
+		return 1;
+	}
+
+	/* closing a visit that is already closed would rewrite its end, which
+	 * is the one thing a recorded stretch must not do */
+	if (session_visit_close(s, when) < 0) {
+		gp_error("session end: session %s is not open", id);
+		session_release(s);
+		free(s);
+		free(id);
+		free(when);
+		return 1;
+	}
+	free(when);
+
+	rc = session_store(r, s);
+	if (rc == 0) {
+		repo_set_current_session(r, NULL);
+		printf("session %s ended\n", id);
+	}
+	session_release(s);
+	free(s);
+	free(id);
+	return rc;
 }
 
 static void load_groups(struct repo *r, struct prompt_list *pl,
@@ -807,6 +875,18 @@ static int session_show(struct repo *r, const char *id)
 						 ? g->session->started_at : "");
 		if (g->session->ended_at)
 			printf("  ended:   %s\n", g->session->ended_at);
+		if (g->session->nr_visits > 1) {
+			size_t k;
+
+			printf("  segments: %lu\n",
+			       (unsigned long)g->session->nr_visits);
+			for (k = 0; k < g->session->nr_visits; k++)
+				printf("    %s -- %s\n",
+				       g->session->visits[k].start,
+				       g->session->visits[k].end
+					       ? g->session->visits[k].end
+					       : "(open)");
+		}
 		printf("  author:  %s\n", g->session->author ? g->session->author : "");
 		if (g->session->notes)
 			printf("  notes:   %s\n", g->session->notes);
@@ -862,12 +942,71 @@ int cmd_session(struct repo *r, int argc, char **argv)
 		return rc;
 	}
 	if (!strcmp(sub, "use")) {
-		if (argc < 2)
+		struct opts o;
+		struct session *s;
+		const char *id;
+		char *when, *paused, *cur;
+		int rc;
+
+		opts_init(&o, argc - 1, argv + 1,
+			  (const char *const[]){ "--date=", NULL });
+		id = opts_arg(&o, 0);
+		if (!id)
 			gp_die("session use: expected a session id");
-		if (repo_set_current_session(r, argv[1]) < 0)
-			gp_die("session use: cannot write the session pointer");
-		printf("now recording into %s\n", argv[1]);
-		return 0;
+
+		when = record_time(opts_value(&o, "--date"));
+		if (!when) {
+			const char *bad = opts_value(&o, "--date");
+
+			gp_error("session use: cannot read the date '%s'",
+				 bad ? bad : getenv("GIT_AUTHOR_DATE"));
+			return 1;
+		}
+
+		cur = repo_current_session(r);
+		if (cur && !strcmp(cur, id)) {
+			printf("already recording into %s\n", id);
+			free(cur);
+			free(when);
+			return 0;
+		}
+		free(cur);
+
+		/*
+		 * An id that names no session file is refused rather than
+		 * accepted: otherwise the recorder is pointed at a boundary
+		 * that exists nowhere but in the pointer, and the prompts
+		 * written after it are filed under it.
+		 */
+		s = session_load(r, id);
+		if (!s) {
+			gp_error("session use: no session with id %s", id);
+			free(when);
+			return 1;
+		}
+
+		paused = session_pause(r, when);
+		if (paused) {
+			gp_warn("pausing session %s", paused);
+			free(paused);
+		}
+
+		if (s->nr_visits && !session_is_open(s)) {
+			printf("session %s had ended at %s\n", id,
+			       s->ended_at ? s->ended_at : "(unknown)");
+			printf("(recording into it again opens a new stretch)\n");
+		}
+		session_visit_add(s, when);
+		free(when);
+
+		rc = session_store(r, s);
+		if (rc == 0) {
+			repo_set_current_session(r, id);
+			printf("now recording into %s\n", id);
+		}
+		session_release(s);
+		free(s);
+		return rc;
 	}
 	if (!strcmp(sub, "current")) {
 		char *id = repo_current_session(r);
@@ -893,15 +1032,27 @@ int cmd_replay(struct repo *r, int argc, char **argv)
 	struct session_groups sg;
 	struct buf out;
 	const char *fmt;
-	int stat_only;
+	int stat_only, flat;
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"--format=", "-o=", "--output=", "--layout=", "--stat",
-		"--list-sessions", NULL });
+		"--list-sessions", "--flat", NULL });
 	fmt = opts_value(&o, "--format");
 	if (!fmt)
 		fmt = "md";
 	stat_only = opts_flag(&o, "--stat");
+	flat = opts_flag(&o, "--flat");
+
+	/*
+	 * The three of those answer questions that are about sessions, and a
+	 * flat listing has no sessions to answer them with.  Refusing says so;
+	 * ignoring the flag would leave the caller reading a report they did
+	 * not ask for and think it was the one they did.
+	 */
+	if (flat && (stat_only || opts_value(&o, "--layout") ||
+		     opts_flag(&o, "--list-sessions")))
+		gp_die("replay: --flat lists the prompts in one chronology;\n"
+		       "        --stat, --layout and --list-sessions report per session");
 
 	/*
 	 * `replay [<ref>]` replays that point in the history, not whatever HEAD
@@ -928,11 +1079,20 @@ int cmd_replay(struct repo *r, int argc, char **argv)
 
 	buf_init(&out);
 	if (!strcmp(fmt, "md") || !strcmp(fmt, "markdown")) {
-		replay_markdown(r, &sg, &out, stat_only);
+		if (flat)
+			replay_flat_markdown(r, &pl, &sg, &out);
+		else
+			replay_markdown(r, &sg, &out, stat_only);
 	} else if (!strcmp(fmt, "json")) {
-		replay_json(r, &sg, &out);
+		if (flat)
+			replay_flat_json(&pl, &out);
+		else
+			replay_json(r, &sg, &out);
 	} else if (!strcmp(fmt, "txt") || !strcmp(fmt, "text")) {
-		replay_text(r, &sg, &out);
+		if (flat)
+			replay_flat_text(r, &pl, &sg, &out);
+		else
+			replay_text(r, &sg, &out);
 	} else {
 		gp_die("replay: unknown format '%s' (md, json or txt)", fmt);
 	}

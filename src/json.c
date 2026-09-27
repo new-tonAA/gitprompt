@@ -611,19 +611,83 @@ void prompt_to_json(const struct prompt *p, struct buf *out)
 
 void session_release(struct session *s)
 {
+	size_t i;
+
 	free(s->id);
 	free(s->title);
 	free(s->started_at);
 	free(s->ended_at);
 	free(s->author);
 	free(s->notes);
+	for (i = 0; i < s->nr_visits; i++) {
+		free(s->visits[i].start);
+		free(s->visits[i].end);
+	}
+	free(s->visits);
 	memset(s, 0, sizeof *s);
+}
+
+/*
+ * The span the file carries: the first visit's start and the last one's end.
+ * They are kept in step with the visits rather than written by hand, so the two
+ * can never disagree in a file gitprompt wrote -- the visits are the record and
+ * the span is what a reader that knows nothing of visits reads instead.
+ */
+static void session_sync_span(struct session *s)
+{
+	struct session_visit *last;
+
+	if (!s->nr_visits)
+		return;
+	free(s->started_at);
+	s->started_at = xstrdup(s->visits[0].start);
+	s->started_ts = parse_timestamp(s->started_at);
+	last = &s->visits[s->nr_visits - 1];
+	free(s->ended_at);
+	s->ended_at = last->end ? xstrdup(last->end) : NULL;
+}
+
+void session_visit_add(struct session *s, const char *start)
+{
+	s->visits = xrealloc(s->visits, (s->nr_visits + 1) * sizeof(*s->visits));
+	s->visits[s->nr_visits].start = xstrdup(start);
+	s->visits[s->nr_visits].end = NULL;
+	s->nr_visits++;
+	session_sync_span(s);
+}
+
+int session_visit_close(struct session *s, const char *end)
+{
+	struct session_visit *last;
+
+	if (!s->nr_visits)
+		return -1;
+	last = &s->visits[s->nr_visits - 1];
+	if (last->end)
+		return -1;
+	last->end = xstrdup(end);
+	session_sync_span(s);
+	return 0;
+}
+
+int session_is_open(const struct session *s)
+{
+	if (!s->nr_visits)
+		return 0;
+	return s->visits[s->nr_visits - 1].end == NULL;
 }
 
 /*
  * A session is recorded the same way a prompt is: a small markdown file,
  * living beside the prompts so that it travels with them and is readable
  * without tooling.
+ *
+ * `segments` appears only for a session that was interrupted, and then it is
+ * the whole record of when the session really ran: a pair per stretch, written
+ * `start..end` with the end left empty while a stretch is still open.  A
+ * session that was never left keeps the plain started_at/ended_at pair it
+ * always had, so an unbroken conversation's file is unchanged by the distinction
+ * -- which is what makes the interruptions it does record worth reading.
  */
 void session_to_file(const struct session *s, struct buf *out)
 {
@@ -634,10 +698,63 @@ void session_to_file(const struct session *s, struct buf *out)
 	buf_addf(out, "started_at: %s\n", s->started_at ? s->started_at : "");
 	if (s->ended_at)
 		buf_addf(out, "ended_at: %s\n", s->ended_at);
+	if (s->nr_visits > 1) {
+		size_t i;
+
+		buf_addstr(out, "segments:");
+		for (i = 0; i < s->nr_visits; i++)
+			buf_addf(out, "%s %s..%s", i ? "," : "",
+				 s->visits[i].start,
+				 s->visits[i].end ? s->visits[i].end : "");
+		buf_addch(out, '\n');
+	}
 	buf_addf(out, "author: %s\n", s->author ? s->author : "");
 	if (s->notes)
 		buf_addf(out, "notes: %s\n", s->notes);
 	buf_addstr(out, "---\n");
+}
+
+/*
+ * "2026-09-26T00:31:02+08:00..2026-09-26T00:50:00+08:00, 2026-09-26T00:52:02+08:00.."
+ * -- a pair per stretch, comma-separated, the end omitted while one is open.
+ *
+ * Both ends of every piece are trimmed.  `trim` only takes the tail, so the
+ * space after each comma survived it and became part of the date: a session read
+ * back from its own file had stretches starting at " 2026-09-26T..." and, since
+ * that value was written out again as it stood, every read added one more space.
+ */
+static void session_parse_segments(struct session *s, const char *val)
+{
+	const char *p = val;
+
+	for (;;) {
+		const char *comma = strchr(p, ',');
+		size_t llen = comma ? (size_t)(comma - p) : strlen(p);
+		char *raw = xstrndup(p, llen);
+		char *item = trim_left(raw);
+		char *dots;
+		char *start, *end = NULL;
+
+		trim(item);
+		dots = strstr(item, "..");
+		if (dots) {
+			*dots = '\0';
+			start = xstrdup(item);
+			if (dots[2])
+				end = xstrdup(dots + 2);
+		} else {
+			start = xstrdup(item);
+		}
+		session_visit_add(s, start);
+		if (end)
+			session_visit_close(s, end);
+		free(start);
+		free(end);
+		free(raw);
+		if (!comma)
+			break;
+		p = comma + 1;
+	}
 }
 
 static void session_fm_kv(const char *key, const char *val, void *ud)
@@ -648,9 +765,13 @@ static void session_fm_kv(const char *key, const char *val, void *ud)
 		s->id = xstrdup(val);
 	else if (!strcmp(key, "title"))
 		s->title = xstrdup(val);
-	else if (!strcmp(key, "started_at"))
+	else if (!strcmp(key, "segments") && val[0])
+		session_parse_segments(s, val);
+	/* the span is derived from the visits wherever there are any, so a line
+	 * that disagrees with them is the line that is wrong */
+	else if (!strcmp(key, "started_at") && !s->nr_visits)
 		s->started_at = xstrdup(val);
-	else if (!strcmp(key, "ended_at") && val[0])
+	else if (!strcmp(key, "ended_at") && val[0] && !s->nr_visits)
 		s->ended_at = xstrdup(val);
 	else if (!strcmp(key, "author"))
 		s->author = xstrdup(val);
@@ -665,6 +786,16 @@ int session_from_file(struct session *s, const void *data, size_t len)
 
 	session_release(s);
 	had = read_frontmatter(data, len, session_fm_kv, s, &body);
+	if (!s->nr_visits && s->started_at) {
+		/* a file written before sessions could be interrupted: one
+		 * stretch, from the start to the end it records */
+		char *end = s->ended_at ? xstrdup(s->ended_at) : NULL;
+
+		session_visit_add(s, s->started_at);
+		if (end)
+			session_visit_close(s, end);
+		free(end);
+	}
 	if (s->started_at)
 		s->started_ts = parse_timestamp(s->started_at);
 	return had;
@@ -682,6 +813,22 @@ void session_to_json(const struct session *s, struct buf *out)
 	json_quote(out, s->id ? s->id : "");
 	buf_addstr(out, ",\"notes\":");
 	json_quote(out, s->notes ? s->notes : "");
+	buf_addstr(out, ",\"segments\":[");
+	{
+		size_t i;
+
+		for (i = 0; i < s->nr_visits; i++) {
+			buf_addstr(out, i ? ",{\"start\":" : "{\"start\":");
+			json_quote(out, s->visits[i].start);
+			buf_addstr(out, ",\"end\":");
+			if (s->visits[i].end)
+				json_quote(out, s->visits[i].end);
+			else
+				buf_addstr(out, "null");
+			buf_addch(out, '}');
+		}
+	}
+	buf_addstr(out, "]");
 	buf_addstr(out, ",\"started_at\":");
 	json_quote(out, s->started_at ? s->started_at : "");
 	buf_addstr(out, ",\"title\":");

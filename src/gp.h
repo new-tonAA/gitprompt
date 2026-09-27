@@ -215,17 +215,41 @@ struct prompt {
 #define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL }
 void prompt_release(struct prompt *p);
 
+/*
+ * One stretch of time a session was being recorded into: when the recorder
+ * opened it, and when it was closed.  `end` is NULL while that visit is still
+ * the one being recorded into.
+ *
+ * A session that was never left has exactly one visit, and its file is written
+ * exactly as it always was.  One that was switched away from and come back to
+ * has one visit per stretch, which is what keeps the time in between from being
+ * swallowed by a single start/end pair.
+ */
+struct session_visit {
+	char *start;
+	char *end;              /* or NULL while the visit is open */
+};
+
 struct session {
 	char *id;
 	char *title;
-	char *started_at;
+	char *started_at;       /* the first visit's start */
 	i64 started_ts;
-	char *ended_at;         /* or NULL */
+	char *ended_at;         /* the last visit's end, or NULL */
 	char *author;
 	char *notes;            /* or NULL */
+	struct session_visit *visits;
+	size_t nr_visits;
 };
-#define SESSION_INIT { NULL,NULL,NULL,0,NULL,NULL,NULL }
+#define SESSION_INIT { NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,0 }
 void session_release(struct session *s);
+
+/* open a visit; the previous one, if it is still open, is left alone */
+void session_visit_add(struct session *s, const char *start);
+/* close the visit the session is in; -1 if it is already closed */
+int  session_visit_close(struct session *s, const char *end);
+/* is the session in a visit right now? */
+int  session_is_open(const struct session *s);
 
 /*
  * The on-disk form, and the form the object store holds: a frontmatter
@@ -594,6 +618,19 @@ void replay_text(struct repo *r, const struct session_groups *g,
 		 struct buf *out);
 void replay_layout(struct repo *r, const struct session_groups *g,
 		   const char *dir);
+
+/*
+ * The same three documents, in one flat chronology: every prompt in the order
+ * it was written, whatever session it was said in.  The grouped documents above
+ * answer "what was said in this conversation"; these answer "what happened,
+ * in what order", which is a different question once a task spans several
+ * sessions that were interleaved.
+ */
+void replay_flat_markdown(struct repo *r, const struct prompt_list *pl,
+			  const struct session_groups *sg, struct buf *out);
+void replay_flat_text(struct repo *r, const struct prompt_list *pl,
+		      const struct session_groups *sg, struct buf *out);
+void replay_flat_json(const struct prompt_list *pl, struct buf *out);
 
 /* ------------------------------------------------------------------ */
 /* transports                                                          */

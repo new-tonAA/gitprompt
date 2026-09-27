@@ -216,7 +216,7 @@ const struct command commands[] = {
 	/* record prompts */
 	{ "session",    cmd_session,    "Begin, end and inspect prompting sessions",
 	  "session start [-t TITLE] [--date WHEN]\n"
-	  "   session <end [--date WHEN]|list|show [ID]|use ID|current>" },
+	  "   session <end [--date WHEN]|list|show [ID]|use ID [--date WHEN]|current>" },
 	{ "prompt",     cmd_prompt,     "Record one prompt",
 	  "prompt [-m TEXT] [-F FILE] [-t TAG]... [--model M] [--parent ID]"
 	  " [-s SESSION] [--date WHEN] [--no-stage]" },
@@ -238,7 +238,8 @@ const struct command commands[] = {
 	/* reconstruct a project */
 	{ "replay",     cmd_replay,     "Reconstruct the prompt history as one document",
 	  "replay [<ref>] [--format=md|json|txt] [-o FILE] [--layout=DIR] [--stat]\n"
-	  "   replay <ref> --list-sessions" },
+	  "   replay <ref> --list-sessions\n"
+	  "   replay [<ref>] --flat [--format=md|json|txt] [-o FILE]" },
 	{ "timeline",   cmd_timeline,   "Show the history as a compact list",
 	  "timeline [<ref>]" },
 	{ "log-prompt", cmd_log_prompt, "List prompts without commit noise",

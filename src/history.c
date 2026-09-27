@@ -561,6 +561,40 @@ static void quote_block(struct buf *out, const char *text)
 	}
 }
 
+/* the fields both markdown documents print about a prompt, under its own
+ * timestamp: everything that sits between the heading and the quoted text */
+static void markdown_prompt_fields(struct buf *out, const struct prompt *p)
+{
+	if (p->author)
+		buf_addf(out, "- author: %s\n", p->author);
+	if (p->model)
+		buf_addf(out, "- model: %s\n", p->model);
+	if (p->nr_tags) {
+		size_t k;
+		buf_addstr(out, "- tags:");
+		for (k = 0; k < p->nr_tags; k++)
+			buf_addf(out, "%s %s", k ? "," : "", p->tags[k]);
+		buf_addch(out, '\n');
+	}
+	if (p->path)
+		buf_addf(out, "- file: `%s`\n", p->path);
+	if (p->parent_prompt)
+		buf_addf(out, "- follows: `%s`\n", p->parent_prompt);
+}
+
+/* the quoted prompt and what it led to, which both documents print alike */
+static void markdown_prompt_text(struct buf *out, const struct prompt *p)
+{
+	buf_addch(out, '\n');
+	quote_block(out, p->body);
+	if (p->outcome) {
+		buf_addstr(out, "\n**Outcome.** ");
+		buf_addstr(out, p->outcome);
+		buf_addch(out, '\n');
+	}
+	buf_addch(out, '\n');
+}
+
 void replay_markdown(struct repo *r, const struct session_groups *g,
 		     struct buf *out, int stat_only)
 {
@@ -604,6 +638,18 @@ void replay_markdown(struct repo *r, const struct session_groups *g,
 			if (grp->session->ended_at)
 				buf_addf(out, "- ended: %s\n",
 					 grp->session->ended_at);
+			if (grp->session->nr_visits > 1) {
+				size_t k;
+
+				buf_addf(out, "- stretches: %lu\n",
+					 (unsigned long)grp->session->nr_visits);
+				for (k = 0; k < grp->session->nr_visits; k++)
+					buf_addf(out, "  - %s -- %s\n",
+						 grp->session->visits[k].start,
+						 grp->session->visits[k].end
+							 ? grp->session->visits[k].end
+							 : "(open)");
+			}
 			if (grp->session->author)
 				buf_addf(out, "- author: %s\n",
 					 grp->session->author);
@@ -627,31 +673,8 @@ void replay_markdown(struct repo *r, const struct session_groups *g,
 				 p->id ? p->id : "(no id)");
 			if (p->timestamp)
 				buf_addf(out, "- recorded: %s\n", p->timestamp);
-			if (p->author)
-				buf_addf(out, "- author: %s\n", p->author);
-			if (p->model)
-				buf_addf(out, "- model: %s\n", p->model);
-			if (p->nr_tags) {
-				size_t k;
-				buf_addstr(out, "- tags:");
-				for (k = 0; k < p->nr_tags; k++)
-					buf_addf(out, "%s %s", k ? "," : "",
-						 p->tags[k]);
-				buf_addch(out, '\n');
-			}
-			if (p->path)
-				buf_addf(out, "- file: `%s`\n", p->path);
-			if (p->parent_prompt)
-				buf_addf(out, "- follows: `%s`\n",
-					 p->parent_prompt);
-			buf_addch(out, '\n');
-			quote_block(out, p->body);
-			if (p->outcome) {
-				buf_addstr(out, "\n**Outcome.** ");
-				buf_addstr(out, p->outcome);
-				buf_addch(out, '\n');
-			}
-			buf_addch(out, '\n');
+			markdown_prompt_fields(out, p);
+			markdown_prompt_text(out, p);
 		}
 	}
 }
@@ -809,4 +832,133 @@ void replay_layout(struct repo *r, const struct session_groups *g, const char *d
 
 	buf_release(&index);
 	buf_release(&one);
+}
+
+/* ------------------------------------------------------------------ */
+/* the flat chronology                                                 */
+
+/*
+ * One list of every prompt in the order it was written, whatever session it was
+ * said in.
+ *
+ * The grouped documents answer "what was said in this conversation", which is
+ * the shape an agent needs: a conversation is one context, and interleaving two
+ * of them would read as one that never happened.  These answer the other
+ * question -- what happened, in what order -- which is what a task that spanned
+ * three sessions actually was.
+ *
+ * The order is the sequence number, not the timestamp.  A prompt recorded out
+ * of a months-old conversation carries the date it was said but the number it
+ * was filed under, and only the number says what came after what; a conversation
+ * imported after a later one is full of timestamps that run backwards.
+ */
+static struct prompt_ref *flat_order(const struct prompt_list *pl)
+{
+	struct prompt_ref *e;
+
+	if (!pl->nr)
+		return NULL;
+	e = xmalloc(pl->nr * sizeof(*e));
+	memcpy(e, pl->e, pl->nr * sizeof(*e));
+	qsort(e, pl->nr, sizeof(*e), prompt_seq_cmp);
+	return e;
+}
+
+/* the session a prompt names, when its file is in the store */
+static const struct session *session_by_id(const struct session_groups *g,
+					   const char *id)
+{
+	size_t i;
+
+	if (!id)
+		return NULL;
+	for (i = 0; i < g->nr; i++)
+		if (g->g[i].session && !strcmp(g->g[i].session->id, id))
+			return g->g[i].session;
+	return NULL;
+}
+
+void replay_flat_markdown(struct repo *r, const struct prompt_list *pl,
+			  const struct session_groups *sg, struct buf *out)
+{
+	struct prompt_ref *e = flat_order(pl);
+	const char *dir = repo_prompt_dir(r);
+	size_t i;
+
+	buf_reset(out);
+	buf_addstr(out, "# Prompt history\n\n");
+	buf_addf(out, "Reconstructed by gitprompt: %lu prompt(s), in the order they "
+		      "were written.\n", (unsigned long)pl->nr);
+	buf_addstr(out, "\nEach one names the session it was said in, so a task that "
+			"moved from one conversation to another and back is shown "
+			"where it moved rather than collected by conversation.\n");
+	buf_addf(out, "\nPrompt files live under `%s/`.\n\n", dir);
+
+	for (i = 0; i < pl->nr; i++) {
+		const struct prompt *p = e[i].prompt;
+		const struct session *s = session_by_id(sg, p->session);
+
+		buf_addf(out, "## %lu. `%s`\n\n", (unsigned long)(i + 1),
+			 p->id ? p->id : "(no id)");
+		if (p->timestamp)
+			buf_addf(out, "- recorded: %s\n", p->timestamp);
+		if (s)
+			buf_addf(out, "- session: `%s` %s\n", s->id,
+				 s->title ? s->title : "");
+		else if (p->session)
+			buf_addf(out, "- session: `%s`\n", p->session);
+		else
+			buf_addstr(out, "- session: (none)\n");
+		markdown_prompt_fields(out, p);
+		markdown_prompt_text(out, p);
+	}
+	free(e);
+}
+
+void replay_flat_text(struct repo *r, const struct prompt_list *pl,
+		      const struct session_groups *sg, struct buf *out)
+{
+	struct prompt_ref *e = flat_order(pl);
+	size_t i;
+
+	(void)r;
+	(void)sg;
+	buf_reset(out);
+	buf_addf(out, "%lu prompt(s), in the order they were written\n\n",
+		 (unsigned long)pl->nr);
+
+	for (i = 0; i < pl->nr; i++) {
+		const struct prompt *p = e[i].prompt;
+		const char *b = p->body ? p->body : "";
+		size_t len = strcspn(b, "\n");
+
+		buf_addf(out, "%s  %s  %s  %.*s\n", p->id ? p->id : "?",
+			 p->timestamp ? p->timestamp : "(no time)",
+			 p->session ? p->session : "(no session)", (int)len, b);
+		if (p->outcome)
+			buf_addf(out, "    outcome: %s\n", p->outcome);
+	}
+	free(e);
+}
+
+void replay_flat_json(const struct prompt_list *pl, struct buf *out)
+{
+	struct prompt_ref *e = flat_order(pl);
+	struct buf scratch;
+	size_t i;
+
+	buf_init(&scratch);
+	buf_reset(out);
+	buf_addstr(out, "{\n");
+	buf_addf(out, "  \"prompt_count\": %lu,\n", (unsigned long)pl->nr);
+	buf_addstr(out, "  \"prompts\": [\n");
+	for (i = 0; i < pl->nr; i++) {
+		prompt_to_json(e[i].prompt, &scratch);
+		buf_addstr(out, "    ");
+		buf_add(out, scratch.b, scratch.len);
+		buf_addstr(out, i + 1 < pl->nr ? ",\n" : "\n");
+	}
+	buf_addstr(out, "  ]\n}\n");
+	buf_release(&scratch);
+	free(e);
 }

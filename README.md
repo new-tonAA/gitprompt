@@ -117,10 +117,24 @@ author: Your Name <you@example.com>
 ---
 ```
 
+A session that was left and returned to carries a `segments` line as well: one
+`start..end` pair per stretch, with the end left empty while a stretch is still
+open.
+
+```
+started_at: 2026-09-10T09:00:00+08:00
+ended_at: 2026-09-10T17:00:00+08:00
+segments: 2026-09-10T09:00:00+08:00..2026-09-10T12:00:00+08:00, 2026-09-10T15:00:00+08:00..2026-09-10T17:00:00+08:00
+```
+
+`started_at` and `ended_at` remain the span of the whole session, so a reader
+that knows nothing of `segments` still gets the right answer; `segments` is what
+keeps the hours in between from being swallowed by it.
+
 So an agent handed only the checkout can reconstruct the run: `NNNN` and `seq`
 fix the order, `session` places each prompt in a session, and the session file
-says when that session began and ended. Everything else -- who wrote what, when,
-and what came before -- is ordinary git history, which is why `git log` and
+says when that session ran. Everything else -- who wrote what, when, and what
+came before -- is ordinary git history, which is why `git log` and
 `gitprompt log` tell the same story.
 
 `docs/format.md` is the byte-level version of this: the object encodings, the
@@ -185,6 +199,44 @@ $ gitprompt replay --list-sessions
 The order is the order the prompts were written in, and the session boundaries
 are explicit, so an agent reading the document knows where context was reset.
 That is the property the storage format exists to preserve.
+
+### A task that spanned several sessions
+
+Opening a session over one that is already open is a switch, and the session
+being left is closed at the instant the new one opens -- so the two meet exactly,
+and the one left behind records the stretch it really had rather than a span with
+the interruption silently inside it. The recorder is told which session it left,
+because otherwise there is no way to know that the next prompts are not going
+into the conversation they were meant for:
+
+```console
+$ gitprompt session start -t "Plan the tokenizer"
+session s_1790514149_qr22tt started
+$ gitprompt session start -t "Check the CI logs"
+warning: pausing session s_1790514149_qr22tt; `gitprompt session use s_1790514149_qr22tt` records into it again
+session s_1790514149_4e29cj started
+$ gitprompt session use s_1790514149_qr22tt
+session s_1790514149_qr22tt had ended at 2026-09-27T21:02:29+08:00
+(recording into it again opens a new stretch)
+now recording into s_1790514149_qr22tt
+```
+
+`session use` refuses an id that names no session file, rather than pointing the
+recorder at a boundary that exists nowhere but in the pointer.
+
+`replay` groups by session, because a conversation is one context and
+interleaving two of them would read as one that never happened. Its `--flat`
+form answers the other question -- what was worked on, in what order:
+
+```console
+$ gitprompt replay --flat                  # markdown, each prompt naming its session
+$ gitprompt replay --flat --format=txt
+$ gitprompt replay --flat --format=json
+```
+
+The order there is the sequence number rather than the timestamp, which is what
+makes a conversation imported after a later one come out in the order it was
+filed rather than the order its dates happen to run.
 
 ### Recording a conversation that happened earlier
 
@@ -272,15 +324,17 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **465 checks, 0 failures**.
+The end-to-end suite passes: **482 checks, 0 failures**.
 
 ```console
 $ make test
 ```
 
 `test/smoke.sh` covers the object model, sessions and prompts, the dates a
-prompt and a session can be given, committing, reconstruction (ordering and
-session boundaries), branches, tags, history editing, merges including conflicts
+prompt and a session can be given, a task recorded in sessions that were
+interleaved and returned to, committing, reconstruction (ordering, session
+boundaries, and the flat chronology), branches, tags, history editing, merges
+including conflicts
 and `--abort`, merges that follow a file that moved, `status` and `diff` on a
 move, the commit editor, per-command option validation, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being

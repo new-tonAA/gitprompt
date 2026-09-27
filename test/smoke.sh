@@ -2200,6 +2200,118 @@ expect "and the session begun after it follows" "## 2. the second session" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "a task worked in two sessions and returned to"
+
+# A conversation is opened, another is opened over it, and the first is returned
+# to, which is what a task that outgrew one context window looks like from the
+# recorder's side.  The prompts were always ordered by their sequence numbers,
+# but the sessions were not: the one that was left kept a single start/end pair,
+# so its file claimed to run from the first prompt to the last with the whole
+# interruption swallowed -- and both documents that reconstruct the history
+# grouped by session, so the order the task was worked in appeared in neither.
+# The dates are far enough apart that a reader can tell the stretches from each
+# other, which is the thing the same-second case above cannot show.
+il=$work/interleaved
+rm -rf "$il"
+mkdir -p "$il" || exit 2
+cd "$il" || exit 2
+gp init . >/dev/null 2>&1
+
+gp session start -t "the design session" \
+	--date='2026-09-10T09:00:00+08:00' >/dev/null 2>&1
+design=$(gp session current)
+gp prompt --date='2026-09-10T09:05:00+08:00' -m "the design was settled" >/dev/null 2>&1
+
+# Opening a session over one that is open has to say so.  Without that the
+# recorder cannot tell that the prompts about to be written are no longer in
+# the conversation they thought they were in.
+over=$(gp session start -t "the CI session" \
+	--date='2026-09-10T12:00:00+08:00' 2>&1 >/dev/null)
+case "$over" in
+*"pausing session $design"*) ok "opening a session over another says which one it pauses" ;;
+*) bad "opening a session over another says which one it pauses" "got [$over]" ;;
+esac
+ci=$(gp session current)
+gp prompt --date='2026-09-10T12:10:00+08:00' -m "the build was checked" >/dev/null 2>&1
+
+gp session use "$design" --date='2026-09-10T15:00:00+08:00' >/dev/null 2>&1
+gp prompt --date='2026-09-10T15:20:00+08:00' -m "the design was revisited" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "three sessions, interleaved" >/dev/null 2>&1
+
+stretches="segments: 2026-09-10T09:00:00+08:00..2026-09-10T12:00:00+08:00, 2026-09-10T15:00:00+08:00.."
+expect "the session that was left records both of its stretches" \
+	"$stretches" cat "prompts/sessions/$design.md"
+expect "and the stretch it was left for ends where that one resumed" \
+	"ended_at: 2026-09-10T15:00:00+08:00" cat "prompts/sessions/$ci.md"
+if grep -q '^segments:' "prompts/sessions/$ci.md"; then
+	bad "a session that was never left keeps one plain pair" \
+		"got [$(grep '^segments:' "prompts/sessions/$ci.md")]"
+else
+	ok "a session that was never left keeps one plain pair"
+fi
+
+# The flat chronology is the point of the whole exercise: the prompts in the
+# order they were written, each naming the session it was said in, so an
+# interruption shows where it happened instead of being collected away.
+flat=$(gp replay --flat --format=txt \
+	| sed -n 's/^p_[a-z0-9]*  [^ ]*  \(s_[a-z0-9_]*\)  .*/\1/p')
+want="$design
+$ci
+$design"
+if [ "$flat" = "$want" ]; then
+	ok "the flat listing is in the order the prompts were written"
+else
+	bad "the flat listing is in the order the prompts were written" \
+		"wanted [$want] got [$flat]"
+fi
+
+gp replay --flat -o "$work/flat.md" >/dev/null 2>&1
+expect "the flat document names each prompt's session" \
+	"- session: \`$ci\` the CI session" cat "$work/flat.md"
+bodies=$(sed -n 's/^> //p' "$work/flat.md")
+want="the design was settled
+the build was checked
+the design was revisited"
+if [ "$bodies" = "$want" ]; then
+	ok "and its bodies run from the first prompt to the last"
+else
+	bad "and its bodies run from the first prompt to the last" \
+		"wanted [$want] got [$bodies]"
+fi
+
+# and the grouped document, which is what an agent is handed, is unmoved: a
+# conversation is one context, and interleaving two would read as one
+gp replay -o "$work/grouped.md" >/dev/null 2>&1
+expect "the grouped document still keeps the conversations apart" \
+	"## 1. the design session" cat "$work/grouped.md"
+expect "and shows how many stretches that session had" \
+	"- stretches: 2" cat "$work/grouped.md"
+expect "session show prints the stretch that is still open" \
+	"2026-09-10T15:00:00+08:00 -- (open)" gp session show "$design"
+
+expect_status "recording into a session that was never recorded fails" 1 \
+	gp session use s_1700000000_nope
+expect "and says there is no such session" "no session with id" \
+	gp session use s_1700000000_nope
+expect_status "a flat document refuses the per-session reports" 128 \
+	gp replay --flat --stat
+expect "and says why" "--flat lists the prompts in one chronology" \
+	gp replay --flat --stat
+
+gp session use "$design" >/dev/null 2>&1
+expect "recording into the session already current adds no stretch" \
+	"$stretches" cat "prompts/sessions/$design.md"
+
+gp session end --date='2026-09-10T16:00:00+08:00' >/dev/null 2>&1
+expect "returning to a session that had ended says it had ended" \
+	"had ended at 2026-09-10T16:00:00+08:00" \
+	gp session use "$design" --date='2026-09-10T17:00:00+08:00'
+expect "and that return is recorded as a further stretch" \
+	", 2026-09-10T17:00:00+08:00.." cat "prompts/sessions/$design.md"
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "an argument that is not ASCII"
 
 # Windows hands a C program its arguments in the ANSI code page, so a prompt
