@@ -2388,6 +2388,26 @@ else
 		"wanted [$want] got [$plan]"
 fi
 
+# The plan says what the run is before it is run: how many agent conversations
+# it crosses, and that the order is the recorded one.  A history is replayed
+# where it was, not now, and a clock cannot say what came after what once the
+# prompts were written on machines that disagreed about the time.
+expect "the plan counts conversations, not prompts" "2 conversation(s)" gp rerun
+expect "and says the order is the recorded one, not the clock's" \
+	"replayed in seq order" gp rerun
+expect "and says when the prompts were recorded" "recorded 2" gp rerun
+
+# The questions are for somebody at a terminal.  A run whose output goes into
+# a pipe is being read by another program, and stopping to ask would hang it --
+# which is every check in this file, so this is the assertion that the rest of
+# them are not hanging by luck.
+out=$(gp rerun 2>&1)
+case "$out" in
+*"Which agent"*|*"Start the replay"*)
+	bad "no question is asked when there is no terminal to ask" "$out" ;;
+*) ok "no question is asked when there is no terminal to ask" ;;
+esac
+
 # The whole point is that the third prompt reaches the *same* conversation the
 # first one opened, and not a fresh one that happens to be about the same work.
 opened=$(gp rerun | sed -n 's/.*--session-id \([0-9a-f-]*\)$/\1/p' | sed -n 1p)
@@ -2644,6 +2664,169 @@ expect "the answer to the newest prompt is recorded too" \
 	cat "$work/rerun-record.log"
 
 cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
+say "reading a history back"
+
+# Everything above ran in a repository gitprompt made for itself.  What most
+# people are handed is the other thing -- a `git clone` of a prompt history,
+# which git fills with the prompt files and no store at all -- so this is that
+# whole path, from the clone to a working repository.
+back=$work/back
+mkdir -p "$back" || exit 2
+cd "$back" || exit 2
+gp init . >/dev/null
+gp config user.email back@example.com
+gp config user.name "Back Tester"
+
+# a session started without -t is named after what was first said in it, so
+# the one line of its file that says what the conversation was about says
+# something; a clone reads that file and nothing else
+gp session start >/dev/null
+gp prompt -m "write a tokenizer first" >/dev/null
+bsid=$(gp session current)
+expect "an untitled session is named after its first prompt" \
+	"title: write a tokenizer first" cat "prompts/sessions/$bsid.md"
+gp prompt -m "now add a normalizer" >/dev/null
+expect "and a later prompt does not rename it" \
+	"title: write a tokenizer first" cat "prompts/sessions/$bsid.md"
+
+# the usage has always advertised `show <rev|prompt-id>`, and a prompt id is
+# a file in the history rather than an object, so it needed answering here
+bpid=$(gp log-prompt --oneline | sed -n 1p | sed 's/ .*//')
+expect "show resolves a prompt id" "write a tokenizer first" gp show "$bpid"
+expect "show prints the prompt's file" "prompts/0001-" gp show "$bpid"
+expect_status "show still refuses a revision that is not there" 128 \
+	gp show nosuchrev
+expect "with the wording a revision gets" "unknown revision" gp show nosuchrev
+
+# a prompt is very often a paragraph, and cutting it at the first newline
+# loses everything after the opening sentence
+printf 'first line of a long one\nsecond line carries the constraint\nthird line\n' \
+	| gp capture >/dev/null
+expect "log-prompt prints every line of a prompt" "third line" gp log-prompt
+expect "timeline folds one onto a single line" \
+	"first line of a long one second line carries the constraint" gp timeline
+expect "log-prompt --oneline folds it the same way" \
+	"first line of a long one second line carries the constraint" \
+	gp log-prompt --oneline
+
+# ------------------------------------------------------------------
+say "a commit carries its prompts"
+
+# A commit is the join between the code it adds and the prompts that produced
+# it.  Everything here is what that claim costs to keep true: the prompt files
+# the commit adds are the ones it names, a commit of code alone names none, and
+# amending does not drop them.
+lk=$work/link
+mkdir -p "$lk" || exit 2
+cd "$lk" || exit 2
+gp init . >/dev/null
+gp config user.email link@example.com
+gp config user.name "Link Tester"
+gp session start -t "the login page" >/dev/null
+gp prompt -m "build a login page" >/dev/null
+lp1=$(gp log-prompt --oneline | sed -n 1p | sed 's/ .*//')
+echo '<form></form>' > page.html
+gp add page.html >/dev/null
+gp commit -m "add the login page" >/dev/null
+expect "a commit names the prompt that produced its code" \
+	"Prompts: $lp1" gp show HEAD
+pcount() { gp show "$1" | grep '^Prompts:' | grep -oE 'p_[a-z0-9]+' | wc -l | tr -d ' '; }
+expect "the session file is not one of them" "1" printf '%s\n' "$(pcount HEAD)"
+
+gp prompt -m "add a password field" >/dev/null
+lp2=$(gp log-prompt --oneline | sed -n 2p | sed 's/ .*//')
+echo '<input>' >> page.html
+gp add page.html >/dev/null
+gp commit -m "add the password field" >/dev/null
+expect "a later commit names the prompt it added" "Prompts: $lp2" gp show HEAD
+expect "and only that one, not the one before it" "1" \
+	printf '%s\n' "$(pcount HEAD)"
+
+gp commit --amend -m "add the password field, once more" >/dev/null
+expect "amending keeps the prompt the commit carried" \
+	"Prompts: $lp2" gp show HEAD
+
+# A prompt edited after it was recorded is the same prompt the commit already
+# carried, so amending the edit on does not name it a second time.
+printf '\n' >> prompts/0002-*.md
+gp add prompts/0002-*.md >/dev/null
+gp commit --amend -m "and the outcome written in later" >/dev/null
+expect "editing a carried prompt does not name it twice" "1" \
+	printf '%s\n' "$(pcount HEAD)"
+
+echo '<style>' >> page.html
+gp add page.html >/dev/null
+gp commit -m "tidy the markup" >/dev/null
+expect "a commit of code alone carries no prompt" "0" \
+	printf '%s\n' "$(pcount HEAD)"
+
+# The prompt directory is a configuration value and may be nested, so the
+# previous tree is found by following it a component at a time.  A lookup of the
+# whole name at once would find nothing, every prompt would look newly added,
+# and a prompt this commit never touched would be carried again.
+nest=$work/nest
+mkdir -p "$nest" || exit 2
+cd "$nest" || exit 2
+gp init . >/dev/null
+gp config user.email nest@example.com
+gp config user.name "Nest Tester"
+gp config gitprompt.promptDir docs/prompts
+gp prompt -m "a prompt in a nested directory" >/dev/null
+expect "a nested prompt directory is where the prompt goes" \
+	"docs/prompts/0001-" gp status --short
+echo 'int main(void) { return 0; }' > main.c
+gp add -A >/dev/null
+gp commit -m "the nested prompt and its code" >/dev/null
+expect "a commit under a nested prompt directory names its prompt" "1" \
+	printf '%s\n' "$(pcount HEAD)"
+echo '/* x */' >> main.c
+gp add main.c >/dev/null
+gp commit -m "and code alone still names none" >/dev/null
+expect "and unchanged prompts are not carried again" "0" \
+	printf '%s\n' "$(pcount HEAD)"
+
+cd "$back" || exit 2
+
+# now the clone.  A `git clone` of the same history is a directory git filled
+# with prompts and no store, and it has to say so rather than dying with the
+# message a directory that is nothing like a repository gets.
+if command -v git >/dev/null 2>&1; then
+	bare=$work/back.git
+	clone=$work/back-clone
+	rm -rf "$bare" "$clone"
+	gp commit -m "record the first prompts" >/dev/null 2>&1
+	git init --bare -q "$bare"
+	git --git-dir="$bare" symbolic-ref HEAD refs/heads/main
+	git --git-dir=.gitprompt push -q "$bare" main
+	git clone -q "$bare" "$clone"
+	cd "$clone" || exit 2
+
+	# the join is carried by the commit itself, so a plain `git clone` has it
+	# without gitprompt having to be part of the transfer
+	expect "the commit's prompts came with the clone" "gp-prompt p_" \
+		git cat-file -p HEAD
+
+	expect "a plain clone is told what it is" \
+		"plain git clone of a prompt history" gp log-prompt
+	expect "and is told the one command that fixes it" "gitprompt init ." \
+		gp log-prompt
+	expect "rerun says the same thing rather than dying obscurely" \
+		"gitprompt init ." gp rerun
+
+	gp init . > "$work/back-init.log" 2>&1
+	expect "init reports that it took the prompts over" \
+		"Adopted the existing prompts" cat "$work/back-init.log"
+	expect "the adopted clone has its prompts" "write a tokenizer first" \
+		gp log-prompt
+	expect "they are staged, ready to be committed" "A  prompts/0001-" \
+		gp status --short
+	expect "and it replays, session by session" "would" gp rerun
+	cd "$back" || exit 2
+else
+	skip "a plain git clone is recognised (git is not on PATH)"
+fi
 
 # ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

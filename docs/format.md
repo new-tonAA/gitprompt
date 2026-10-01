@@ -103,14 +103,27 @@ parent <40 hex digits>          (zero or more)
 author <name> <email> <epoch> <±hhmm>
 committer <name> <email> <epoch> <±hhmm>
 gp-session <session id>         (optional; gitprompt's own header)
+gp-prompt <prompt id>           (optional, repeated; gitprompt's own header)
 <blank line>
 <message>
 ```
 
-`gp-session` is the one header git does not define. It names the prompting
-session the commit was made in. git ignores unknown headers, so a commit
-carrying it is still an ordinary commit: `git log`, `git fsck` and `git clone`
-all accept it.
+`gp-session` and `gp-prompt` are the headers git does not define. `gp-session`
+names the prompting session the commit was made in. Each `gp-prompt` names a
+prompt the commit carries, in `seq` order, so that the commit is the join
+between the code it adds and the prompts that produced it: reading the commit
+alone is enough to know which prompts to replay to get that code back. git
+ignores unknown headers, so a commit carrying them is still an ordinary
+commit: `git log`, `git fsck` and `git clone` all accept it.
+
+The prompts a commit carries are the prompt files it adds or changes, as the
+first parent's tree tells them apart -- a commit of code with no new prompt
+carries none, and a prompt edited after it was recorded is carried by the
+commit that carried the edit, since it is the prompt file in the commit's own
+tree that decides, not the working tree. A root commit carries every prompt it
+holds, having no parent to differ from. There is no `gp-prompt` on the session
+file or the response file: they are not prompts, and only the prompt files
+directly under the prompt directory are read this way.
 
 **tag** — an annotated tag: `object`, `type`, `tag`, `tagger`, blank line,
 message.
@@ -245,7 +258,13 @@ notes: Session context was reset twice.
 ---
 ```
 
-`id` and `title` are always present; `title` falls back to `untitled session`.
+`id` and `title` are always present. A session started with `-t` keeps the
+title it was given. One started without one is named after the first prompt
+recorded into it -- that prompt's first line, runs of blanks collapsed and cut
+to 60 characters -- written at the moment the prompt is recorded, so the file a
+clone reads says what the conversation was about rather than leaving the one
+line that answers that question empty. Later prompts never rename it. Until the
+first prompt arrives the title is the placeholder `untitled session`.
 `ended_at` and `notes` appear only once set. `ended_at` present means the session
 is closed.
 

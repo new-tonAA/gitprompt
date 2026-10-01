@@ -25,11 +25,24 @@
  * it happen.
  *
  * Nothing is run unless it is asked for.  A rerun starts processes that edit the
- * work tree, so the default is to print what would be run and `--yes` is what
- * runs it.
+ * work tree, so at a terminal it asks which agent to replay into and then asks
+ * to confirm before it begins; with no terminal to ask, it prints what would be
+ * run and `--yes` is what runs it.
+ *
+ * The agent is asked for because a clone cannot know it: the history says what
+ * was prompted and in what order, and nothing about what is installed on the
+ * machine that pulled it.  The confirmation is asked for because there is
+ * nothing to undo -- the agent works in the work tree, and re-running is not a
+ * rollback.
  */
 
 #include "gp.h"
+
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 /*
  * How to begin a conversation with an agent and how to continue one.  `start`
@@ -75,6 +88,104 @@ static void rerun_agent_names(void)
 
 	for (i = 0; i < sizeof rerun_agents / sizeof rerun_agents[0]; i++)
 		fprintf(stderr, "%s%s", i ? ", " : "", rerun_agents[i].name);
+}
+
+#define RERUN_NR_AGENTS (sizeof rerun_agents / sizeof rerun_agents[0])
+
+/*
+ * Whether there is somebody at the terminal to ask.  Both ends are checked, not
+ * just the input: a run whose output is going into a pipe is being read by
+ * another program, and a question printed there is a question nobody sees --
+ * while a read that waits for an answer would stop a script that only wanted the
+ * list.  Printing the plan and letting it stand is what that case already does.
+ */
+static int rerun_interactive(void)
+{
+#ifdef _WIN32
+	/* the name the runtime really implements, rather than whatever the
+	 * C library happens to have aliased it to */
+	return _isatty(_fileno(stdin)) && _isatty(_fileno(stdout));
+#else
+	return isatty(0) && isatty(1);
+#endif
+}
+
+/* One line from the terminal, or NULL at end of input.  Stdio is in binary
+ * mode, so a carriage return is stripped here rather than by the runtime. */
+static char *rerun_read_line(void)
+{
+	struct buf b;
+	char *s;
+	int ch;
+
+	buf_init(&b);
+	while ((ch = fgetc(stdin)) != EOF && ch != '\n')
+		if (ch != '\r')
+			buf_addch(&b, (char)ch);
+	if (ch == EOF && !b.len) {
+		buf_release(&b);
+		return NULL;
+	}
+	s = b.len ? xstrdup(buf_cstr(&b)) : xstrdup("");
+	buf_release(&b);
+	return s;
+}
+
+/*
+ * Which agent to replay into is a question about this machine, not about the
+ * history: the prompts say what was asked and in what order, and nothing about
+ * what is installed here to ask again.  So a clone does not carry the answer and
+ * the person at the terminal gives it.
+ *
+ * An agent that cannot be told which conversation to continue is listed and
+ * refused rather than hidden, because the reason it is refused -- a session
+ * would become a string of unrelated conversations -- is the thing a reader of
+ * this command most needs to know about it.
+ */
+static const struct rerun_agent *rerun_ask_agent(void)
+{
+	for (;;) {
+		const struct rerun_agent *a;
+		char *line, *end;
+		unsigned long pick;
+		size_t i;
+
+		printf("Which agent should replay this history?\n");
+		for (i = 0; i < RERUN_NR_AGENTS; i++) {
+			const struct rerun_agent *x = &rerun_agents[i];
+
+			printf("  %lu. %-8s %s\n", (unsigned long)(i + 1), x->name,
+			       x->resume ? x->start
+					 : "-- cannot resume a session, so a replay "
+					   "into it would not be one");
+		}
+		printf("Pick one [1]: ");
+		fflush(stdout);
+		line = rerun_read_line();
+		if (!line)
+			gp_die("rerun: no agent chosen");
+		end = line + strspn(line, " \t");
+		pick = strtoul(end, NULL, 10);
+		if (!*end)
+			pick = 1;
+		if (pick < 1 || pick > RERUN_NR_AGENTS) {
+			printf("'%s' is not one of them.\n\n", line);
+			free(line);
+			continue;
+		}
+		a = &rerun_agents[pick - 1];
+		free(line);
+		if (!a->resume) {
+			printf("\n%s cannot be told which conversation to continue, so a\n"
+			       "session it began could not be returned to, and a rerun\n"
+			       "that ran each session as a string of unrelated\n"
+			       "conversations would not be a replay of this history.\n\n",
+			       a->name);
+			continue;
+		}
+		printf("\n");
+		return a;
+	}
 }
 
 /*
@@ -239,21 +350,26 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	const struct rerun_agent *agent;
 	const char *name, *model, *mode, *salt, *from, *only;
 	char *msg_path;
-	int run, record;
+	int run, record, interactive;
 
 	opts_init(&o, argc, argv, (const char *const[]){
 		"--agent=", "--model=", "--permission-mode=", "--salt=",
 		"--from=", "--only-session=", "--yes", "-y", "--record", NULL });
 
 	name = opts_value(&o, "--agent");
-	if (!name)
-		name = "claude";
-	agent = rerun_agent_find(name);
-	if (!agent) {
-		fprintf(stderr, "rerun: agent must be one of ");
-		rerun_agent_names();
-		fprintf(stderr, "\n");
-		exit(2);
+	interactive = rerun_interactive();
+	if (name) {
+		agent = rerun_agent_find(name);
+		if (!agent) {
+			fprintf(stderr, "rerun: agent must be one of ");
+			rerun_agent_names();
+			fprintf(stderr, "\n");
+			exit(2);
+		}
+	} else if (interactive) {
+		agent = rerun_ask_agent();
+	} else {
+		agent = rerun_agent_find("claude");
 	}
 	if (!agent->resume)
 		gp_die("rerun: %s cannot be told which conversation to continue, so a\n"
@@ -344,19 +460,100 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	       (unsigned long)selected, (unsigned long)pl.nr, agent->name, mode);
 	if (selected != pl.nr)
 		printf("       from the filters given, not the whole history\n");
+
+	/*
+	 * What the run is, before it is confirmed: how many conversations it will
+	 * move between, and when the prompts were said.  A session was one agent
+	 * conversation, so a history that crossed sessions is replayed by crossing
+	 * the same ones -- and the dates are the dates they were recorded at,
+	 * offsets and all, because the run happens now, however long ago that was.
+	 */
+	{
+		const char **seen = NULL;
+		const char *first = NULL, *last = NULL;
+		i64 first_v = 0, last_v = 0;
+		size_t convs = 0, nr_seen = 0, j, k;
+
+		for (j = 0; j < pl.nr; j++) {
+			const struct prompt *p = order[j].prompt;
+
+			if (from && (!p->id || strcmp(p->id, from)))
+				continue;
+			if (only && (!p->session || strcmp(p->session, only)))
+				continue;
+			if (!p->session) {
+				/* said outside any conversation, so it is one */
+				convs++;
+			} else {
+				for (k = 0; k < nr_seen; k++)
+					if (!strcmp(seen[k], p->session))
+						break;
+				if (k == nr_seen) {
+					seen = xrealloc(seen,
+						(nr_seen + 1) * sizeof(*seen));
+					seen[nr_seen++] = p->session;
+					convs++;
+				}
+			}
+			if (p->timestamp) {
+				if (!first || p->ts < first_v) {
+					first = p->timestamp;
+					first_v = p->ts;
+				}
+				if (!last || p->ts > last_v) {
+					last = p->timestamp;
+					last_v = p->ts;
+				}
+			}
+		}
+		free(seen);
+
+		printf("       %lu conversation(s): one per session, and a session\n"
+		       "         returned to is resumed rather than begun again,\n"
+		       "         so the replay crosses them as the history did\n",
+		       (unsigned long)convs);
+		if (first && last && strcmp(first, last))
+			printf("       recorded %s .. %s\n", first, last);
+		else if (first)
+			printf("       recorded %s\n", first);
+		printf("       replayed in seq order, which is the order they were\n"
+		       "         written -- the one thing a clock cannot say for "
+		       "them\n");
+	}
+
 	if (r->root) {
 		char *root = repo_root_display(r);
 
 		printf("       the agent works in %s and may change it\n", root);
 		free(root);
 	}
-	if (!run)
+	if (!run && !interactive)
 		printf("       dry run -- nothing will be run; pass --yes to run "
 		       "it\n");
 	if (record)
 		printf("       each answer will be recorded against its prompt%s\n",
 		       run ? "" : " when run");
 	printf("\n");
+
+	/*
+	 * A run edits the work tree as it goes, so it is confirmed before it
+	 * starts.  The answer defaults to no: a bare return on a command that
+	 * changes files should do nothing, and `--yes` is there for when there is
+	 * nobody to ask.
+	 */
+	if (!run && interactive) {
+		char *line;
+
+		printf("Start the replay now? [y/N] ");
+		fflush(stdout);
+		line = rerun_read_line();
+		if (line && (*line == 'y' || *line == 'Y'))
+			run = 1;
+		free(line);
+		printf("\n");
+		if (!run)
+			printf("not started; nothing was run\n\n");
+	}
 
 	for (i = 0; i < pl.nr; i++) {
 		const struct prompt *p = order[i].prompt;

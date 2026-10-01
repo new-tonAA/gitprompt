@@ -253,7 +253,10 @@ const struct command commands[] = {
 	{ "rerun",      cmd_rerun,      "Give the prompts back to an agent, in order",
 	  "rerun [<ref>] [--agent=claude] [--model M] [--permission-mode M]\n"
 	  "   rerun [<ref>] [--from ID] [--only-session ID] [--salt S] [--yes]"
-	  " [--record]" },
+	  " [--record]\n"
+	  "   At a terminal, rerun asks which agent to replay into and confirms\n"
+	  "   before it starts.  --agent names the agent instead, and --yes runs\n"
+	  "   it without asking, which is what a run with no terminal needs." },
 
 	/* examine the history */
 	{ "status",     cmd_status,     "Show the working tree status",
@@ -377,6 +380,18 @@ static int repo_is_optional(const char *name)
 	       !strcmp(name, "serve");
 }
 
+/*
+ * A prompt history that arrived as a plain `git clone` has a .git and the
+ * prompts/ tree, but no .gitprompt: git copied the files and left the store
+ * behind, so nothing here recognises it as a history.  Saying "not a gitprompt
+ * repository" is true and useless -- the fix is one command, and the generic
+ * message does not name it.
+ */
+static int looks_like_plain_prompt_clone(void)
+{
+	return is_directory(".git") && is_directory("prompts");
+}
+
 static void die_usage(void)
 {
 	fprintf(stderr, "usage: gitprompt <command> [<args>]\n");
@@ -471,11 +486,18 @@ int main(int argc, char **argv)
 	if (!needs_no_repo(cmd->name)) {
 		if (repo_find(&repo, ".") < 0) {
 			if (!repo_is_optional(cmd->name)) {
-				fprintf(stderr,
-					"fatal: not a gitprompt repository (or any parent up to the "
-					"filesystem root)\n"
-					"Stop at the root of a project and run 'gitprompt init', "
-					"or clone one.\n");
+				if (looks_like_plain_prompt_clone())
+					fprintf(stderr,
+						"fatal: not a gitprompt repository: this is a "
+						"plain git clone of a prompt history\n"
+						"Adopt it with 'gitprompt init .', which takes "
+						"the prompts/ tree over as this repository's history.\n");
+				else
+					fprintf(stderr,
+						"fatal: not a gitprompt repository (or any parent up to the "
+						"filesystem root)\n"
+						"Stop at the root of a project and run 'gitprompt init', "
+						"or clone one.\n");
 				return 128;
 			}
 		} else {

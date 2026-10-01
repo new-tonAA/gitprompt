@@ -1080,21 +1080,181 @@ int cmd_commit(struct repo *r, int argc, char **argv)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/* the prompts a commit carries                                        */
+
+struct prev_scan {
+	struct slist *seen;
+};
+
+static void prev_prompt_cb(const char *path, u32 mode, const oid_t *oid, void *ud)
+{
+	struct prev_scan *s = ud;
+	char hex[GP_SHA1_HEXSZ + 1];
+	struct buf b;
+
+	if (mode == MODE_TREE)
+		return;
+	oid_hex(oid, hex);
+	buf_init(&b);
+	buf_addf(&b, "%s %s", hex, path);
+	slist_push(s->seen, buf_cstr(&b));
+	buf_release(&b);
+}
+
+/*
+ * The subtree a repository-relative directory names, following one component at
+ * a time.  The prompt directory is a configuration value and may be nested; a
+ * single lookup of the whole name would ask a tree for an entry called
+ * "docs/prompts", which no tree has, and the previous tree would look empty --
+ * so every prompt in the commit would look new and a prompt that had not
+ * changed would be carried a second time.
+ */
+static int lookup_dir_tree(struct repo *r, const oid_t *root, const char *dir,
+			   oid_t *out)
+{
+	oid_t cur = *root;
+	const char *p = dir;
+
+	while (*p == '/')
+		p++;
+	while (*p) {
+		const char *slash = strchr(p, '/');
+		size_t n = slash ? (size_t)(slash - p) : strlen(p);
+		struct tree t = TREE_INIT;
+		char *name;
+		u32 mode;
+		int found;
+
+		if (!n) {
+			p++;
+			continue;
+		}
+		name = xstrndup(p, n);
+		read_tree_obj(r, &cur, &t);
+		found = tree_lookup(&t, name, &mode, &cur, NULL) &&
+			(mode & 0170000) == 0040000;
+		tree_release(&t);
+		free(name);
+		if (!found)
+			return -1;
+		p = slash ? slash + 1 : p + n;
+	}
+	*out = cur;
+	return 0;
+}
+
+static int is_prompt_path(const char *dir, size_t dl, const char *path,
+			  const char **rest)
+{
+	size_t n, rn;
+
+	if (strncmp(path, dir, dl) || path[dl] != '/')
+		return 0;
+	*rest = path + dl + 1;
+	rn = strlen(*rest);
+	if (rn <= 3 || strchr(*rest, '/'))
+		return 0;
+	n = rn - 3;
+	return !strcmp(*rest + n, ".md");
+}
+
+/*
+ * A commit carries the prompts that produced the code in it: the prompt
+ * files it adds or changes, as the previous tree tells them apart.  The
+ * ids are read out of the index's blobs rather than the work tree, so a
+ * commit carries exactly what it committed, and a prompt whose outcome or
+ * body was edited after it was recorded is carried by the commit that
+ * carried the edit.
+ */
+static void collect_commit_prompts(struct repo *r, const struct index_state *ist,
+				   const oid_t *prev_tree, int have_prev,
+				   struct commit *c)
+{
+	struct slist seen = { NULL, 0, 0 };
+	char *dir = xstrdup(repo_prompt_dir(r));
+	size_t dl = strlen(dir), i;
+
+	if (have_prev) {
+		oid_t sub;
+
+		if (lookup_dir_tree(r, prev_tree, dir, &sub) == 0) {
+			char *prefix = xstrfmt("%s/", dir);
+			struct prev_scan ps;
+
+			ps.seen = &seen;
+			load_tree_flat(r, &sub, prefix, prev_prompt_cb, &ps);
+			free(prefix);
+		}
+	}
+
+	for (i = 0; i < ist->nr; i++) {
+		const struct index_entry *e = &ist->e[i];
+		const char *rest;
+		char hex[GP_SHA1_HEXSZ + 1];
+		struct buf key, blob;
+		struct prompt p = PROMPT_INIT;
+
+		if (e->stage != 0 || !is_prompt_path(dir, dl, e->path, &rest))
+			continue;
+
+		oid_hex(&e->oid, hex);
+		buf_init(&key);
+		buf_addf(&key, "%s %s", hex, e->path);
+		if (slist_has(&seen, buf_cstr(&key))) {
+			buf_release(&key);
+			continue;
+		}
+		buf_release(&key);
+
+		buf_init(&blob);
+		if (odb_read(&r->odb, &e->oid, NULL, &blob) < 0) {
+			buf_release(&blob);
+			continue;
+		}
+		if (prompt_from_file(&p, blob.b, blob.len) &&
+		    p.id && !strncmp(p.id, "p_", 2)) {
+			size_t k;
+			int have = 0;
+
+			/* an amend carries its prompts already, and a prompt
+			 * edited since then is the same prompt, not a second one */
+			for (k = 0; k < c->nr_prompts; k++)
+				if (!strcmp(c->prompts[k], p.id)) {
+					have = 1;
+					break;
+				}
+			if (!have) {
+				c->prompts = xrealloc(c->prompts,
+					(c->nr_prompts + 1) * sizeof(*c->prompts));
+				c->prompts[c->nr_prompts++] = xstrdup(p.id);
+			}
+		}
+		prompt_release(&p);
+		buf_release(&blob);
+	}
+
+	slist_release(&seen);
+	free(dir);
+}
+
 static int do_commit(struct repo *r, const char *message, int amend,
 		     int allow_empty, int quiet)
 {
 	struct index_state ist;
 	struct commit c = COMMIT_INIT;
 	struct buf body, ident;
-	oid_t tree, parent, commit_oid;
+	oid_t tree, parent, commit_oid, prev_tree;
 	char hex[GP_SHA1_HEXSZ + 1];
 	char *br = NULL, *branch_ref = NULL;
-	int had_head;
+	int had_head, have_prev;
 
 	memset(&ist, 0, sizeof ist);
 	index_read(&ist, repo_index_path(r));
 
 	had_head = head_tree(r, &tree) == 0;   /* tree = old HEAD tree */
+	prev_tree = tree;
+	have_prev = had_head;
 	if (had_head && amend) {
 		oid_t head;
 		struct commit old = COMMIT_INIT;
@@ -1105,6 +1265,15 @@ static int do_commit(struct repo *r, const char *message, int amend,
 			size_t i;
 			for (i = 0; i < old.parents.nr; i++)
 				oid_array_append(&c.parents, &old.parents.oid[i]);
+		}
+		/* and the prompts it carried, which the new tree still holds */
+		{
+			size_t i;
+			for (i = 0; i < old.nr_prompts; i++) {
+				c.prompts = xrealloc(c.prompts,
+					(c.nr_prompts + 1) * sizeof(*c.prompts));
+				c.prompts[c.nr_prompts++] = xstrdup(old.prompts[i]);
+			}
 		}
 		commit_release(&old);
 	} else if (had_head) {
@@ -1153,6 +1322,8 @@ static int do_commit(struct repo *r, const char *message, int amend,
 
 	if (write_tree_from_index(r, &ist, &tree) < 0)
 		gp_die("commit: cannot write the tree");
+
+	collect_commit_prompts(r, &ist, &prev_tree, have_prev, &c);
 
 	if (!allow_empty && had_head && !amend) {
 		struct commit previous = COMMIT_INIT;
@@ -1277,6 +1448,14 @@ static void log_one(const oid_t *oid, const struct commit *c, void *ud)
 	printf("Date:   %s\n", buf_cstr(&when));
 	if (ctx->show_session && c->session)
 		printf("Session: %s\n", c->session);
+	if (c->nr_prompts) {
+		size_t i;
+
+		printf("Prompts:");
+		for (i = 0; i < c->nr_prompts; i++)
+			printf(" %s", c->prompts[i]);
+		printf("\n");
+	}
 	printf("\n");
 	{
 		const char *m = c->message ? c->message : "";
@@ -1338,6 +1517,116 @@ int cmd_log(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* show                                                                */
 
+static void print_prompt_detail(const struct prompt_ref *ref)
+{
+	const struct prompt *p = ref->prompt;
+
+	printf("prompt %s\n", p->id ? p->id : "?");
+	if (p->session)
+		printf("  session:   %s\n", p->session);
+	printf("  seq:       %d\n", p->seq);
+	if (p->timestamp)
+		printf("  timestamp: %s\n", p->timestamp);
+	if (p->author)
+		printf("  author:    %s\n", p->author);
+	if (p->model)
+		printf("  model:     %s\n", p->model);
+	if (p->outcome)
+		printf("  outcome:   %s\n", p->outcome);
+	if (p->parent_prompt)
+		printf("  answers:   %s\n", p->parent_prompt);
+	if (p->nr_tags) {
+		size_t k;
+
+		printf("  tags:      ");
+		for (k = 0; k < p->nr_tags; k++)
+			printf("%s%s", k ? ", " : "", p->tags[k]);
+		printf("\n");
+	}
+	if (ref->path)
+		printf("  file:      %s\n", ref->path);
+	printf("\n");
+	body_print_indented(p->body, "  ");
+
+	if (p->response) {
+		printf("\nresponse %s", p->response->id);
+		if (p->response->model)
+			printf("  %s", p->response->model);
+		printf("\n\n");
+		body_print_indented(p->response->body, "  ");
+	}
+}
+
+/*
+ * `show` advertises a prompt id next to a revision, but a prompt is not an
+ * object -- it is a file in the history, which is why resolve_rev cannot see
+ * one and `show p_...` used to die with "unknown revision".  Reading the id out
+ * of the collected history is what makes the advertised form work, and it
+ * answers a session id and a response id too, since all three are ids a reader
+ * gets off one of the listings and then wants to look at.
+ *
+ * Returns 1 when the id named something here and it was shown, 0 when it has
+ * the shape of an id and names nothing, and -1 when it does not have that shape
+ * at all -- the caller reports the last of those as a revision that did not
+ * resolve, which is what it is, rather than as a missing prompt.
+ */
+static int show_gp_id(struct repo *r, const char *want)
+{
+	struct prompt_list pl;
+	struct session_groups sg;
+	size_t i, j;
+	int shown = 0;
+
+	/* only the three id shapes are ours; anything else is a revision that
+	 * genuinely did not resolve, and "no prompt with id mainn" would be a
+	 * worse answer than the one it gets */
+	if (!want || !want[0] || want[1] != '_' ||
+	    (want[0] != 'p' && want[0] != 's' && want[0] != 'r'))
+		return -1;
+
+	load_groups(r, &pl, &sg);
+	for (i = 0; i < sg.nr && !shown; i++) {
+		const struct session_group *g = &sg.g[i];
+
+		/* this loop is where the session was found, so it exists and
+		 * session_show cannot answer "no such session" */
+		if (g->session && !strcmp(g->session->id, want)) {
+			session_groups_release(&sg);
+			prompt_list_release(&pl);
+			session_show(r, want);
+			return 1;
+		}
+		for (j = 0; j < g->prompts.nr; j++) {
+			const struct prompt_ref *ref = &g->prompts.e[j];
+			const struct prompt *p = ref->prompt;
+
+			if (p->id && !strcmp(p->id, want)) {
+				print_prompt_detail(ref);
+				shown = 1;
+				break;
+			}
+			if (p->response && p->response->id &&
+			    !strcmp(p->response->id, want)) {
+				printf("response %s\n", p->response->id);
+				if (p->response->model)
+					printf("  model:     %s\n",
+					       p->response->model);
+				printf("  answers:   %s\n", p->id);
+				if (p->response->path)
+					printf("  file:      %s\n",
+					       p->response->path);
+				printf("\n");
+				body_print_indented(p->response->body, "  ");
+				shown = 1;
+				break;
+			}
+		}
+	}
+	session_groups_release(&sg);
+	prompt_list_release(&pl);
+	return shown;
+}
+
 int cmd_show(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
@@ -1350,8 +1639,16 @@ int cmd_show(struct repo *r, int argc, char **argv)
 		gp_error("show: expected a revision");
 		return 1;
 	}
-	if (resolve_rev(r, opts_arg(&o, 0), &oid) < 0)
+	if (resolve_rev(r, opts_arg(&o, 0), &oid) < 0) {
+		int found = show_gp_id(r, opts_arg(&o, 0));
+
+		if (found > 0)
+			return 0;
+		if (found == 0)
+			gp_die("show: no prompt, session or response has the "
+			       "id %s", opts_arg(&o, 0));
 		gp_die("show: unknown revision: %s", opts_arg(&o, 0));
+	}
 
 	if (odb_type_of(&r->odb, &oid, &t) < 0)
 		gp_die("show: cannot read %s", opts_arg(&o, 0));
@@ -1377,6 +1674,14 @@ int cmd_show(struct repo *r, int argc, char **argv)
 			printf("Date:   %s\n", buf_cstr(&when));
 			if (c.session)
 				printf("Session: %s\n", c.session);
+			if (c.nr_prompts) {
+				size_t i;
+
+				printf("Prompts:");
+				for (i = 0; i < c.nr_prompts; i++)
+					printf(" %s", c.prompts[i]);
+				printf("\n");
+			}
 			printf("\n");
 			{
 				const char *m = c.message ? c.message : "";

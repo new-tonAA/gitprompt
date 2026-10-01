@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
+static int session_store(struct repo *r, const struct session *s);
+
 /* ------------------------------------------------------------------ */
 /* shared helpers                                                     */
 
@@ -315,6 +317,70 @@ struct prompt_input {
 	size_t nr_tags;
 };
 
+/* the first line of a prompt as a title: runs of blanks collapsed, trimmed,
+ * and cut to `maxlen` characters */
+static char *title_from_body(const char *body, size_t maxlen)
+{
+	struct buf b;
+	const char *p;
+
+	buf_init(&b);
+	for (p = body; *p && *p != '\n'; p++) {
+		if (*p == ' ' || *p == '\t' || *p == '\r') {
+			if (b.len && b.b[b.len - 1] != ' ')
+				buf_addch(&b, ' ');
+			continue;
+		}
+		buf_addch(&b, *p);
+	}
+	while (b.len && b.b[b.len - 1] == ' ')
+		b.len--;
+	if (b.len > maxlen)
+		b.len = maxlen;
+	if (!b.len) {
+		buf_release(&b);
+		return NULL;
+	}
+	return xstrdup(buf_cstr(&b));
+}
+
+/*
+ * Name a session after what was first said in it.
+ *
+ * A session started without -t kept the placeholder title for good, so the one
+ * line of its file that says what the conversation was about said nothing --
+ * and that file is what a clone reads.  The first prompt is what the
+ * conversation is about, so it becomes the title at the moment it is recorded,
+ * not when someone later asks for it: the file has to arrive named.
+ *
+ * A session that already carries a title of its own is left alone, so this
+ * runs at most once in a session's life.
+ */
+static void session_autotitle(struct repo *r, const char *sid, const char *body)
+{
+	struct session *s;
+	char *title;
+
+	if (!sid || !body || !*body)
+		return;
+	s = session_load(r, sid);
+	if (!s)
+		return;
+	if (s->title && strcmp(s->title, "untitled session")) {
+		session_release(s);
+		free(s);
+		return;
+	}
+	title = title_from_body(body, 60);
+	if (title) {
+		free(s->title);
+		s->title = title;
+		session_store(r, s);
+	}
+	session_release(s);
+	free(s);
+}
+
 static int record_prompt(struct repo *r, const struct prompt_input *in,
 			 int stage_it)
 {
@@ -375,6 +441,7 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 		repo_bump_file_seq(r, seq + 1);
 		if (stage_it && stage_worktree_path(r, rel) < 0)
 			gp_warn("recorded %s but could not stage it", rel);
+		session_autotitle(r, p.session, p.body);
 		printf("%s %s\n", p.id, rel);
 	}
 
@@ -1017,7 +1084,7 @@ static int session_list(struct repo *r)
 	return 0;
 }
 
-static int session_show(struct repo *r, const char *id)
+int session_show(struct repo *r, const char *id)
 {
 	struct prompt_list pl;
 	struct session_groups sg;
@@ -1054,12 +1121,10 @@ static int session_show(struct repo *r, const char *id)
 		printf("  prompts: %lu\n\n", (unsigned long)g->prompts.nr);
 		for (j = 0; j < g->prompts.nr; j++) {
 			const struct prompt *p = g->prompts.e[j].prompt;
-			const char *b = p->body ? p->body : "";
-			size_t len = strcspn(b, "\n");
-			printf("  %2lu. %s  %s\n     %.*s\n",
-			       (unsigned long)(j + 1),
-			       p->timestamp ? p->timestamp : "", p->id, (int)len,
-			       b);
+
+			printf("  %2lu. %s  %s\n", (unsigned long)(j + 1),
+			       p->timestamp ? p->timestamp : "", p->id);
+			body_print_indented(p->body, "     ");
 			if (p->outcome)
 				printf("     outcome: %s\n", p->outcome);
 		}
@@ -1518,11 +1583,17 @@ int cmd_timeline(struct repo *r, int argc, char **argv)
 			printf("[unattributed]\n");
 		for (j = 0; j < g->prompts.nr; j++) {
 			const struct prompt *p = g->prompts.e[j].prompt;
-			const char *b = p->body ? p->body : "";
-			size_t len = strcspn(b, "\n");
-			printf("  %s  %s  %.*s\n",
+			struct buf one;
+
+			/* one line per prompt is what a timeline is for, so the
+			 * text is folded rather than cut: all of it, on one
+			 * line, with the entry it belongs to still visible */
+			buf_init(&one);
+			body_oneline(p->body, &one);
+			printf("  %s  %s  %s\n",
 			       p->timestamp ? p->timestamp : "(no time)",
-			       p->id, (int)len, b);
+			       p->id, buf_cstr(&one));
+			buf_release(&one);
 		}
 		printf("\n");
 	}
@@ -1564,29 +1635,47 @@ int cmd_log_prompt(struct repo *r, int argc, char **argv)
 
 	for (i = 0; i < pl.nr; i++) {
 		const struct prompt *p = pl.e[i].prompt;
-		if (oneline) {
-			const char *b = p->body ? p->body : "";
-			printf("%s %s\n", p->id, b);
-			(void)strcspn(b, "\n");
-		} else {
-			const char *b = p->body ? p->body : "";
-			size_t len = strcspn(b, "\n");
-			printf("%s  %s  %s", p->id,
-			       p->timestamp ? p->timestamp : "(no time)",
-			       p->session ? p->session : "(no session)");
-			if (p->model)
-				printf("  %s", p->model);
-			printf("\n    %.*s\n", (int)len, b);
-			if (p->response) {
-				const char *rb = p->response->body
-						 ? p->response->body : "";
-				size_t rlen = strcspn(rb, "\n");
 
-				printf("    response: %.*s\n", (int)rlen, rb);
-			}
-			if (p->outcome)
-				printf("    outcome: %s\n", p->outcome);
+		if (oneline) {
+			struct buf one;
+
+			buf_init(&one);
+			body_oneline(p->body, &one);
+			printf("%s %s\n", p->id, buf_cstr(&one));
+			buf_release(&one);
+			continue;
 		}
+
+		printf("%s  %s  %s", p->id,
+		       p->timestamp ? p->timestamp : "(no time)",
+		       p->session ? p->session : "(no session)");
+		if (p->model)
+			printf("  %s", p->model);
+		printf("\n");
+
+		/* the whole prompt, not its first line: what was asked is the
+		 * thing this listing exists to show, and a prompt is very
+		 * often a paragraph */
+		body_print_indented(p->body, "    ");
+		if (p->response) {
+			const char *rb = p->response->body ? p->response->body
+							   : "";
+			const char *nl = strchr(rb, '\n');
+			size_t first = nl ? (size_t)(nl - rb) : strlen(rb);
+
+			printf("    response: %.*s\n", (int)first, rb);
+			if (nl) {
+				const char *rest = nl + 1;
+
+				while (*rest == '\n')
+					rest++;
+				/* under the label, at the label's width */
+				body_print_indented(rest, "              ");
+			}
+		}
+		if (p->outcome)
+			printf("    outcome: %s\n", p->outcome);
+		printf("\n");
 	}
 	if (!pl.nr)
 		printf("no prompts recorded yet\n");

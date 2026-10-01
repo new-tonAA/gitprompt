@@ -4,8 +4,9 @@
  * A tree is a sequence of "<mode> <name>\0<20 raw bytes>", sorted by name
  * with directories ordered as though their name ended in '/'.  A commit is
  * a header block -- tree, parents, author, committer -- then a blank line,
- * then the message.  gitprompt adds one header of its own, gp-session, which
- * git preserves untouched.
+ * then the message.  gitprompt adds two headers of its own -- gp-session,
+ * the prompting session, and one gp-prompt per prompt the commit carries --
+ * which git preserves untouched.
  */
 #include "gp.h"
 
@@ -141,7 +142,15 @@ void commit_release(struct commit *c)
 	free(c->committer);
 	free(c->message);
 	free(c->session);
+	{
+		size_t i;
+		for (i = 0; i < c->nr_prompts; i++)
+			free(c->prompts[i]);
+	}
+	free(c->prompts);
 	c->author = c->committer = c->message = c->session = NULL;
+	c->prompts = NULL;
+	c->nr_prompts = 0;
 }
 
 void commit_parse(struct commit *c, const void *data, size_t len)
@@ -182,6 +191,11 @@ void commit_parse(struct commit *c, const void *data, size_t len)
 			} else if (llen > 11 && !memcmp(p, "gp-session ", 11)) {
 				free(c->session);
 				c->session = xstrndup(p + 11, llen - 11);
+			} else if (llen > 10 && !memcmp(p, "gp-prompt ", 10)) {
+				c->prompts = xrealloc(c->prompts,
+					(c->nr_prompts + 1) * sizeof(*c->prompts));
+				c->prompts[c->nr_prompts++] =
+					xstrndup(p + 10, llen - 10);
 			}
 		}
 		p = eol ? eol + 1 : end;
@@ -206,6 +220,9 @@ void commit_format(const struct commit *c, struct buf *out)
 	buf_addf(out, "committer %s\n", c->committer ? c->committer : "");
 	if (c->session && c->session[0])
 		buf_addf(out, "gp-session %s\n", c->session);
+	for (i = 0; i < c->nr_prompts; i++)
+		if (c->prompts[i] && c->prompts[i][0])
+			buf_addf(out, "gp-prompt %s\n", c->prompts[i]);
 	buf_addch(out, '\n');
 	if (c->message)
 		buf_add(out, c->message, strlen(c->message));

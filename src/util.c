@@ -252,6 +252,55 @@ const char *buf_cstr(struct buf *b)
 	return (const char *)b->b;
 }
 
+/*
+ * A prompt's text on one line: every newline and every run of blanks becomes a
+ * single space, and the ends are trimmed.  The history is read at a glance in
+ * several places -- `log-prompt --oneline`, `timeline` -- and a prompt is a
+ * paragraph, so without this the second line of one pushes the entry it belongs
+ * to off the screen.  The text itself is never cut: what is shown is the whole
+ * thing, folded.
+ */
+void body_oneline(const char *body, struct buf *out)
+{
+	const char *p;
+
+	buf_reset(out);
+	if (!body)
+		return;
+	for (p = body; *p; p++) {
+		if (*p == '\n' || *p == '\r' || *p == '\t' || *p == ' ') {
+			if (out->len && out->b[out->len - 1] != ' ')
+				buf_addch(out, ' ');
+			continue;
+		}
+		buf_addch(out, *p);
+	}
+	while (out->len && out->b[out->len - 1] == ' ')
+		out->len--;
+	if (out->len)
+		out->b[out->len] = '\0';
+}
+
+/*
+ * A body printed as the paragraph it is, one line per line, each behind
+ * `indent`.  Cutting at the first newline loses the rest of what somebody
+ * wrote; this is how the full text is shown without reflowing it.
+ */
+void body_print_indented(const char *body, const char *indent)
+{
+	const char *p = body ? body : "";
+
+	while (*p) {
+		const char *nl = strchr(p, '\n');
+		size_t len = nl ? (size_t)(nl - p) : strlen(p);
+
+		printf("%s%.*s\n", indent, (int)len, p);
+		if (!nl)
+			break;
+		p = nl + 1;
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* paths                                                               */
 

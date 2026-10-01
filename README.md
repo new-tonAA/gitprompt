@@ -48,6 +48,10 @@ are ever written.
 That is why the rest of the design needs no special cases:
 
 - `git clone` of a gitprompt repository works, because it *is* a git repository.
+  It brings the prompt files across and leaves the store behind, so the clone is
+  told exactly that if you ask it to do something, and `gitprompt init .` there
+  takes the `prompts/` tree over as the history — one command, and the clone
+  records, replays and pushes again.
 - GitHub renders the prompt files, diffs them, and shows their history.
 - `git --git-dir=.gitprompt push origin main` works.
 - `git reset --hard` in a directory whose `.git` is a copy of `.gitprompt`
@@ -58,6 +62,52 @@ That is why the rest of the design needs no special cases:
 The store is `.gitprompt/` rather than `.git/`, so a gitprompt repository and a
 git repository can sit in the same working tree without either noticing the
 other.
+
+## What a commit is
+
+A commit is the join between the code it adds and the prompts that produced it.
+`gitprompt commit` records that join **in the commit**, one `gp-prompt` header
+per prompt the commit adds or changes:
+
+```console
+$ gitprompt log -n 1
+commit f449d920a62b40806f922cda0fc6cebf970f2c7b
+Author: You <you@example.com>
+Date:   2026-10-01T15:28:39+08:00
+Session: s_1790839718_nwfj5r
+Prompts: p_lv2thw47
+
+    reject trailing commas
+
+$ git --git-dir=.gitprompt cat-file -p HEAD
+tree 18b8ed55d472272ad7706f5de51a5c6e9da98f90
+parent b947c10c982ddce2f9b73fa4b231139d068d4237
+author You <you@example.com> 1790839719 +0800
+committer You <you@example.com> 1790839719 +0800
+gp-session s_1790839718_nwfj5r
+gp-prompt p_lv2thw47
+
+reject trailing commas
+```
+
+Which prompts those are is decided by the commit's own tree against its first
+parent's: a prompt file the commit adds or changes is one of them, a commit of
+code alone carries none, and editing a prompt's outcome and committing that
+carries it too. So the answer cannot drift from what was committed — it is read
+out of the objects, not out of the working tree.
+
+Because the join lives in the commit object, a plain `git clone` has it without
+gitprompt being part of the transfer, and the clone can say which prompts go
+with which code before it has any store of its own:
+
+```console
+$ git cat-file -p HEAD | grep gp-prompt
+gp-prompt p_lv2thw47
+```
+
+So the history is not two lists that happen to sit in the same repository: the
+code says which prompts made it, and a clone that has only ever run `git clone`
+can read that off the commits.
 
 ## How the files are managed
 
@@ -278,22 +328,31 @@ same way, the prompt that returns resuming the conversation that session began:
 
 ```console
 $ gitprompt rerun
+Which agent should replay this history?
+  1. claude   claude -p
+  2. codex    -- cannot resume a session, so a replay into it would not be one
+Pick one [1]:
 rerun: 3 of 3 prompt(s), agent claude, permission mode acceptEdits
+       2 conversation(s): one per session, and a session
+         returned to is resumed rather than begun again,
+         so the replay crosses them as the history did
+       recorded 2026-09-26T00:31:02+08:00 .. 2026-09-26T01:14:47+08:00
+       replayed in seq order, which is the order they were
+         written -- the one thing a clock cannot say for them
        the agent works in /home/you/project and may change it
-       dry run -- nothing will be run; pass --yes to run it
 
-would  1  p_crmwszhq  s_1790510692_39lroz      start
-         claude -p --permission-mode acceptEdits --session-id a98290df-4cec-4dba-b224-3823194bc4b6
-would  2  p_gy32kr9c  s_1790510692_2fb6jq      start
-         claude -p --permission-mode acceptEdits --session-id d096e643-bbdd-4cd1-bb2f-008507a2aa89
-would  3  p_xbr72wvy  s_1790510692_39lroz      resume
-         claude -p --permission-mode acceptEdits --resume a98290df-4cec-4dba-b224-3823194bc4b6
+Start the replay now? [y/N] y
 
-rerun: 3 prompt(s) across 2 conversation(s), nothing run
+run    1  p_crmwszhq  s_1790510692_39lroz      start
+run    2  p_gy32kr9c  s_1790510692_2fb6jq      start
+run    3  p_xbr72wvy  s_1790510692_39lroz      resume
+
+rerun: 3 prompt(s) across 2 conversation(s)
 ```
 
 The conversation ids are derived from the session ids rather than handed out at
-random, so the same history replays into the same conversations and a run that
+random, so the same history replays into the same conversations — the same ones
+on the machine that pushed and on the machine that cloned — and a run that
 stopped half way can be started again from where it stopped with
 `--from <prompt id>`. `--salt` asks for a fresh set instead.
 
@@ -303,14 +362,23 @@ removes the question of what a quote or a percent sign in someone's prompt would
 have done to the shell.
 
 Nothing runs unless it is asked for. A rerun starts processes that edit the work
-tree, so the default is the plan above and `--yes` is what runs it:
+tree, so at a terminal it asks which agent to replay into and then asks to
+confirm before it begins — the agent is a fact about the machine that pulled the
+history, and a clone carries no answer to it. With no terminal to ask, the plan
+above is printed and nothing more happens until `--yes`:
 
 ```console
+$ gitprompt rerun --agent=claude             # skips the menu, still confirms
 $ gitprompt rerun --yes                      # runs it, claude's default mode
 $ gitprompt rerun --yes --permission-mode=bypassPermissions
 $ gitprompt rerun --yes --model opus --from p_xbr72wvy
 $ gitprompt rerun --only-session s_1790510692_39lroz
 ```
+
+The prompts are handed over **one at a time** — each is a separate agent
+invocation, and the next starts only when the one before it has exited — in the
+order the sequence numbers were handed out when they were recorded, which is the
+order a clone months later can still reconstruct.
 
 **It reconstructs the prompts, not the project.** The prompts are stored exactly
 and are handed over verbatim; an agent doing the work a second time may do it

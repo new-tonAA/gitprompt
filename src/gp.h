@@ -89,6 +89,11 @@ void buf_swap(struct buf *a, struct buf *b);
 char *buf_detach(struct buf *b, size_t *lenp);
 const char *buf_cstr(struct buf *b);
 
+/* text shape: a body folded onto one line, and a body printed in full behind
+ * an indent */
+void body_oneline(const char *body, struct buf *out);
+void body_print_indented(const char *body, const char *indent);
+
 /* ------------------------------------------------------------------ */
 /* object ids                                                          */
 
@@ -188,8 +193,10 @@ struct commit {
 	char *committer;
 	char *message;          /* owned */
 	char *session;          /* gitprompt: session id, or NULL */
+	char **prompts;         /* gitprompt: prompt ids this commit carries */
+	size_t nr_prompts;
 };
-#define COMMIT_INIT { { {0} }, OID_ARRAY_INIT, NULL, NULL, NULL, NULL }
+#define COMMIT_INIT { { {0} }, OID_ARRAY_INIT, NULL, NULL, NULL, NULL, NULL, 0 }
 void commit_release(struct commit *c);
 void commit_parse(struct commit *c, const void *data, size_t len);
 void commit_format(const struct commit *c, struct buf *out);
@@ -684,6 +691,12 @@ const struct session *session_by_id(const struct session_groups *g,
 /* the whole history as it stands, gathered and grouped */
 void load_groups(struct repo *r, struct prompt_list *pl,
 		 struct session_groups *sg);
+
+/*
+ * Everything known about one session, one prompt per line.  Shared with
+ * `show`, which accepts a session id the way it accepts a revision.
+ */
+int session_show(struct repo *r, const char *id);
 
 /* ------------------------------------------------------------------ */
 /* transports                                                          */

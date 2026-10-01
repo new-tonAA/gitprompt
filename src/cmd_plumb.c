@@ -40,6 +40,7 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 	const char *dir;
 	const char *branch;
 	int bare;
+	int existed;
 	char *gpdir;
 	const char *root;
 	char cwd[4096];
@@ -70,7 +71,8 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 
 	gpdir = bare ? xstrfmt("%s", root) : xstrfmt("%s/.gitprompt", root);
 
-	if (is_directory(gpdir) && is_file(xstrfmt("%s/HEAD", gpdir)))
+	existed = is_directory(gpdir) && is_file(xstrfmt("%s/HEAD", gpdir));
+	if (existed)
 		printf("Reinitialized existing gitprompt repository in %s/\n",
 		       gpdir);
 	else
@@ -123,6 +125,33 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 		write_file(cfg, b.b, b.len);
 		buf_release(&b);
 		free(cfg);
+	}
+
+	/*
+	 * A prompt history that arrived as a plain `git clone` has the files and
+	 * nothing else: git copies the tree and leaves the index, refs and
+	 * objects behind.  Taking whatever already sits under the prompt
+	 * directory into the index is what makes such a clone a repository that
+	 * can be committed and pushed again -- one command, rather than "clone
+	 * it, then work out what to add".  A reinit is left alone: the index is
+	 * the user's by then, not ours to restage.
+	 */
+	if (!existed && !bare) {
+		struct repo r;
+
+		if (repo_open(&r, root) == 0) {
+			char *pd = xstrdup(repo_prompt_dir(&r));
+
+			if (is_directory(pd)) {
+				char *args[1];
+
+				args[0] = pd;
+				if (cmd_add(&r, 1, args) == 0)
+					printf("Adopted the existing %s/ tree.\n", pd);
+			}
+			free(pd);
+			repo_release(&r);
+		}
 	}
 
 	free(gpdir);
