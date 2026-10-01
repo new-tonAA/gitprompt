@@ -1167,9 +1167,9 @@ static int is_prompt_path(const char *dir, size_t dl, const char *path,
  * body was edited after it was recorded is carried by the commit that
  * carried the edit.
  */
-static void collect_commit_prompts(struct repo *r, const struct index_state *ist,
-				   const oid_t *prev_tree, int have_prev,
-				   struct commit *c)
+void collect_commit_prompts(struct repo *r, const struct index_state *ist,
+			    const oid_t *prev_tree, int have_prev,
+			    struct commit *c)
 {
 	struct slist seen = { NULL, 0, 0 };
 	char *dir = xstrdup(repo_prompt_dir(r));
@@ -1377,6 +1377,8 @@ static int do_commit(struct repo *r, const char *message, int amend,
 		refs_write(&r->refs, branch_ref, &commit_oid);
 		refs_reflog(&r->refs, branch_ref, had ? &old : &null_oid,
 			    &commit_oid, amend ? "commit (amend)" : "commit");
+		refs_reflog_head(&r->refs, branch_ref, had ? &old : &null_oid,
+				 &commit_oid, amend ? "commit (amend)" : "commit");
 	}
 	/* the merge is concluded; nothing is left to abort */
 	merge_state_clear(r);
@@ -2854,15 +2856,22 @@ int cmd_reset(struct repo *r, int argc, char **argv)
 	read_commit(r, &target, &c);
 	branch_ref = refs_head_target(&r->refs);
 
-	if (branch_ref) {
+	{
 		oid_t old = null_oid;
-		int had = refs_read(&r->refs, branch_ref, &old) == 0;
-		refs_write(&r->refs, branch_ref, &target);
-		refs_reflog(&r->refs, branch_ref, had ? &old : &null_oid, &target,
-			    opts_flag(&o, "--hard") ? "reset: moving to HEAD"
-						    : "reset: moving to HEAD");
-	} else {
-		refs_set_head_detached(&r->refs, &target);
+		int had = refs_head(&r->refs, &old) == 0;
+
+		if (branch_ref) {
+			refs_write(&r->refs, branch_ref, &target);
+			refs_reflog(&r->refs, branch_ref, had ? &old : &null_oid,
+				    &target, "reset: moving to HEAD");
+			refs_reflog_head(&r->refs, branch_ref,
+					 had ? &old : &null_oid, &target,
+					 "reset: moving to HEAD");
+		} else {
+			refs_set_head_detached(&r->refs, &target);
+			refs_reflog_head(&r->refs, NULL, had ? &old : &null_oid,
+					 &target, "reset: moving to HEAD");
+		}
 	}
 
 	if (mode == 1) {
@@ -2890,64 +2899,77 @@ int cmd_reset(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* reflog                                                              */
 
+/* one reflog file, printed line by line; 0 when it was there */
+static int reflog_dump(struct repo *r, const char *full)
+{
+	char *path = repo_git_path(r, "logs/%s", full);
+	struct buf b;
+	const char *p, *end;
+
+	buf_init(&b);
+	if (read_file(path, &b) < 0) {
+		free(path);
+		buf_release(&b);
+		return -1;
+	}
+	p = (const char *)b.b;
+	end = p + b.len;
+	while (p < end) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+		size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+
+		if (len)
+			printf("%.*s\n", (int)len, p);
+		p = nl ? nl + 1 : end;
+	}
+	free(path);
+	buf_release(&b);
+	return 0;
+}
+
+/*
+ * `reflog` with no argument is HEAD's reflog, which is what git means by it:
+ * the record of where the work tree has been, and the thing that survives a
+ * switch.  A repository whose HEAD has never moved has no such file -- one
+ * written by an older gitprompt, or by a plain `git clone` of a history that
+ * only ever had one branch -- so the branch's log is shown instead of saying
+ * there is no reflog at all.
+ */
 int cmd_reflog(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	const char *name;
-	char *path, *full;
-	struct buf b;
-	const char *p, *end;
+	char *full;
 
 	opts_init(&o, argc, argv, NULL);
 	name = opts_arg(&o, 0);
 	if (!name)
 		name = "HEAD";
 
-	/* HEAD's reflog lives with the branch it names */
+	if (strchr(name, '/'))
+		full = xstrdup(name);
+	else if (!strcmp(name, "HEAD"))
+		full = xstrdup("HEAD");
+	else
+		full = xstrfmt("refs/heads/%s", name);
+
+	if (reflog_dump(r, full) == 0) {
+		free(full);
+		return 0;
+	}
 	if (!strcmp(name, "HEAD")) {
 		char *t = refs_head_target(&r->refs);
-		full = t ? xstrdup(t) : xstrdup("HEAD");
+		int rc = t ? reflog_dump(r, t) : -1;
+
 		free(t);
-	} else if (strchr(name, '/')) {
-		full = xstrdup(name);
-	} else {
-		char *t = refs_head_target(&r->refs);
-		if (t && !strncmp(t, "refs/heads/", 11) &&
-		    !strcmp(t + 11, name)) {
-			full = xstrdup(t);
-		} else {
-			full = xstrfmt("refs/heads/%s", name);
+		if (rc == 0) {
+			free(full);
+			return 0;
 		}
-		free(t);
 	}
-
-	path = repo_git_path(r, "logs/%s", full);
-	buf_init(&b);
-	if (read_file(path, &b) < 0) {
-		gp_error("reflog: no reflog for %s", name);
-		free(path);
-		free(full);
-		buf_release(&b);
-		return 1;
-	}
-
-	p = (const char *)b.b;
-	end = p + b.len;
-	while (p < end) {
-		const char *nl = memchr(p, '\n', (size_t)(end - p));
-		size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
-		if (len > 7 && !memcmp(p, "0000000", 7) && p[7] == '0') {
-			/* the birth line is noisy; keep it, git does too */
-		}
-		if (len)
-			printf("%.*s\n", (int)len, p);
-		p = nl ? nl + 1 : end;
-	}
-
-	free(path);
+	gp_error("reflog: no reflog for %s", name);
 	free(full);
-	buf_release(&b);
-	return 0;
+	return 1;
 }
 
 /* ------------------------------------------------------------------ */

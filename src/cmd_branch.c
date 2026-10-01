@@ -59,6 +59,37 @@ static char *current_branch(struct repo *r)
 	return name;
 }
 
+/*
+ * How HEAD's position reads in a reflog message: the branch's short name, or
+ * the abbreviated id when HEAD is detached.  git writes the same, so a reflog
+ * reads alike whichever way it got there.
+ */
+static char *head_position(struct repo *r)
+{
+	char *b = current_branch(r);
+	oid_t oid;
+
+	if (b)
+		return b;
+	if (refs_head(&r->refs, &oid) < 0)
+		return xstrdup("HEAD");
+	return abbrev_oid(&oid);
+}
+
+/*
+ * A switch rewrites HEAD rather than the branch, so the record of it belongs to
+ * HEAD alone -- the branch's own log has nothing to say about the move.  `from`
+ * is HEAD's position before the move, taken while it was still the old one.
+ */
+static void reflog_switch(struct repo *r, const char *from, const char *to,
+			  const oid_t *old, int had, const oid_t *new)
+{
+	char *msg = xstrfmt("checkout: moving from %s to %s", from, to);
+
+	refs_reflog_head(&r->refs, NULL, had ? old : &null_oid, new, msg);
+	free(msg);
+}
+
 /* paths that differ between the index and the work tree */
 static void dirty_paths(struct repo *r, struct strlist *out)
 {
@@ -181,8 +212,14 @@ int cmd_branch(struct repo *r, int argc, char **argv)
 		new_ref = branch_ref(to);
 		refs_write(&r->refs, new_ref, &oid);
 		refs_delete(&r->refs, old_ref);
-		if (cur && !strcmp(cur, from))
+		if (cur && !strcmp(cur, from)) {
+			char *msg = xstrfmt("Branch: renamed %s to %s",
+					    old_ref, new_ref);
+
 			refs_set_head(&r->refs, new_ref);
+			refs_reflog_head(&r->refs, new_ref, &oid, &oid, msg);
+			free(msg);
+		}
 		free(old_ref);
 		free(new_ref);
 		free(cur);
@@ -324,6 +361,9 @@ static int switch_to(struct repo *r, const char *rev, int force)
 	int was_branch = 0;
 	int created = 0;                /* the branch came from the DWIM */
 	char *tracking = NULL;
+	char *prev;                     /* where HEAD was, for the record */
+	oid_t old_head;
+	int had_head;
 
 	/*
 	 * The DWIM has to run before the revision lookup, because `x` is not
@@ -372,6 +412,9 @@ static int switch_to(struct repo *r, const char *rev, int force)
 		return 1;
 	}
 
+	prev = head_position(r);
+	had_head = refs_head(&r->refs, &old_head) == 0;
+
 	if (tracking) {
 		char *ref = branch_ref(rev);
 		char *msg = xstrfmt("branch: Created from %s/%s", tracking, rev);
@@ -414,6 +457,8 @@ static int switch_to(struct repo *r, const char *rev, int force)
 		printf("HEAD is now at %s %s\n", short_oid, rev);
 		free(short_oid);
 	}
+	reflog_switch(r, prev, rev, &old_head, had_head, &oid);
+	free(prev);
 
 	checkout_tree(r, &tree, 1, 1);
 	free(branch);
@@ -445,9 +490,17 @@ int cmd_checkout(struct repo *r, int argc, char **argv)
 			 * work tree first */
 			return switch_to(r, name, opts_flag(&o, "-f"));
 		}
-		refs_write(&r->refs, ref, &head);
-		refs_reflog(&r->refs, ref, &null_oid, &head, "branch: Created");
-		refs_set_head(&r->refs, ref);
+		{
+			oid_t old;
+			int had = refs_head(&r->refs, &old) == 0;
+			char *prev = head_position(r);
+
+			refs_write(&r->refs, ref, &head);
+			refs_reflog(&r->refs, ref, &null_oid, &head, "branch: Created");
+			refs_set_head(&r->refs, ref);
+			reflog_switch(r, prev, name, &old, had, &head);
+			free(prev);
+		}
 		printf("Switched to a new branch '%s'\n", name);
 		free(ref);
 		return 0;
@@ -568,11 +621,20 @@ int cmd_switch(struct repo *r, int argc, char **argv)
 		ref = branch_ref(name);
 		if (refs_exists(&r->refs, ref))
 			gp_die("a branch named '%s' already exists", name);
-		refs_write(&r->refs, ref, &head);
-		/* the same birth line `checkout -b` writes: a branch made
-		 * here is in the reflog afterwards like any other */
-		refs_reflog(&r->refs, ref, &null_oid, &head, "branch: Created");
-		refs_set_head(&r->refs, ref);
+		{
+			oid_t old;
+			int had = refs_head(&r->refs, &old) == 0;
+			char *prev = head_position(r);
+
+			refs_write(&r->refs, ref, &head);
+			/* the same birth line `checkout -b` writes: a branch
+			 * made here is in the reflog afterwards like any other */
+			refs_reflog(&r->refs, ref, &null_oid, &head,
+				    "branch: Created");
+			refs_set_head(&r->refs, ref);
+			reflog_switch(r, prev, name, &old, had, &head);
+			free(prev);
+		}
 		printf("Switched to a new branch '%s'\n", name);
 		free(ref);
 		return 0;
@@ -1252,9 +1314,13 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 			refs_write(&r->refs, ref, &target);
 			refs_reflog(&r->refs, ref, &head, &target,
 				    "merge: fast-forward");
+			refs_reflog_head(&r->refs, ref, &head, &target,
+					 "merge: fast-forward");
 			free(ref);
 		} else {
 			refs_set_head_detached(&r->refs, &target);
+			refs_reflog_head(&r->refs, NULL, &head, &target,
+					 "merge: fast-forward");
 		}
 		checkout_tree(r, &target_tree, 1, 1);
 		printf("Updating %s..%s\nFast-forward\n", abbrev_oid(&head),
@@ -1353,7 +1419,20 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 			char *ref;
 
 			write_tree_from_index(r, &mindex, &tree);
+
+			/*
+			 * A merge commit carries the prompts it brings in, the
+			 * same way any commit carries what it changed: against
+			 * its first parent, which is the branch it was made on.
+			 */
+			collect_commit_prompts(r, &mindex, &head_tree, 1, &c);
 			index_release(&mindex);
+			{
+				char *sess = repo_current_session(r);
+
+				if (sess)
+					c.session = sess;
+			}
 
 			buf_init(&ident);
 			buf_init(&body);
@@ -1371,9 +1450,13 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 			if (ref) {
 				refs_write(&r->refs, ref, &out);
 				refs_reflog(&r->refs, ref, &head, &out, "merge");
+				refs_reflog_head(&r->refs, ref, &head, &out,
+						 "merge");
 				free(ref);
 			} else {
 				refs_set_head_detached(&r->refs, &out);
+				refs_reflog_head(&r->refs, NULL, &head, &out,
+						 "merge");
 			}
 			oid_hex(&out, hex);
 			hex[7] = '\0';

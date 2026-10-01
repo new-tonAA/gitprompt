@@ -275,6 +275,31 @@ void refs_reflog(struct ref_store *r, const char *name, const oid_t *old,
 	fclose(f);
 }
 
+/*
+ * HEAD keeps a reflog of its own, and it is the only record of what the work
+ * tree has been on.  A branch's reflog says where that branch went; once
+ * branches are switched it says nothing about where HEAD has been, and the
+ * whole use of a reflog -- finding what was there before the last move -- is
+ * exactly that question.  So every move of HEAD is written here as well as to
+ * the branch, and `gitprompt reflog` reads this file.
+ *
+ * `ref` is the ref being updated; the entry belongs to HEAD only when that ref
+ * is what HEAD names, since moving some other branch leaves HEAD where it was.
+ */
+void refs_reflog_head(struct ref_store *r, const char *ref, const oid_t *old,
+		      const oid_t *new, const char *msg)
+{
+	if (ref) {
+		char *t = refs_head_target(r);
+		int is_head = !strcmp(ref, "HEAD") || (t && !strcmp(t, ref));
+
+		free(t);
+		if (!is_head)
+			return;
+	}
+	refs_reflog(r, "HEAD", old, new, msg);
+}
+
 /* ------------------------------------------------------------------ */
 /* listing                                                             */
 

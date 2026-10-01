@@ -354,7 +354,11 @@ gp checkout madebranch >/dev/null 2>&1
 expect "checkout moves HEAD" "refs/heads/madebranch" gp symbolic-ref HEAD
 gp switch -c other >/dev/null 2>&1
 expect "switch -c moves HEAD" "refs/heads/other" gp symbolic-ref HEAD
-expect "a branch made by switch -c is in the reflog" "branch: Created" gp reflog
+# the creation belongs to the branch, which is what it is a fact about; HEAD's
+# own log has the move rather than the birth
+expect "a branch made by switch -c is in its own reflog" "branch: Created" \
+	gp reflog other
+expect "and HEAD's reflog has the move onto it" "checkout: moving from" gp reflog
 printf 'branch only\n' > b.txt
 gp add b.txt >/dev/null 2>&1
 gp commit -m "a commit only on other" >/dev/null 2>&1
@@ -2057,7 +2061,7 @@ fi
 expect "switch takes a branch from the remote" "set up to track" gp switch side
 expect "the branch is local and current" "* side" gp branch
 expect "the new branch records where it came from" "Created from origin/side" \
-	gp reflog
+	gp reflog side
 expect "the new branch has the remote's work" "side work" gp log --oneline
 
 # ------------------------------------------------------------------
@@ -2827,6 +2831,171 @@ if command -v git >/dev/null 2>&1; then
 else
 	skip "a plain git clone is recognised (git is not on PATH)"
 fi
+
+# ------------------------------------------------------------------
+say "where HEAD has been"
+
+# A branch's reflog says where that branch went.  A reflog that only ever shows
+# the branch HEAD is on now is not a reflog of the work tree at all: switch away
+# and the record of where you were is behind you, which is the one question a
+# reflog is asked.  So HEAD keeps a log of its own, every move of HEAD is written
+# to it, and a bare `reflog` reads that.
+hl=$work/headlog
+rm -rf "$hl"
+mkdir -p "$hl" || exit 2
+cd "$hl" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email hl@example.com
+gp config user.name "Reflog Tester"
+gp prompt -m "the first prompt" >/dev/null 2>&1
+echo one > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the first" >/dev/null 2>&1
+
+before=$(gp reflog | wc -l | tr -d ' ')
+gp checkout -b side >/dev/null 2>&1
+gp prompt -m "the side prompt" >/dev/null 2>&1
+echo two > b.txt
+gp add b.txt >/dev/null 2>&1
+gp commit -m "the side" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+after=$(gp reflog | wc -l | tr -d ' ')
+
+if [ "$after" -gt "$before" ]; then
+	ok "HEAD's reflog goes on growing across a switch"
+else
+	bad "HEAD's reflog goes on growing across a switch" \
+		"$before before the switch, $after after"
+fi
+expect "and names the branch it left" "checkout: moving from main to side" \
+	gp reflog
+expect "and the one it came back to" "checkout: moving from side to main" \
+	gp reflog
+expect "the branch's own log is still there to ask for" "branch: Created" \
+	gp reflog side
+
+# A detach is a move of HEAD and of no branch at all, which is the case a
+# reflog kept only per-branch could not record however it was written.
+gp checkout "$(gp rev-parse HEAD~1)" >/dev/null 2>&1
+expect "a detach is recorded against HEAD" "checkout: moving from main to" \
+	gp reflog
+gp checkout main >/dev/null 2>&1
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
+say "a merge commit joins the two sides"
+
+# A merge brings the other branch's prompts into this one's tree, so by the
+# same rule every other commit follows -- the prompt files it adds or changes
+# against its first parent -- it carries them, and it names the session it was
+# made in.  Without that a history of merges read back would have the code and
+# not the prompts that produced it.
+mg=$work/mergejoin
+rm -rf "$mg"
+mkdir -p "$mg" || exit 2
+cd "$mg" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email mg@example.com
+gp config user.name "Merge Tester"
+gp session start -t "the merged work" >/dev/null 2>&1
+gp prompt -m "the first prompt" >/dev/null 2>&1
+echo one > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the first" >/dev/null 2>&1
+
+gp checkout -b side >/dev/null 2>&1
+gp prompt -m "the side branch's prompt" >/dev/null 2>&1
+echo two > b.txt
+gp add b.txt >/dev/null 2>&1
+gp commit -m "the side" >/dev/null 2>&1
+sidep=$(gp show HEAD | sed -n 's/^Prompts: //p')
+
+gp checkout main >/dev/null 2>&1
+echo three >> a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the mainline" >/dev/null 2>&1
+gp merge side --no-ff -m "join the side" >/dev/null 2>&1
+expect "the merge commit carries the prompt it brought in" \
+	"Prompts: $sidep" gp show HEAD
+expect "and names the session it was made in" "gp-session s_" \
+	gp cat-file -p HEAD
+expect "the merge is on HEAD's reflog" "merge" gp reflog
+
+# a fast-forward moves the branch without making a commit, and it is a move of
+# HEAD all the same
+gp checkout -b ahead >/dev/null 2>&1
+gp prompt -m "a prompt on the branch that runs ahead" >/dev/null 2>&1
+echo four >> a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the branch runs ahead" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+gp merge ahead --ff-only >/dev/null 2>&1
+expect "a fast-forward is on HEAD's reflog too" "merge: fast-forward" gp reflog
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
+say "the same history reads the same from any clock"
+
+# A history is recorded with an offset and replayed elsewhere, so anything that
+# ordered or rendered by the reading machine's clock would hand a different
+# replay to a different machine.  The plan has to come out identical, and a
+# recorded date has to read as the instant and offset it was written in.
+tz=$work/timezones
+rm -rf "$tz"
+mkdir -p "$tz" || exit 2
+cd "$tz" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email tz@example.com
+gp config user.name "Clock Tester"
+gp session start -t "written here" >/dev/null 2>&1
+gp prompt --date='2026-03-01T09:01:00+08:00' -m "the earlier prompt" >/dev/null 2>&1
+gp session end >/dev/null 2>&1
+gp session start -t "written later" >/dev/null 2>&1
+gp prompt --date='2026-01-05T00:00:00+08:00' -m "the later prompt" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "both of them" >/dev/null 2>&1
+
+# the clock disagrees with the order they were written in, and the written order
+# is the one a replay has to follow
+order=$(gp log-prompt --oneline | sed 's/^p_[a-z0-9]* //')
+want="the earlier prompt
+the later prompt"
+if [ "$order" = "$want" ]; then
+	ok "the prompts are replayed in the order they were written, not the clock's"
+else
+	bad "the prompts are replayed in the order they were written, not the clock's" \
+		"wanted [$want] got [$order]"
+fi
+
+plan=$work/tz-plan
+TZ=UTC "$GP" rerun > "$plan" 2>&1
+for z in America/New_York Pacific/Chatham Asia/Shanghai; do
+	tzplan=$work/tz-plan.$$
+	TZ=$z "$GP" rerun > "$tzplan" 2>&1
+	if cmp -s "$plan" "$tzplan"; then
+		ok "the replay planned under $z is the one planned under UTC"
+	else
+		bad "the replay planned under $z is the one planned under UTC" \
+			"$(diff "$plan" "$tzplan" 2>&1 | head -3)"
+	fi
+	rm -f "$tzplan"
+done
+
+date_line() { TZ=$1 "$GP" rerun 2>&1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}' | sed -n 1p; }
+d_utc=$(date_line UTC)
+d_cht=$(date_line Pacific/Chatham)
+d_nyc=$(date_line America/New_York)
+case "$d_utc" in
+"2026-01-05T00:00:00+08:00") ok "a recorded date reads as the instant and offset it was written in" ;;
+*) bad "a recorded date reads as the instant and offset it was written in" "got [$d_utc]" ;;
+esac
+if [ "$d_utc" = "$d_cht" ] && [ "$d_utc" = "$d_nyc" ]; then
+	ok "and it reads the same from every clock, not re-rendered into the reader's"
+else
+	bad "and it reads the same from every clock, not re-rendered into the reader's" \
+		"UTC [$d_utc] Chatham [$d_cht] New York [$d_nyc]"
+fi
+cd "$back" || exit 2
 
 # ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

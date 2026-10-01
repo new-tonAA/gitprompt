@@ -1685,9 +1685,11 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 				char *msg = xstrfmt("clone: from %s", how);
 				refs_reflog(&local.refs, head_ref, &null_oid, &oid,
 					    msg);
+				refs_set_head(&local.refs, head_ref);
+				refs_reflog_head(&local.refs, head_ref, &null_oid,
+						 &oid, msg);
 				free(msg);
 			}
-			refs_set_head(&local.refs, head_ref);
 			read_commit(&local, &oid, &c);
 			tree = c.tree;
 			commit_release(&c);

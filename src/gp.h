@@ -475,6 +475,14 @@ int refs_delete(struct ref_store *r, const char *name);
 int refs_exists(struct ref_store *r, const char *name);
 void refs_reflog(struct ref_store *r, const char *name, const oid_t *old,
 		 const oid_t *new, const char *msg);
+/*
+ * The entry HEAD's own reflog gets when `ref` moves.  `ref` is the ref that
+ * was updated, and the entry is written only when that is the one HEAD names;
+ * pass NULL to say HEAD moved without any ref being rewritten, which is what
+ * a switch does.
+ */
+void refs_reflog_head(struct ref_store *r, const char *ref, const oid_t *old,
+		      const oid_t *new, const char *msg);
 char *refs_head_target(struct ref_store *r);          /* "refs/heads/main" */
 int refs_head(struct ref_store *r, oid_t *out);
 int refs_set_head(struct ref_store *r, const char *target);
@@ -529,6 +537,16 @@ void repo_bump_file_seq(struct repo *r, long n);
 /* current session id, or NULL */
 char *repo_current_session(struct repo *r);
 int repo_set_current_session(struct repo *r, const char *id);
+
+/*
+ * Fill in the prompt ids a commit carries: the prompt files in `ist` that
+ * `prev_tree` does not already hold unchanged.  A commit made by a merge passes
+ * its first parent's tree and the merged index, so it carries what it brought
+ * in, which is the same rule the ordinary commit follows.
+ */
+void collect_commit_prompts(struct repo *r, const struct index_state *ist,
+			    const oid_t *prev_tree, int have_prev,
+			    struct commit *c);
 
 /* ------------------------------------------------------------------ */
 /* the three-way content merge                                         */

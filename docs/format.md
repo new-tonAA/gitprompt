@@ -121,7 +121,9 @@ first parent's tree tells them apart -- a commit of code with no new prompt
 carries none, and a prompt edited after it was recorded is carried by the
 commit that carried the edit, since it is the prompt file in the commit's own
 tree that decides, not the working tree. A root commit carries every prompt it
-holds, having no parent to differ from. There is no `gp-prompt` on the session
+holds, having no parent to differ from. A merge commit is measured against its
+first parent too, which is the branch it was made on, so it carries the prompts
+the merge brought in from the other side. There is no `gp-prompt` on the session
 file or the response file: they are not prompts, and only the prompt files
 directly under the prompt directory are read this way.
 
@@ -140,6 +142,7 @@ only `merge` writes a second one.
 | `refs/remotes/<remote>/<name>` | the last known position of a remote branch |
 | `HEAD` | `ref: refs/heads/main`, or a raw id when detached |
 | `logs/<ref>` | the reflog for that ref |
+| `logs/HEAD` | the reflog of where the work tree has been |
 | `packed-refs` | read, never written |
 
 Ref files hold 40 hex digits and a newline. A reflog line is
@@ -147,6 +150,13 @@ Ref files hold 40 hex digits and a newline. A reflog line is
 ```
 <old id> <new id> <name> <email> <epoch> <±hhmm>\t<message>
 ```
+
+`logs/HEAD` is written as well as the branch's log whenever a ref HEAD names
+moves, and on its own when HEAD moves without any branch moving -- a switch, a
+detach, a clone. It is the only record that survives a switch: the branch's log
+says where that branch went, not where the work tree has been. `gitprompt reflog`
+with no argument reads it, falling back to the branch's log when there is no
+such file, which is the case in a repository whose HEAD has never moved.
 
 `packed-refs` is read so that a repository which has been through `git pack-refs`
 still resolves, but gitprompt never writes one.

@@ -592,6 +592,8 @@ int cmd_update_ref(struct repo *r, int argc, char **argv)
 		gp_die("update-ref: cannot write %s", name);
 	refs_reflog(&r->refs, name, had_old ? &oldoid : &null_oid, &newoid,
 		    "update-ref");
+	refs_reflog_head(&r->refs, name, had_old ? &oldoid : &null_oid, &newoid,
+			 "update-ref");
 	return 0;
 }
 
@@ -649,8 +651,21 @@ int cmd_symbolic_ref(struct repo *r, int argc, char **argv)
 
 	if (refs_check_name(target) < 0)
 		gp_die("symbolic-ref: refusing to point at an invalid name: %s", target);
-	if (!strcmp(name, "HEAD"))
-		return refs_set_head(&r->refs, target) < 0 ? 1 : 0;
+	if (!strcmp(name, "HEAD")) {
+		oid_t old, new;
+		int had = refs_head(&r->refs, &old) == 0;
+		int got = refs_read(&r->refs, target, &new) == 0;
+		char *msg = xstrfmt("HEAD: moving to %s", target);
+		int rc;
+
+		rc = refs_set_head(&r->refs, target) < 0 ? 1 : 0;
+		if (!rc)
+			refs_reflog_head(&r->refs, NULL,
+					 had ? &old : &null_oid,
+					 got ? &new : &null_oid, msg);
+		free(msg);
+		return rc;
+	}
 	{
 		char *path = repo_git_path(r, "%s", name);
 		char *line = xstrfmt("ref: %s\n", target);
