@@ -2028,6 +2028,139 @@ else
 fi
 
 # ------------------------------------------------------------------
+say "the commits a revision reaches"
+
+# rev-list answers from the graph, so the checks pin what is graph and not what
+# is syntax: a range is the difference of two ancestor sets, a merge commit is
+# one commit with two parents, and the two ends of a symmetric range keep each
+# other's history out.  Where git is on PATH the same questions are put to git,
+# because the claim these commands make is that they read git's history.
+rv=$work/revisions
+rm -rf "$rv"
+mkdir -p "$rv" || exit 2
+cd "$rv" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rv@example.com
+gp config user.name "Revision Tester"
+gp prompt -m "the prompt the base holds" >/dev/null 2>&1
+echo one > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp tag base
+
+gp checkout -b side >/dev/null 2>&1
+gp prompt -m "the prompt the side holds" >/dev/null 2>&1
+echo two > b.txt
+gp add b.txt >/dev/null 2>&1
+gp commit -m "the side" >/dev/null 2>&1
+
+gp checkout main >/dev/null 2>&1
+gp prompt -m "the prompt the mainline holds" >/dev/null 2>&1
+echo three > c.txt
+gp add c.txt >/dev/null 2>&1
+gp commit -m "the mainline" >/dev/null 2>&1
+
+# one branch's commits less the other's, which is what A..B is
+expect "A..B is what B has and A does not" "the mainline" gp rev-list --oneline base..main
+expect "and the other way round is the other branch" "the side" \
+	gp rev-list --oneline base..side
+empty=$(gp rev-list --oneline base..base 2>&1)
+if [ -z "$empty" ]; then
+	ok "a range that excludes everything it names prints nothing"
+else
+	bad "a range that excludes everything it names prints nothing" "got [$empty]"
+fi
+expect_status "and asking for it is not an error" 0 gp rev-list base..base
+
+# the symmetric range keeps both sides' shared history out
+n_sym=$(gp rev-list --count main...side)
+if [ "$n_sym" = 2 ]; then
+	ok "A...B is the two branches' own commits and not the base"
+else
+	bad "A...B is the two branches' own commits and not the base" "counted $n_sym"
+fi
+expect "and it names both of them" "the side" gp rev-list --oneline main...side
+n_caret=$(gp rev-list --count ^base main)
+if [ "$n_caret" = 1 ]; then
+	ok "excluding by hand and by range agree"
+else
+	bad "excluding by hand and by range agree" "^base main counted $n_caret"
+fi
+
+expect "the newest commit comes first" "the mainline" gp rev-list --oneline -n 1 main
+expect "and reversing turns the walk around" "the base" \
+	gp rev-list --oneline --reverse -n 1 base
+expect "the limit is taken from the newest end before the turn" "the mainline" \
+	gp rev-list --oneline --reverse -n 1 main
+
+# the merge base is the commit the two branches last shared
+baseoid=$(gp rev-parse base)
+expect "the merge base of two branches is where they parted" "$baseoid" \
+	gp merge-base main side
+expect_status "an ancestor is one" 0 gp merge-base --is-ancestor base side
+expect_status "a commit that is not an ancestor is not one" 1 \
+	gp merge-base --is-ancestor side main
+
+# a merge commit is one commit with two parents, which is the shape every
+# question above is asked about
+gp merge --no-ff -m "join the side" side >/dev/null 2>&1
+n_par=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$n_par" = 2 ]; then
+	ok "a merge commit records both parents"
+else
+	bad "a merge commit records both parents" "found $n_par parent lines"
+fi
+expect "and the branch it brought in is on the walk" "the side" \
+	gp rev-list --oneline --no-merges HEAD
+n_merges=$(gp rev-list --count --merges HEAD)
+n_plain=$(gp rev-list --count --no-merges HEAD)
+if [ "$n_merges" = 1 ] && [ "$n_plain" = 3 ]; then
+	ok "a merge can be asked for or left out of a walk"
+else
+	bad "a merge can be asked for or left out of a walk" \
+		"merges=$n_merges plain=$n_plain"
+fi
+expect "the merge base of a branch that is wholly merged is its tip" \
+	"$(gp rev-parse side)" gp merge-base main side
+
+# histories that never met have no commit in common, and that is an empty
+# answer rather than an empty line
+orphantree=$(gp write-tree)
+orphan=$(gp commit-tree "$orphantree" -m "an unrelated root")
+gp update-ref refs/heads/orphan "$orphan" >/dev/null 2>&1
+expect_status "two histories that never met have no merge base" 1 \
+	gp merge-base main orphan
+orphanout=$(gp merge-base main orphan 2>&1)
+if [ -z "$orphanout" ]; then
+	ok "and an empty answer prints nothing at all"
+else
+	bad "and an empty answer prints nothing at all" "got [$orphanout]"
+fi
+
+if command -v git >/dev/null 2>&1; then
+	# the same questions of git, on the same objects
+	for range in "base..main" "base..side" "main...side" "--all" \
+		"--merges HEAD" "--no-merges HEAD"; do
+		gp_n=$(gp rev-list --count $range 2>&1)
+		git_n=$(git --git-dir="$rv/.gitprompt" rev-list --count $range 2>&1)
+		if [ "$gp_n" = "$git_n" ]; then
+			ok "rev-list --count $range is git's answer"
+		else
+			bad "rev-list --count $range is git's answer" \
+				"gitprompt $gp_n, git $git_n"
+		fi
+	done
+	gp_bases=$(gp merge-base --all main side | sort)
+	git_bases=$(git --git-dir="$rv/.gitprompt" merge-base --all main side 2>&1 | tr -d '\r' | sort)
+	if [ "$gp_bases" = "$git_bases" ]; then
+		ok "merge-base --all finds the ones git finds"
+	else
+		bad "merge-base --all finds the ones git finds" \
+			"gitprompt [$gp_bases] git [$git_bases]"
+	fi
+fi
+
+# ------------------------------------------------------------------
 say "a branch that exists only on the remote"
 
 # A clone names only the default branch locally; every other branch arrives as
@@ -2875,10 +3008,14 @@ expect "the branch's own log is still there to ask for" "branch: Created" \
 	gp reflog side
 
 # A detach is a move of HEAD and of no branch at all, which is the case a
-# reflog kept only per-branch could not record however it was written.
-gp checkout "$(gp rev-parse HEAD~1)" >/dev/null 2>&1
+# reflog kept only per-branch could not record however it was written.  The
+# commit is named outright rather than reached by walking back from HEAD,
+# because HEAD is the root commit here and has no parent to walk to.
+sideoid=$(gp rev-parse side)
+gp checkout "$sideoid" >/dev/null 2>&1
 expect "a detach is recorded against HEAD" "checkout: moving from main to" \
 	gp reflog
+expect "and names the commit it detached at" "to $sideoid" gp reflog
 gp checkout main >/dev/null 2>&1
 cd "$back" || exit 2
 

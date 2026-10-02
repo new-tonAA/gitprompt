@@ -109,7 +109,11 @@ static int resolve_refname(struct repo *r, const char *name, oid_t *out)
 static const char *apply_ancestry(struct repo *r, const oid_t *start,
 				  const char *p, oid_t *out)
 {
-	oid_t cur = *start;
+	oid_t cur;
+
+	/* walking parents needs a commit, and a tag name is not one */
+	if (commit_peel(r, start, OBJ_COMMIT, &cur) < 0)
+		return NULL;
 
 	while (*p == '^' || *p == '~') {
 		char op = *p++;
@@ -169,16 +173,31 @@ int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 		enum obj_type want = OBJ_NONE;
 		if (peel) {
 			char *close = strchr(peel + 2, '}');
+			int bare, after;
+
 			if (!close) {
 				free(name);
 				return -1;
 			}
+			/* "^{}" is the whole peel, with no type named */
+			bare = close == peel + 2;
+			after = close[1] != '\0';
 			*close = '\0';
 			want = obj_type_from_name(peel + 2);
-			if (want == OBJ_NONE) {
+			if (!bare && want == OBJ_NONE) {
 				free(name);
 				return -1;
 			}
+			if (after) {
+				/* "A^{commit}~1" peels and then walks; walking the peel
+				 * is not read here, and answering with the peel alone
+				 * would be an answer to a different question. */
+				gp_error("bad revision: %s", rev);
+				free(name);
+				return -1;
+			}
+			/* the name ends where the suffix starts, not where it ends */
+			*peel = '\0';
 			{
 				oid_t tmp;
 				char *basepart = name;   /* now NUL-terminated */
@@ -331,6 +350,30 @@ static int walk_cmp(const void *a, const void *b)
 	return x->seq < y->seq ? -1 : (x->seq > y->seq ? 1 : 0);
 }
 
+static void walk_ctx_init(struct walk_ctx *c, struct repo *r)
+{
+	memset(c, 0, sizeof *c);
+	c->r = r;
+}
+
+static void walk_ctx_clear(struct walk_ctx *c)
+{
+	free(c->items);
+	oid_array_clear(&c->seen);
+}
+
+/* mark every commit reachable from `tips` as walked */
+static void walk_ctx_push_all(struct walk_ctx *c, const struct oid_array *tips)
+{
+	size_t i;
+
+	for (i = 0; i < tips->nr; i++) {
+		oid_t peeled;
+		if (commit_peel(c->r, &tips->oid[i], OBJ_COMMIT, &peeled) == 0)
+			walk_push(c, &peeled);
+	}
+}
+
 /*
  * Every commit reachable from `tips`, newest first.  git's own default is
  * reverse chronological with the traversal order as a tie-break, which is
@@ -343,14 +386,8 @@ void walk_commits(struct repo *r, const struct oid_array *tips,
 	struct walk_ctx c;
 	size_t i;
 
-	memset(&c, 0, sizeof c);
-	c.r = r;
-
-	for (i = 0; i < tips->nr; i++) {
-		oid_t peeled;
-		if (commit_peel(r, &tips->oid[i], OBJ_COMMIT, &peeled) == 0)
-			walk_push(&c, &peeled);
-	}
+	walk_ctx_init(&c, r);
+	walk_ctx_push_all(&c, tips);
 
 	if (c.nr > 1)
 		qsort(c.items, c.nr, sizeof(*c.items), walk_cmp);
@@ -362,8 +399,247 @@ void walk_commits(struct repo *r, const struct oid_array *tips,
 		commit_release(&cm);
 	}
 
-	free(c.items);
-	oid_array_clear(&c.seen);
+	walk_ctx_clear(&c);
+}
+
+/*
+ * Every commit reachable from `tip`, `tip` included.  The order is the walk's
+ * own, not sorted; a caller that wants newest first sorts for itself.
+ */
+void commit_ancestors(struct repo *r, const oid_t *tip, struct oid_array *out)
+{
+	struct walk_ctx c;
+	oid_t peeled;
+	size_t i;
+
+	/* a tag names a commit without being one; the walk needs the commit */
+	if (commit_peel(r, tip, OBJ_COMMIT, &peeled) < 0)
+		return;
+
+	walk_ctx_init(&c, r);
+	walk_push(&c, &peeled);
+	for (i = 0; i < c.nr; i++)
+		oid_array_append(out, &c.items[i].oid);
+	walk_ctx_clear(&c);
+}
+
+/*
+ * The best common ancestors of two commits: the ones reachable from both that
+ * are not themselves an ancestor of another one.  Histories that never meet
+ * have none.
+ *
+ * Each common ancestor visited strikes out everything below it, so a commit
+ * already struck out needs no walk of its own: whoever struck it out walked
+ * its history too.  The number of walks is therefore the number of answers,
+ * not the size of the shared history.
+ */
+size_t merge_bases(struct repo *r, const oid_t *a, const oid_t *b,
+		   struct oid_array *out)
+{
+	struct oid_array anc_a = OID_ARRAY_INIT, anc_b = OID_ARRAY_INIT;
+	struct oid_array dead = OID_ARRAY_INIT;
+	size_t i, j;
+
+	commit_ancestors(r, a, &anc_a);
+	commit_ancestors(r, b, &anc_b);
+	oid_array_clear(out);
+
+	for (i = 0; i < anc_a.nr; i++) {
+		struct oid_array below = OID_ARRAY_INIT;
+
+		if (!oid_array_contains(&anc_b, &anc_a.oid[i]))
+			continue;
+		if (oid_array_contains(&dead, &anc_a.oid[i]))
+			continue;
+
+		commit_ancestors(r, &anc_a.oid[i], &below);
+		for (j = 0; j < below.nr; j++) {
+			if (oid_equal(&below.oid[j], &anc_a.oid[i]))
+				continue;
+			if (!oid_array_contains(&anc_b, &below.oid[j]))
+				continue;
+			if (!oid_array_contains(&dead, &below.oid[j]))
+				oid_array_append(&dead, &below.oid[j]);
+		}
+		oid_array_clear(&below);
+	}
+
+	for (i = 0; i < anc_a.nr; i++)
+		if (oid_array_contains(&anc_b, &anc_a.oid[i]) &&
+		    !oid_array_contains(&dead, &anc_a.oid[i]))
+			oid_array_append(out, &anc_a.oid[i]);
+
+	oid_array_clear(&anc_a);
+	oid_array_clear(&anc_b);
+	oid_array_clear(&dead);
+	return out->nr;
+}
+
+/* ------------------------------------------------------------------ */
+/* revision argument lists                                             */
+
+/* one end of a range: an empty end means HEAD, the way git reads it */
+static int rev_end(struct repo *r, const char *text, size_t len, oid_t *out)
+{
+	char *name;
+	int rc;
+
+	if (!len)
+		return resolve_rev(r, "HEAD", out);
+	name = xstrndup(text, len);
+	rc = resolve_rev(r, name, out);
+	free(name);
+	return rc;
+}
+
+/*
+ * Read a revision argument list the way git's walkers do.  A plain revision
+ * names what to include, ^<rev> names what to leave out, and the two range
+ * shorthands expand into those same two sets:
+ *
+ *   A..B    B and its ancestors, less A and its ancestors
+ *   A...B   what A or B can reach but the other cannot, which is two sets
+ *           rather than one, so it is kept apart
+ *
+ * A...B is only ever one range, because folding two of them into a single
+ * include/exclude pair is not something the shorthand can express.
+ */
+int rev_list_parse(struct repo *r, int argc, char **argv, struct rev_list *out)
+{
+	int i;
+
+	memset(out, 0, sizeof *out);
+	for (i = 0; i < argc; i++) {
+		const char *arg = argv[i];
+		const char *dots;
+		oid_t oid;
+
+		if (arg[0] == '^') {
+			if (resolve_rev(r, arg + 1, &oid) < 0) {
+				gp_error("unknown revision: %s", arg);
+				return -1;
+			}
+			oid_array_append(&out->exclude, &oid);
+			continue;
+		}
+
+		dots = strstr(arg, "...");
+		if (dots) {
+			oid_t left, right;
+
+			if (out->has_second) {
+				gp_error("only one A...B range at a time");
+				return -1;
+			}
+			if (rev_end(r, arg, (size_t)(dots - arg), &left) < 0 ||
+			    rev_end(r, dots + 3, strlen(dots + 3), &right) < 0) {
+				gp_error("bad revision range: %s", arg);
+				return -1;
+			}
+			oid_array_append(&out->include, &left);
+			oid_array_append(&out->exclude, &right);
+			oid_array_append(&out->include2, &right);
+			oid_array_append(&out->exclude2, &left);
+			out->has_second = 1;
+			continue;
+		}
+
+		dots = strstr(arg, "..");
+		if (dots) {
+			oid_t left, right;
+
+			if (rev_end(r, arg, (size_t)(dots - arg), &left) < 0 ||
+			    rev_end(r, dots + 2, strlen(dots + 2), &right) < 0) {
+				gp_error("bad revision range: %s", arg);
+				return -1;
+			}
+			oid_array_append(&out->exclude, &left);
+			oid_array_append(&out->include, &right);
+			continue;
+		}
+
+		if (resolve_rev(r, arg, &oid) < 0) {
+			gp_error("unknown revision: %s", arg);
+			return -1;
+		}
+		oid_array_append(&out->include, &oid);
+	}
+	return 0;
+}
+
+void rev_list_release(struct rev_list *l)
+{
+	oid_array_clear(&l->include);
+	oid_array_clear(&l->exclude);
+	oid_array_clear(&l->include2);
+	oid_array_clear(&l->exclude2);
+}
+
+/* commits `include` can reach that `exclude` cannot, newest first */
+static void rev_list_side(struct repo *r, const struct oid_array *include,
+			  const struct oid_array *exclude,
+			  struct walk_ctx *out)
+{
+	struct walk_ctx cut;
+	size_t i, j;
+
+	walk_ctx_init(&cut, r);
+	walk_ctx_push_all(&cut, exclude);
+
+	walk_ctx_init(out, r);
+	walk_ctx_push_all(out, include);
+
+	for (i = j = 0; i < out->nr; i++) {
+		if (oid_array_contains(&cut.seen, &out->items[i].oid))
+			continue;
+		out->items[j++] = out->items[i];
+	}
+	out->nr = j;
+	walk_ctx_clear(&cut);
+}
+
+void rev_list_run(struct repo *r, const struct rev_list *l,
+		  void (*fn)(const oid_t *, const struct commit *, void *),
+		  void *data)
+{
+	struct walk_ctx a, b;
+	size_t i, n;
+
+	rev_list_side(r, &l->include, &l->exclude, &a);
+	walk_ctx_init(&b, r);
+	if (l->has_second)
+		rev_list_side(r, &l->include2, &l->exclude2, &b);
+
+	/*
+	 * The two sides of A...B exclude each other's history, so no commit can
+	 * be on both and the lists simply join.
+	 */
+	if (b.nr) {
+		if (a.nr + b.nr > a.alloc) {
+			a.alloc = a.nr + b.nr;
+			a.items = xrealloc(a.items, a.alloc * sizeof(*a.items));
+		}
+		for (i = 0; i < b.nr; i++)
+			a.items[a.nr + i] = b.items[i];
+		a.nr += b.nr;
+	}
+	/* the two walks counted from zero each, so renumber before relying on it */
+	for (i = 0; i < a.nr; i++)
+		a.items[i].seq = i;
+
+	if (a.nr > 1)
+		qsort(a.items, a.nr, sizeof(*a.items), walk_cmp);
+
+	n = a.nr;
+	for (i = 0; i < n; i++) {
+		struct commit cm = COMMIT_INIT;
+		read_commit(r, &a.items[i].oid, &cm);
+		fn(&a.items[i].oid, &cm, data);
+		commit_release(&cm);
+	}
+
+	walk_ctx_clear(&a);
+	walk_ctx_clear(&b);
 }
 
 int is_ancestor(struct repo *r, const oid_t *ancestor, const oid_t *tip)

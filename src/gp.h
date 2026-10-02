@@ -617,6 +617,35 @@ void walk_commits(struct repo *r, const struct oid_array *tips,
 		  void (*fn)(const oid_t *, const struct commit *, void *),
 		  void *data);
 int is_ancestor(struct repo *r, const oid_t *ancestor, const oid_t *tip);
+/* every commit reachable from tip, tip included, in walk order */
+void commit_ancestors(struct repo *r, const oid_t *tip, struct oid_array *out);
+/*
+ * The best common ancestors of two commits: reachable from both, and not an
+ * ancestor of another one.  Histories that never meet have none.  out is
+ * cleared first; the answer is returned and left in walk order.
+ */
+size_t merge_bases(struct repo *r, const oid_t *a, const oid_t *b,
+		   struct oid_array *out);
+
+/*
+ * A revision argument list.  A plain revision and ^<rev> land in include and
+ * exclude; A..B splits between them; A...B needs a second pair of its own,
+ * because what it asks for is not expressible as one include/exclude pair.
+ */
+struct rev_list {
+	struct oid_array include;
+	struct oid_array exclude;
+	struct oid_array include2;
+	struct oid_array exclude2;
+	int has_second;
+};
+int rev_list_parse(struct repo *r, int argc, char **argv, struct rev_list *out);
+void rev_list_release(struct rev_list *l);
+/* the commits the argument list names, newest first */
+void rev_list_run(struct repo *r, const struct rev_list *l,
+		  void (*fn)(const oid_t *, const struct commit *, void *),
+		  void *data);
+
 int commit_peel(struct repo *r, const oid_t *oid, enum obj_type want, oid_t *out);
 void read_commit(struct repo *r, const oid_t *oid, struct commit *c);
 void read_tree_obj(struct repo *r, const oid_t *oid, struct tree *t);
@@ -800,6 +829,8 @@ int cmd_ls_tree(struct repo *, int, char **);
 int cmd_write_tree(struct repo *, int, char **);
 int cmd_commit_tree(struct repo *, int, char **);
 int cmd_rev_parse(struct repo *, int, char **);
+int cmd_rev_list(struct repo *, int, char **);
+int cmd_merge_base(struct repo *, int, char **);
 int cmd_update_ref(struct repo *, int, char **);
 int cmd_symbolic_ref(struct repo *, int, char **);
 int cmd_count_objects(struct repo *, int, char **);

@@ -267,7 +267,7 @@ const struct command commands[] = {
 	  "show [--stat] <rev|prompt-id>" },
 	{ "diff",       cmd_diff,       "Show changes between commits, index and work tree",
 	  "diff [--cached] [--stat] [<rev>] [<rev>]" },
-	{ "reflog",     cmd_reflog,     "Show where refs have pointed",
+	{ "reflog",     cmd_reflog,     "Show where HEAD has been, or a ref has pointed",
 	  "reflog [<ref>]" },
 
 	/* grow, mark and tweak */
@@ -312,6 +312,13 @@ const struct command commands[] = {
 	  "commit-tree <tree> [-p <parent>]... [-m <msg>]" },
 	{ "rev-parse",        cmd_rev_parse,        "Resolve a revision to an object id",
 	  "rev-parse [--short] [<rev>...]" },
+	{ "rev-list",         cmd_rev_list,         "List the commits a revision names",
+	  "rev-list [--all] [--count] [--reverse] [-n N] [--oneline] [--parents]\n"
+	  "   [--merges|--no-merges] <rev>...\n"
+	  "   <rev> includes it and its ancestors, ^<rev> leaves one out, and\n"
+	  "   A..B and A...B are the two shorthands for doing that." },
+	{ "merge-base",       cmd_merge_base,       "Find the best common ancestor of two commits",
+	  "merge-base [--all] [--is-ancestor] <a> <b>" },
 	{ "update-ref",       cmd_update_ref,       "Set a ref to an object id",
 	  "update-ref <ref> <new> [<old>]" },
 	{ "symbolic-ref",     cmd_symbolic_ref,     "Read or set a symbolic ref",

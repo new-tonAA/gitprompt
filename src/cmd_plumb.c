@@ -562,6 +562,195 @@ int cmd_rev_parse(struct repo *r, int argc, char **argv)
 }
 
 /* ------------------------------------------------------------------ */
+/* rev-list / merge-base                                               */
+
+struct rl_item {
+	oid_t oid;
+	struct oid_array parents;
+};
+
+struct rl_list {
+	struct rl_item *e;
+	size_t nr, alloc;
+};
+
+static void rl_collect(const oid_t *oid, const struct commit *c, void *data)
+{
+	struct rl_list *l = data;
+	size_t i;
+
+	if (l->nr == l->alloc) {
+		l->alloc = l->alloc ? l->alloc * 2 : 64;
+		l->e = xrealloc(l->e, l->alloc * sizeof(*l->e));
+	}
+	l->e[l->nr].oid = *oid;
+	memset(&l->e[l->nr].parents, 0, sizeof(l->e[l->nr].parents));
+	for (i = 0; i < c->parents.nr; i++)
+		oid_array_append(&l->e[l->nr].parents, &c->parents.oid[i]);
+	l->nr++;
+}
+
+static void rl_one(struct repo *r, const struct rl_item *it, int oneline,
+		   int parents)
+{
+	char hex[GP_SHA1_HEXSZ + 1];
+	size_t i;
+
+	oid_hex(&it->oid, hex);
+	if (oneline)
+		hex[7] = '\0';
+	fputs(hex, stdout);
+
+	if (parents) {
+		for (i = 0; i < it->parents.nr; i++) {
+			char p[GP_SHA1_HEXSZ + 1];
+
+			/* parents stay whole even when the commit is abbreviated */
+			oid_hex(&it->parents.oid[i], p);
+			printf(" %s", p);
+		}
+	}
+	if (oneline) {
+		struct commit c = COMMIT_INIT;
+		char *subj;
+
+		read_commit(r, &it->oid, &c);
+		subj = commit_message_line(&c);
+		printf(" %s", subj ? subj : "");
+		free(subj);
+		commit_release(&c);
+	}
+	putchar('\n');
+}
+
+/* every ref, plus HEAD, as tips: what git reads "--all" as */
+static void rl_add_ref(const char *unused, const oid_t *oid, void *data)
+{
+	struct oid_array *tips = data;
+
+	(void)unused;
+	oid_array_append(tips, oid);
+}
+
+int cmd_rev_list(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	struct rev_list rl;
+	struct rl_list l;
+	const char *n;
+	int oneline, parents, merges, no_merges, all;
+	size_t i, limit;
+
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--oneline", "--parents", "--count", "--reverse", "--all",
+		"--merges", "--no-merges", "-n=", "--max-count=", NULL });
+
+	oneline = opts_flag(&o, "--oneline");
+	parents = opts_flag(&o, "--parents");
+	all = opts_flag(&o, "--all");
+	merges = opts_flag(&o, "--merges");
+	no_merges = opts_flag(&o, "--no-merges");
+	if (merges && no_merges)
+		gp_die("rev-list: --merges and --no-merges are opposites");
+
+	if (rev_list_parse(r, o.nargs, o.args, &rl) < 0)
+		return 128;
+	if (all) {
+		oid_t head;
+
+		refs_list(&r->refs, "refs/", rl_add_ref, &rl.include);
+		refs_list_packed(&r->refs, "refs/", rl_add_ref, &rl.include);
+		if (refs_head(&r->refs, &head) == 0)
+			oid_array_append(&rl.include, &head);
+	}
+	if (!rl.include.nr) {
+		rev_list_release(&rl);
+		gp_die("rev-list: expected a revision, or --all");
+	}
+
+	memset(&l, 0, sizeof l);
+	rev_list_run(r, &rl, rl_collect, &l);
+	rev_list_release(&rl);
+
+	n = opts_value(&o, "-n") ? opts_value(&o, "-n")
+				 : opts_value(&o, "--max-count");
+	limit = n ? (size_t)atol(n) : 0;
+
+	if (opts_flag(&o, "--count")) {
+		size_t counted = 0;
+
+		for (i = 0; i < l.nr; i++) {
+			if (no_merges && l.e[i].parents.nr > 1)
+				continue;
+			if (merges && l.e[i].parents.nr <= 1)
+				continue;
+			counted++;
+		}
+		if (limit && counted > limit)
+			counted = limit;
+		printf("%zu\n", counted);
+	} else {
+		size_t *sel = l.nr ? xmalloc(l.nr * sizeof(*sel)) : NULL;
+		size_t nsel = 0, k;
+
+		/* the limit bites before the order is turned around, as in git */
+		for (i = 0; i < l.nr && (!limit || nsel < limit); i++) {
+			if (no_merges && l.e[i].parents.nr > 1)
+				continue;
+			if (merges && l.e[i].parents.nr <= 1)
+				continue;
+			sel[nsel++] = i;
+		}
+		for (k = 0; k < nsel; k++) {
+			size_t at = opts_flag(&o, "--reverse")
+					    ? sel[nsel - 1 - k] : sel[k];
+
+			rl_one(r, &l.e[at], oneline, parents);
+		}
+		free(sel);
+	}
+
+	for (i = 0; i < l.nr; i++)
+		oid_array_clear(&l.e[i].parents);
+	free(l.e);
+	return 0;
+}
+
+int cmd_merge_base(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	struct oid_array bases = OID_ARRAY_INIT;
+	oid_t a, b;
+	size_t i;
+
+	opts_init(&o, argc, argv,
+		  (const char *const[]){ "--all", "--is-ancestor", NULL });
+	if (o.nargs != 2)
+		gp_die("merge-base: expected two commits");
+	if (resolve_rev(r, o.args[0], &a) < 0 ||
+	    resolve_rev(r, o.args[1], &b) < 0)
+		gp_die("merge-base: not a valid object name");
+
+	if (opts_flag(&o, "--is-ancestor"))
+		return is_ancestor(r, &a, &b) ? 0 : 1;
+
+	if (!merge_bases(r, &a, &b, &bases)) {
+		oid_array_clear(&bases);
+		return 1;
+	}
+	for (i = 0; i < bases.nr; i++) {
+		char hex[GP_SHA1_HEXSZ + 1];
+
+		oid_hex(&bases.oid[i], hex);
+		printf("%s\n", hex);
+		if (!opts_flag(&o, "--all"))
+			break;
+	}
+	oid_array_clear(&bases);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* update-ref / symbolic-ref / for-each-ref                            */
 
 int cmd_update_ref(struct repo *r, int argc, char **argv)

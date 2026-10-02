@@ -484,8 +484,9 @@ names are git's, and the behaviour is meant to match:
   `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
-  `commit-tree`, `rev-parse`, `update-ref`, `symbolic-ref`, `for-each-ref`,
-  `ls-files`, `count-objects`, `verify-objects`, `check-ref-format`
+  `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
+  `symbolic-ref`, `for-each-ref`, `ls-files`, `count-objects`,
+  `verify-objects`, `check-ref-format`
 - **maintenance** — `gc`, `fsck`, `stats`, `help`, `version`
 
 ## Transports
@@ -533,11 +534,22 @@ one that says no:
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
   binary mode so that a newline written out is a newline and not a carriage
   return before it, and the sockets in `net.c`, which winsock provides on
-  Windows and libc on Unix. Only the Windows build has been run.
+  Windows and libc on Unix. CI builds and runs the suite on Linux and macOS as
+  well as Windows, which is the only place the Unix builds are exercised: the
+  development machine has one compiler for one of the three.
+- **The commands git has that gitprompt does not.** git 2.49 lists 176; a
+  gitprompt built from this tree lists 54. Missing are `stash`, `rebase`,
+  `cherry-pick`, `revert`, `bisect`, `blame`, `clean`, `grep`,
+  `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
+  and `range-diff`, along with the layers under them -- packfile writing of the
+  kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
+  and `rerere`. The object model, the index, committing, history, branches,
+  merging including conflicts, tags, reset, the ref plumbing, remotes and the
+  prompt layer are all here.
 
 ## Status
 
-The end-to-end suite passes: **535 checks, 0 failures**.
+The end-to-end suite passes: **609 checks, 0 failures**.
 
 ```console
 $ make test
@@ -548,10 +560,12 @@ prompt and a session can be given, a task recorded in sessions that were
 interleaved and returned to, committing, reconstruction (ordering, session
 boundaries, and the flat chronology), the plan `rerun` would execute, the agent
 conversations it maps sessions to, and what `response` and `rerun --record` keep
-and how every rendering shows it, branches, tags, history editing, merges
+and how every rendering shows it, branches, tags, history editing, the reflog of
+where HEAD has been, the commits a range of revisions reaches, merges
 including conflicts
 and `--abort`, merges that follow a file that moved, `status` and `diff` on a
-move, the commit editor, per-command option validation, local remotes, serving
+move, the commit editor, per-command option validation, that the replay plan and
+a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
 the section that matters most, since a gitprompt repository is meant to be an
 ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
