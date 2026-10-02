@@ -3337,6 +3337,275 @@ expect_file "and the mainline's own" "$rbm/d.txt"
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "a commit undone"
+
+# A revert is a replay read the other way up: the commit is the base and the
+# tree of the parent it is measured against is theirs, so the change lands
+# subtracted rather than added.  The prompt rule needs no exception here, and
+# that is the part worth pinning down -- the undo is a commit like any other, so
+# it carries the prompts its new tree adds, which is to say that undoing a
+# commit which introduced a prompt takes the prompt away with the code.  Nothing
+# is copied: the prompt moves because it is a file in the tree.
+rv=$work/revert
+rm -rf "$rv"
+mkdir -p "$rv" || exit 2
+cd "$rv" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rv@example.com
+gp config user.name "Revert Tester"
+gp session start -t "the work to undo" >/dev/null 2>&1
+echo base > base.txt
+gp add base.txt >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+
+gp prompt -m "the prompt behind the undone commit" >/dev/null 2>&1
+undopfile=$(ls prompts/*.md)
+echo undone > undone.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to undo" >/dev/null 2>&1
+undo=$(gp rev-parse HEAD)
+undop=$(gp show HEAD | sed -n 's/^Prompts: //p')
+
+expect_status "reverting a commit succeeds" 0 gp revert "$undo"
+expect_absent "the file it added is gone" "$rv/undone.txt"
+expect "the undo says which commit it undid" "This reverts commit $undo." \
+	gp show HEAD
+expect "and its subject names that commit" 'Revert "the commit to undo"' \
+	gp show HEAD
+expect "the undo is the reverter's own commit, not the author's" \
+	"Author: Revert Tester <rv@example.com>" gp show HEAD
+expect "the reflog names it the way git does" \
+	'revert: Revert "the commit to undo"' gp reflog
+expect_absent "and the prompt it introduced goes with the code" \
+	"$rv/$undopfile"
+expect_out "so the undo carries no prompt of its own" "0" pcount HEAD
+
+# the same commit again has nothing left to take away, which is nothing to
+# record: stopping is what git does, and --skip is how it is left out
+r1=$(gp rev-parse HEAD)
+expect "undoing the same commit twice stops because the result is empty" \
+	"now empty" gp revert "$undo"
+expect_status "and --skip leaves it out" 0 gp revert --skip
+expect_absent "and the state is gone" "$rv/.gitprompt/sequencer"
+expect_out "and the skipped undo left HEAD where it was" "$r1" gp rev-parse HEAD
+
+# reverting the undo is the way back, and git has a word for it
+expect_status "reverting the undo succeeds" 0 gp revert HEAD
+expect "git's word for it is Reapply" 'Reapply "the commit to undo"' \
+	gp show HEAD
+expect_file "the file comes back" "$rv/undone.txt"
+expect_file "and so does the prompt" "$rv/$undopfile"
+expect "it is the prompt that was undone, not a new one" "id: $undop" \
+	cat "$undopfile"
+expect_out "and the commit carries it again" "1" pcount HEAD
+expect "the reflog has the word too" 'revert: Reapply "the commit to undo"' \
+	gp reflog
+# the round trip is exact, which is the claim the whole rule rests on
+headtree=$(gp cat-file -p HEAD | sed -n 's/^tree //p')
+undotree=$(gp cat-file -p "$undo" | sed -n 's/^tree //p')
+if [ "$headtree" = "$undotree" ]; then
+	ok "the round trip lands on the tree it started from"
+else
+	bad "the round trip lands on the tree it started from" \
+		"$headtree vs $undotree"
+fi
+cd "$back" || exit 2
+
+# a merge has no single side to undo, so -m says which parent the undo is
+# measured against and is required; a number that is not a parent is refused
+rvm=$work/revert-merge
+rm -rf "$rvm"
+mkdir -p "$rvm" || exit 2
+cd "$rvm" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rvm@example.com
+gp config user.name "Merge Revert Tester"
+echo base > base.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+echo mainline > m.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the mainline's work" >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+echo sidework > s.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the side's work" >/dev/null 2>&1
+gp merge main --no-ff -m "join the mainline" >/dev/null 2>&1
+join=$(gp rev-parse HEAD)
+nomain=$(gp revert "$join" 2>&1)
+case "$nomain" in
+*"is a merge but no -m option was given"*)
+	ok "undoing a merge without -m is refused" ;;
+*) bad "undoing a merge without -m is refused" "got [$nomain]" ;;
+esac
+expect "and the refusal says what -m is for" "which side" gp revert "$join"
+expect "a parent number the commit does not have is refused" \
+	"does not have parent 3" gp revert -m 3 "$join"
+# -m 2 makes the parent that merged in the mainline, so the side's own work is
+# what comes away and the mainline's stays
+expect_status "undoing the merge against parent 2 succeeds" 0 \
+	gp revert -m 2 "$join"
+expect "the undo names the merge by subject" 'Revert "Merge join the mainline"' \
+	gp show HEAD
+expect_absent "the side the mainline is not is undone" "$rvm/s.txt"
+expect_file "and the mainline's own file stays" "$rvm/m.txt"
+cd "$back" || exit 2
+
+# a merge undo that conflicts keeps -m in the sequencer, so --continue can
+# finish an undo it did not start: this is the on-disk round trip of mainline
+rvmc=$work/revert-merge-conflict
+rm -rf "$rvmc"
+mkdir -p "$rvmc" || exit 2
+cd "$rvmc" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rvmc@example.com
+gp config user.name "Merge Conflict Tester"
+printf 'one\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+echo m > m.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the mainline" >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+echo s > s.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the side's work" >/dev/null 2>&1
+gp merge main --no-ff -m "join the mainline" >/dev/null 2>&1
+join=$(gp rev-parse HEAD)
+echo changed > s.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "a later edit of the side's file" >/dev/null 2>&1
+before=$(gp rev-parse HEAD)
+
+mcout=$(gp revert -m 2 "$join" 2>&1)
+mcdone=1
+case "$mcout" in
+*"could not apply"*) mcdone=0 ;;
+esac
+if [ "$mcdone" = 0 ]; then
+	ok "an undo of a merge that conflicts names the commit it could not undo"
+else
+	bad "an undo of a merge that conflicts names the commit it could not undo" \
+		"got [$mcout]"
+fi
+expect "the conflict is the deletion the undo wants" "deleted by them" gp status
+expect_out "and -m is what the sequencer kept for the finish" "2" \
+	cat "$rvmc/.gitprompt/sequencer/mainline"
+gp rm s.txt >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+expect_status "with the deletion taken, --continue finishes the undo" 0 \
+	gp revert --continue
+expect_absent "and the file the undo wanted gone is gone" "$rvmc/s.txt"
+expect_file "and the mainline's own file is here" "$rvmc/m.txt"
+expect_file "and the file the two branches shared" "$rvmc/f.txt"
+expect_absent "and the state is gone" "$rvmc/.gitprompt/sequencer"
+expect "the finished undo is on the reflog" \
+	'revert: Revert "Merge join the mainline"' gp reflog
+if [ "$(gp rev-parse HEAD~1)" = "$before" ]; then
+	ok "and it was recorded on top of where the branch was"
+else
+	bad "and it was recorded on top of where the branch was" \
+		"$before vs $(gp rev-parse HEAD~1)"
+fi
+cd "$back" || exit 2
+
+# a root commit has nothing to measure against but the empty tree, so undoing
+# it takes away everything it introduced -- the prompt included
+rvr=$work/revert-root
+rm -rf "$rvr"
+mkdir -p "$rvr" || exit 2
+cd "$rvr" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rvr@example.com
+gp config user.name "Root Revert Tester"
+gp session start -t "the only work" >/dev/null 2>&1
+gp prompt -m "the only prompt there is" >/dev/null 2>&1
+rootpfile=$(ls prompts/*.md)
+echo base > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+expect_status "undoing a root commit succeeds" 0 gp revert HEAD
+expect "and says what it undid" 'Revert "the root"' gp show HEAD
+expect_absent "everything it introduced is gone" "$rvr/a.txt"
+expect_absent "and the prompt it introduced with it" "$rvr/$rootpfile"
+cd "$back" || exit 2
+
+# a stopped undo is resolved and continued like a replay, and aborted like one
+rvc=$work/revert-conflict
+rm -rf "$rvc"
+mkdir -p "$rvc" || exit 2
+cd "$rvc" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rvc@example.com
+gp config user.name "Revert Conflict Tester"
+printf 'one\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+printf 'ONE\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to undo" >/dev/null 2>&1
+tor=$(gp rev-parse HEAD)
+printf 'one\nTWO\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "a later edit" >/dev/null 2>&1
+
+cfl=$(gp revert "$tor" 2>&1)
+cfrc=$?
+case "$cfl" in
+*"could not apply"*)
+	ok "an undo that conflicts names the commit it could not undo" ;;
+*) bad "an undo that conflicts names the commit it could not undo" \
+	"got [$cfl]" ;;
+esac
+if [ "$cfrc" = 1 ]; then
+	ok "and it stops"
+else
+	bad "and it stops" "exit $cfrc: $cfl"
+fi
+expect "and --continue says the paths are still unmerged" "unmerged paths" \
+	gp revert --continue
+expect "and status shows the conflict" "both modified" gp status
+expect "a commit while an undo is stopped is refused" "a revert is in progress" \
+	gp commit -m "by hand"
+printf 'resolved\ntwo\n' > f.txt
+gp add f.txt >/dev/null 2>&1
+expect_status "with the conflict resolved, --continue records it" 0 \
+	gp revert --continue
+expect "and the resolution is what landed" "resolved" cat f.txt
+expect_absent "and the state is gone" "$rvc/.gitprompt/sequencer"
+cd "$back" || exit 2
+
+rva=$work/revert-abort
+rm -rf "$rva"
+mkdir -p "$rva" || exit 2
+cd "$rva" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rva@example.com
+gp config user.name "Revert Abort Tester"
+printf 'one\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+printf 'ONE\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to undo" >/dev/null 2>&1
+tor=$(gp rev-parse HEAD)
+printf 'one\nTWO\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "a later edit" >/dev/null 2>&1
+before=$(gp rev-parse HEAD)
+gp revert "$tor" >/dev/null 2>&1
+expect "an abort of a stopped undo says what it aborted" "Revert aborted." \
+	gp revert --abort
+expect "the branch is where it was" "$before" gp rev-parse HEAD
+expect "and the file is back" "TWO" cat f.txt
+expect_absent "and the state is gone" "$rva/.gitprompt/sequencer"
+expect "and there is no undo left to continue" \
+	"no cherry-pick, rebase or revert to continue" gp revert --continue
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 say "the same history reads the same from any clock"
 
 # A history is recorded with an offset and replayed elsewhere, so anything that

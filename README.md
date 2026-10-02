@@ -481,7 +481,7 @@ names are git's, and the behaviour is meant to match:
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`,
-  `cherry-pick`, `rebase`, `tag`, `reset`, `describe`
+  `cherry-pick`, `rebase`, `revert`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
   `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
@@ -538,18 +538,18 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 56. Missing are `stash`, `revert`,
+  gitprompt built from this tree lists 57. Missing are `stash`,
   `bisect`, `blame`, `clean`, `grep`,
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
   and `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
-  merging including conflicts, replaying a commit elsewhere, tags, reset, the
-  ref plumbing, remotes and the prompt layer are all here.
+  merging including conflicts, replaying a commit elsewhere, undoing one, tags,
+  reset, the ref plumbing, remotes and the prompt layer are all here.
 
 ## Status
 
-The end-to-end suite passes: **752 checks, 0 failures** — 649 in
+The end-to-end suite passes: **806 checks, 0 failures** — 703 in
 `test/smoke.sh`, 67 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
@@ -565,7 +565,7 @@ and how every rendering shows it, branches, tags, history editing, the reflog of
 where HEAD has been, the commits a range of revisions reaches, merges
 including conflicts
 and `--abort`, merges that follow a file that moved, commits replayed with
-`cherry-pick` and `rebase` including their conflicts, empty results and
+`cherry-pick`, `rebase` and `revert` including their conflicts, empty results and
 `--continue`/`--skip`/`--abort`, `status` and `diff` on a
 move, the commit editor, per-command option validation, that the replay plan and
 a recorded date read the same from any clock, local remotes, serving
@@ -707,6 +707,32 @@ replay puts `sequencer/` (§7 of [docs/format.md](docs/format.md)), and `commit`
 refuses while either is there: an interrupted replay is finished by
 `cherry-pick`/`rebase --continue`, `--skip` or `--abort`, not by committing by
 hand.
+
+### An undo is that same merge, the other way round
+
+`revert` is not a third merge either. Where a replay adds a commit's change to
+where `HEAD` is, an undo subtracts it, which is the same three-way merge with the
+two sides swapped: the commit itself is the base, the tree `HEAD` holds now is
+ours, and the tree of the parent the change is measured against is theirs. `-m
+<parent number>` names which parent that is on a merge commit — a merge has no
+single side to undo, so it is required there — and a commit with no parents has
+nothing to measure against but the empty tree, so reverting a root commit takes
+away everything it introduced.
+
+The prompt rule needs no exception, and it is worth stating plainly because it
+reads the other way from the commit that is being undone. The undo is a commit
+like any other, so it carries the prompts its new tree adds against its new
+parent — which is to say, undoing a commit that introduced a prompt removes that
+prompt along with the code it described. Reverting the undo (git's wording,
+`Reapply "<subject>"`) brings both back. Nothing copies anything: the prompt
+moves because it is a file in the tree, exactly as it moves under `cherry-pick`
+and `rebase`.
+
+An undo is the reverter's own commit, not the original author's work landing
+elsewhere, so its author and committer are whoever ran it and its message says
+which commit it undid. It conflicts, continues, skips and aborts through the same
+`sequencer/` state the other two use, and `commit` refuses while one is in
+flight.
 
 ### An option belongs to its command
 

@@ -1,11 +1,16 @@
 /*
- * cmd_rebase.c - cherry-pick and rebase.
+ * cmd_rebase.c - cherry-pick, rebase and revert.
  *
- * Both take a commit made somewhere else and replay it here, so both are the
- * three-way merge `merge` already performs read the other way round: what the
- * commit changed is its diff against its own parent, and that diff is applied
- * to the tree HEAD holds now.  The commit's parent is the merge base, HEAD is
- * our side, and the commit is theirs.
+ * All three take a commit made somewhere else and replay it here, so all three
+ * are the three-way merge `merge` already performs read the other way round:
+ * what the commit changed is its diff against its own parent, and that diff is
+ * applied to the tree HEAD holds now.
+ *
+ * A pick and a rebase want that diff as it was made -- the commit's parent is
+ * the merge base, HEAD is our side, and the commit is theirs.  A revert wants
+ * the same diff the other way up: the commit is the base and the parent it is
+ * measured against is theirs, so the change lands subtracted rather than
+ * added.  Which parent that is on a merge is what -m names.
  *
  * A replay is where the prompt rule earns its keep.  A commit carries the
  * prompts it has that its first parent does not, so the replayed commit is
@@ -13,12 +18,15 @@
  * branch that already holds the prompt carries none, and one replayed onto a
  * branch that lacks it brings it along.  Nothing has to be copied from the
  * original commit for that to be true -- it is the same rule every other
- * commit follows, applied to the parent the commit actually has now.
+ * commit follows, applied to the parent the commit actually has now.  That
+ * holds for a revert as much as for a pick: undoing the code undoes the
+ * prompts with it, because the tree says so, not because anything was copied.
  *
  * A replay that stops leaves .gitprompt/sequencer/ behind, holding the commits
- * still to come, the kind of replay, and where HEAD was.  --continue, --skip
- * and --abort read it.  There is no CHERRY_PICK_HEAD beside MERGE_HEAD: a
- * replayed commit has one parent, so there is no second one to name.
+ * still to come, the kind of replay, the parent a revert is measured against,
+ * and where HEAD was.  --continue, --skip and --abort read it.  There is no
+ * CHERRY_PICK_HEAD beside MERGE_HEAD: a replayed commit has one parent, so
+ * there is no second one to name.
  */
 #include "gp.h"
 
@@ -34,7 +42,8 @@
  * index holds for that commit, and --skip drops it.
  */
 struct seq {
-	char *kind;             /* "cherry-pick" or "rebase" */
+	char *kind;             /* "cherry-pick", "rebase" or "revert" */
+	int mainline;           /* a revert's -m: which parent it undoes against */
 	oid_t orig;             /* what HEAD was before the replay began */
 	char *head_name;        /* the branch to move, or NULL when detached */
 	oid_t *todo;
@@ -110,6 +119,15 @@ static void seq_save(struct repo *r, const struct seq *s)
 	write_file(path, s->kind, strlen(s->kind));
 	free(path);
 
+	path = seq_path(r, "mainline");
+	{
+		char *n = xstrfmt("%d\n", s->mainline);
+
+		write_file(path, n, strlen(n));
+		free(n);
+	}
+	free(path);
+
 	path = seq_path(r, "orig-head");
 	oid_write_file(path, &s->orig);
 	free(path);
@@ -156,6 +174,20 @@ static int seq_load(struct repo *r, struct seq *s)
 	}
 	s->kind = xstrndup((const char *)b.b, b.len);
 	trim_ws(s->kind);
+	buf_release(&b);
+	free(path);
+
+	path = seq_path(r, "mainline");
+	buf_init(&b);
+	s->mainline = 1;
+	if (read_file(path, &b) == 0 && b.len) {
+		char *txt = xstrndup((const char *)b.b, b.len);
+		long n = strtol(txt, NULL, 10);
+
+		if (n > 0)
+			s->mainline = (int)n;
+		free(txt);
+	}
 	buf_release(&b);
 	free(path);
 
@@ -370,10 +402,52 @@ static int require_clean(struct repo *r, const char *kind)
 /* replaying one commit                                                */
 
 /*
+ * What a replayed commit says.  A pick keeps the message of the commit it
+ * replayed: the point of a replay is that the work, and the words for it, are
+ * still that author's.
+ *
+ * A revert is a commit of one's own, so it says what it did instead -- the
+ * sentence git writes, naming the subject it undoes and the commit it undoes
+ * by id.  Undoing a revert says "Reapply" rather than "Revert" of a "Revert",
+ * which is the same sentence read the other way and is what keeps a history of
+ * undos legible.
+ */
+static char *replay_message(const char *kind, const struct commit *src,
+			    const oid_t *src_oid)
+{
+	char *line = commit_message_line(src);
+	char *msg;
+
+	if (strcmp(kind, "revert")) {
+		if (src->message && src->message[0]) {
+			size_t n = strlen(src->message);
+
+			msg = src->message[n - 1] == '\n' ? xstrdup(src->message)
+							  : xstrfmt("%s\n", src->message);
+		} else {
+			msg = xstrdup("");
+		}
+	} else if (line && !strncmp(line, "Revert \"", 8) &&
+		   strlen(line) > 9 && line[strlen(line) - 1] == '"') {
+		char *inner = xstrndup(line + 8, strlen(line) - 9);
+
+		msg = xstrfmt("Reapply \"%s\"\n", inner);
+		free(inner);
+	} else {
+		char hex[GP_SHA1_HEXSZ + 1];
+
+		oid_hex(src_oid, hex);
+		msg = xstrfmt("Revert \"%s\"\n\nThis reverts commit %s.\n",
+			      line ? line : "", hex);
+	}
+	free(line);
+	return msg;
+}
+
+/*
  * Record the replayed commit and move HEAD onto it.  It is a commit like any
- * other: one parent, the message and the author the original had -- the point
- * of a replay is that the work is still that author's -- and the prompts it
- * brings in against the parent it has now.
+ * other: one parent, the message and the author it should have, and the
+ * prompts it brings in against the parent it has now.
  */
 static void replay_commit(struct repo *r, const oid_t *src_oid,
 			  const struct index_state *ist, const oid_t *tree,
@@ -397,17 +471,16 @@ static void replay_commit(struct repo *r, const oid_t *src_oid,
 
 	c.tree = *tree;
 	oid_array_append(&c.parents, parent);
-	c.author = src.author ? xstrdup(src.author) : xstrdup(buf_cstr(&ident));
+	/*
+	 * A revert is a commit of one's own -- whoever ran it wrote it -- where a
+	 * pick is somebody else's work landing here, and stays theirs.
+	 */
+	if (!strcmp(kind, "revert") || !src.author)
+		c.author = xstrdup(buf_cstr(&ident));
+	else
+		c.author = xstrdup(src.author);
 	c.committer = xstrdup(buf_cstr(&ident));
-	if (src.message && src.message[0]) {
-		size_t n = strlen(src.message);
-
-		c.message = src.message[n - 1] == '\n'
-				    ? xstrdup(src.message)
-				    : xstrfmt("%s\n", src.message);
-	} else {
-		c.message = xstrdup("");
-	}
+	c.message = replay_message(kind, &src, src_oid);
 	c.session = repo_current_session(r);
 
 	commit_format(&c, &body);
@@ -453,15 +526,15 @@ static void print_replay_line(struct repo *r, const struct commit *c,
  * and -1 on an error.
  */
 static int replay_one(struct repo *r, const oid_t *src_oid,
-		      enum merge_favor favor, const char *kind)
+		      enum merge_favor favor, const char *kind, int mainline)
 {
 	struct commit src = COMMIT_INIT;
 	struct commit hc = COMMIT_INIT;
 	struct merge_result res;
 	struct index_state mindex;
-	oid_t head, head_tree, base_tree, tree;
+	oid_t head, head_tree, base_tree, side_tree, tree;
+	const oid_t *base, *theirs;
 	char *label;
-	int have_base;
 	int rc;
 
 	read_commit(r, src_oid, &src);
@@ -470,22 +543,49 @@ static int replay_one(struct repo *r, const oid_t *src_oid,
 	read_commit(r, &head, &hc);
 	head_tree = hc.tree;
 
-	/* a commit with no parent changed everything it holds, so its base is
-	 * empty and every path is an addition */
-	have_base = src.parents.nr > 0;
-	if (have_base) {
+	/*
+	 * Which side of the merge each tree is on.  A pick applies the commit's
+	 * own diff against its first parent, so that parent is the base and the
+	 * commit is the far side; a commit with no parent changed everything it
+	 * holds, so its base is empty and every path is an addition.  A revert
+	 * applies the same diff subtracted, so the commit is the base and the
+	 * parent it is measured against -- the mainline -m names -- is the far
+	 * side; with no parent at all the far side is the empty tree, which is
+	 * how undoing the first commit of all removes what it added.
+	 */
+	if (!strcmp(kind, "revert")) {
+		base = &src.tree;
+		if (src.parents.nr > 0) {
+			struct commit pc = COMMIT_INIT;
+
+			read_commit(r, &src.parents.oid[mainline - 1], &pc);
+			side_tree = pc.tree;
+			commit_release(&pc);
+		} else {
+			struct index_state none;
+
+			memset(&none, 0, sizeof none);
+			if (write_tree_from_index(r, &none, &side_tree) < 0)
+				gp_die("cannot write the empty tree");
+		}
+		theirs = &side_tree;
+	} else if (src.parents.nr > 0) {
 		struct commit pc = COMMIT_INIT;
 
 		read_commit(r, &src.parents.oid[0], &pc);
 		base_tree = pc.tree;
 		commit_release(&pc);
+		base = &base_tree;
+		theirs = &src.tree;
+	} else {
+		base = NULL;
+		theirs = &src.tree;
 	}
 
 	label = abbrev_oid(src_oid);
 	memset(&res, 0, sizeof res);
 	memset(&mindex, 0, sizeof mindex);
-	merge_trees(r, have_base ? &base_tree : NULL, &head_tree, &src.tree,
-		    &res, &mindex, favor, label);
+	merge_trees(r, base, &head_tree, theirs, &res, &mindex, favor, label);
 	free(label);
 	index_write(&mindex, repo_index_path(r));
 
@@ -611,7 +711,7 @@ static int seq_run(struct repo *r, struct seq *s, enum merge_favor favor)
 {
 	while (s->nr) {
 		oid_t c = s->todo[0];
-		int rc = replay_one(r, &c, favor, s->kind);
+		int rc = replay_one(r, &c, favor, s->kind, s->mainline);
 
 		if (rc < 0)
 			return 1;
@@ -655,13 +755,13 @@ static int seq_continue(struct repo *r, enum merge_favor favor)
 	int rc;
 
 	if (seq_load(r, &s) < 0) {
-		gp_error("no cherry-pick or rebase to continue");
+		gp_error("no cherry-pick, rebase or revert to continue");
 		return 1;
 	}
 	if (!s.nr) {
 		seq_clear(r);
 		seq_release(&s);
-		gp_error("no cherry-pick or rebase to continue");
+		gp_error("no cherry-pick, rebase or revert to continue");
 		return 1;
 	}
 
@@ -711,7 +811,7 @@ static int seq_skip(struct repo *r, enum merge_favor favor)
 
 	if (seq_load(r, &s) < 0 || !s.nr) {
 		seq_release(&s);
-		gp_error("no cherry-pick or rebase to skip");
+		gp_error("no cherry-pick, rebase or revert to skip");
 		return 1;
 	}
 	if (refs_head(&r->refs, &head) < 0)
@@ -739,7 +839,7 @@ static int seq_abort(struct repo *r)
 	int detached;
 
 	if (seq_load(r, &s) < 0) {
-		gp_error("no cherry-pick or rebase to abort");
+		gp_error("no cherry-pick, rebase or revert to abort");
 		return 1;
 	}
 	read_commit(r, &s.orig, &orig);
@@ -763,8 +863,12 @@ static int seq_abort(struct repo *r)
 
 	checkout_tree(r, &orig.tree, 1, 1);
 	seq_clear(r);
-	printf("%s aborted.\n", !strcmp(s.kind, "rebase") ? "Rebase"
-							   : "Cherry-pick");
+	if (!strcmp(s.kind, "rebase"))
+		printf("Rebase aborted.\n");
+	else if (!strcmp(s.kind, "revert"))
+		printf("Revert aborted.\n");
+	else
+		printf("Cherry-pick aborted.\n");
 	commit_release(&orig);
 	free(msg);
 	seq_release(&s);
@@ -807,6 +911,7 @@ int cmd_cherry_pick(struct repo *r, int argc, char **argv)
 
 	memset(&s, 0, sizeof s);
 	s.kind = xstrdup("cherry-pick");
+	s.mainline = 1;
 	s.orig = head;
 	s.head_name = refs_head_target(&r->refs);
 	for (i = 0; i < opts_count(&o); i++) {
@@ -970,6 +1075,7 @@ int cmd_rebase(struct repo *r, int argc, char **argv)
 
 	memset(&s, 0, sizeof s);
 	s.kind = xstrdup("rebase");
+	s.mainline = 1;
 	s.orig = head;
 	s.head_name = refs_head_target(&r->refs);
 	/* rev-list answers newest first, and a replay goes the other way */
@@ -998,5 +1104,116 @@ int cmd_rebase(struct repo *r, int argc, char **argv)
 	rc = seq_run(r, &s, favor);
 	seq_release(&s);
 	free(label);
+	return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* revert                                                              */
+
+/*
+ * Which parent a revert undoes against.  A merge has more than one, and
+ * undoing the merge itself means going back to one of them, so git asks which
+ * rather than guessing -- the guess would silently keep one side's work and
+ * drop the other's.  The number is the one a reader counts, so 1 is the first
+ * parent; a commit with one parent needs no answer.
+ */
+static int revert_mainline(const struct opts *o, const struct commit *c,
+			   const oid_t *oid, int *out)
+{
+	char hex[GP_SHA1_HEXSZ + 1];
+	const char *x = opts_value(o, "-m");
+
+	if (!x)
+		x = opts_value(o, "--mainline");
+	oid_hex(oid, hex);
+
+	if (!x) {
+		if (c->parents.nr > 1) {
+			gp_error("commit %s is a merge but no -m option was given", hex);
+			fprintf(stderr, "hint: -m <parent number> says which side of "
+					"the merge the undo goes back to\n");
+			return -1;
+		}
+		*out = 1;
+		return 0;
+	}
+	{
+		char *end;
+		long n = strtol(x, &end, 10);
+
+		if (*end || n < 1 || (size_t)n > c->parents.nr) {
+			gp_error("commit %s does not have parent %s", hex, x);
+			return -1;
+		}
+		*out = (int)n;
+	}
+	return 0;
+}
+
+int cmd_revert(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	enum merge_favor favor = MERGE_FAVOR_NONE;
+	struct seq s;
+	oid_t head;
+	int i, rc, mainline = 0;
+
+	opts_init(&o, argc, argv, (const char *const[]){
+		"--abort", "--continue", "--skip", "-X=", "--strategy-option=",
+		"-m=", "--mainline=", NULL });
+	if (merge_favor_of(&o, &favor) < 0)
+		return 1;
+
+	if (opts_flag(&o, "--abort"))
+		return seq_abort(r);
+	if (opts_flag(&o, "--continue"))
+		return seq_continue(r, favor);
+	if (opts_flag(&o, "--skip"))
+		return seq_skip(r, favor);
+
+	refuse_if_replaying(r);
+	if (opts_count(&o) < 1) {
+		gp_error("revert: expected a commit to revert");
+		return 1;
+	}
+	if (require_clean(r, "revert") < 0)
+		return 1;
+	if (refs_head(&r->refs, &head) < 0)
+		gp_die("revert: HEAD has no commits yet");
+
+	memset(&s, 0, sizeof s);
+	s.kind = xstrdup("revert");
+	s.orig = head;
+	s.head_name = refs_head_target(&r->refs);
+	for (i = 0; i < opts_count(&o); i++) {
+		struct commit c = COMMIT_INIT;
+		oid_t coid;
+		int ml;
+
+		if (resolve_rev(r, opts_arg(&o, i), &coid) < 0)
+			gp_die("revert: unknown revision: %s", opts_arg(&o, i));
+		if (commit_peel(r, &coid, OBJ_COMMIT, &coid) < 0)
+			gp_die("revert: not a commit: %s", opts_arg(&o, i));
+		read_commit(r, &coid, &c);
+		rc = revert_mainline(&o, &c, &coid, &ml);
+		commit_release(&c);
+		if (rc < 0) {
+			seq_release(&s);
+			return 1;
+		}
+		if (!i)
+			mainline = ml;
+		s.todo = xrealloc(s.todo, (s.nr + 1) * sizeof(*s.todo));
+		s.todo[s.nr++] = coid;
+	}
+	/*
+	 * -m is one answer for the whole invocation, as it is in git, and every
+	 * commit above has now been checked against it.
+	 */
+	s.mainline = mainline;
+
+	seq_save(r, &s);
+	rc = seq_run(r, &s, favor);
+	seq_release(&s);
 	return rc;
 }

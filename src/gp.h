@@ -906,6 +906,7 @@ int cmd_switch(struct repo *, int, char **);
 int cmd_merge(struct repo *, int, char **);
 int cmd_cherry_pick(struct repo *, int, char **);
 int cmd_rebase(struct repo *, int, char **);
+int cmd_revert(struct repo *, int, char **);
 int cmd_tag(struct repo *, int, char **);
 
 /*

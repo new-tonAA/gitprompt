@@ -289,6 +289,12 @@ const struct command commands[] = {
 	  "   A merge commit is not replayed -- the commits it joined are, and the\n"
 	  "   history comes back a line -- and the branch stays where it is until\n"
 	  "   the replay is done, so an interrupted rebase leaves it untouched." },
+	{ "revert",     cmd_revert,     "Undo the changes a commit carries",
+	  "revert [-m <parent>] [-X ours|theirs] <commit>...\n"
+	  "   revert --continue|--skip|--abort\n"
+	  "   The undo is a commit of its own, so it is attributed to whoever ran\n"
+	  "   it and says what it undid.  -m names which parent of a merge commit\n"
+	  "   the undo goes back to, and is required for one." },
 	{ "tag",        cmd_tag,        "Create, list or delete tags",
 	  "tag [-d <name>] [-m MSG] [-l] [<name> [<rev>]]" },
 	{ "reset",      cmd_reset,      "Move HEAD and the index",

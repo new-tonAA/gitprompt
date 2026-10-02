@@ -134,6 +134,14 @@ one it lacks travels with the commit, which is what moves the prompts along with
 the code without copying anything: replaying a commit is a three-way merge whose
 base is the commit's own parent, and the prompt list falls out of the result.
 
+A reverted commit — one `revert` undid — is measured the same way and follows
+from the same rule, with the consequence read the other way round. The undo is a
+commit like any other, written against the tree `HEAD` held when it ran, so
+undoing a commit that introduced a prompt takes that prompt away with the code:
+the prompt file is gone from the new tree and so is not carried. Nothing is
+special-cased and nothing is copied — the prompt moves because the file moves.
+Reverting the undo brings both back.
+
 **tag** — an annotated tag: `object`, `type`, `tag`, `tagger`, blank line,
 message.
 
@@ -375,7 +383,7 @@ Inside `.gitprompt/`:
 | `gitprompt-seq` | the last prompt sequence number handed out |
 | `MERGE_HEAD` | the id of the revision being merged in; present only during an unfinished merge |
 | `MERGE_MSG` | the message the concluding commit should default to |
-| `sequencer/` | a replay stopped part way: `kind`, `orig-head`, `head-name` and `todo` |
+| `sequencer/` | a replay or a revert stopped part way: `kind`, `orig-head`, `head-name`, `mainline` and `todo` |
 | `COMMIT_EDITMSG` | the buffer an editor was given, left behind afterwards as git leaves it |
 | `RERUN_MSG` | the prompt being handed to an agent during `rerun`, and removed when the run ends |
 
@@ -406,6 +414,14 @@ while the replay is under way. There is deliberately no `CHERRY_PICK_HEAD`
 beside `MERGE_HEAD`: a replayed commit has one parent, so there is no second
 parent to record, and the commit that concludes a replay is written by the
 sequencer rather than by `commit`, which refuses while any of this exists.
+
+`mainline` is a revert's `-m`: the number of the parent whose tree a merge commit
+is undone against. It is recorded because it is an answer for the whole run, not
+for one commit — every commit in a `revert <commit>...` is measured against the
+same parent number — and because a conflict left part way has no other place to
+keep it: the resolution and the `--continue` that finishes it both need to know
+which side the undo goes back to. A replay writes `mainline` as `1` and ignores
+it; the number only has a meaning for `kind = revert`.
 
 ## 8. What a gitprompt repository looks like to git
 
