@@ -53,8 +53,18 @@ install: $(BIN)
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 755 $(BIN) $(DESTDIR)$(BINDIR)/$(BIN)
 
+# Three batteries, because they cover different ground: smoke.sh asks every
+# command in depth, surface.sh runs the whole command surface the way a user
+# meets it -- each operation being the one git does, on prompts -- and
+# restore.sh takes a history across two sessions, an out-of-order clock and a
+# plain `git clone`, then hands it back to an agent.  All three run even when
+# one fails, so a single run says what all of them do.
 test: $(BIN)
-	sh test/smoke.sh
+	@rc=0; \
+	sh test/smoke.sh || rc=1; \
+	sh test/surface.sh || rc=1; \
+	sh test/restore.sh || rc=1; \
+	exit $$rc
 
 clean:
 	rm -f $(OBJS) $(BIN)

@@ -549,7 +549,8 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **649 checks, 0 failures**.
+The end-to-end suite passes: **752 checks, 0 failures** — 649 in
+`test/smoke.sh`, 67 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -573,6 +574,24 @@ the section that matters most, since a gitprompt repository is meant to be an
 ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
 writes against git's own index, and `git ls-files` checks the index gitprompt
 wrote against git's own reader.
+
+`test/surface.sh` asks the other question: not whether each command is right in
+depth, but whether the whole surface still is when the commands are used in the
+order a user meets them. Every check is the operation git does — commit,
+branch, merge, tag, describe, reset, mv, rm, checkout `--`, clone, push, pull —
+run against a history of prompts, and each has to produce the thing git
+produces. What needs git itself is skipped rather than faked when git is not on
+PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
+no prompts, and a reflog that forgot the past after a checkout — which is what
+made it worth keeping rather than folding in.
+
+`test/restore.sh` runs the design claim end to end. It builds a history that
+crosses two sessions and returns to the first, records it out of clock order,
+pushes it to a bare git remote, and restores it on another machine through a
+plain `git clone` with no gitprompt store in it: adopting the clone, comparing
+the plan it would replay against the one the original would, and handing the
+prompts to a stub agent — one at a time, in the order they were written, into
+the conversations they came from — with the same replay planned under any clock.
 
 ### Following a file that moved
 
@@ -760,10 +779,12 @@ the binary will start.
 ## Layout
 
 ```
-src/            the implementation
-test/smoke.sh   the end-to-end suite
-third_party/    zlib 1.3.1, vendored as a static library
-docs/format.md  the on-disk format, in full
+src/              the implementation
+test/smoke.sh     the end-to-end suite
+test/surface.sh   the command surface, as a user meets it
+test/restore.sh   a history across two machines, restored to an agent
+third_party/      zlib 1.3.1, vendored as a static library
+docs/format.md    the on-disk format, in full
 ```
 
 `docs/format.md` documents the storage format precisely enough to write another

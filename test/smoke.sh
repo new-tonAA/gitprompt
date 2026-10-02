@@ -1583,7 +1583,11 @@ branch=$(gp symbolic-ref HEAD)
 branch_short=${branch#refs/heads/}
 served_head=$(gp rev-parse HEAD)
 
-gp serve --port 0 > "$work/serve.log" 2>&1 &
+# The binary itself, not through `gp`: `gp` is a shell function, and
+# backgrounding a function backgrounds a subshell whose pid is what `$!` gives,
+# so `kill $serve_pid` below would kill the wrapper and leave the server it
+# started behind, listening for the rest of the run and past it.
+"$GP" serve --port 0 > "$work/serve.log" 2>&1 &
 serve_pid=$!
 port=""
 i=0
@@ -1701,8 +1705,17 @@ else
 		skip "the path whitelist (curl is not on PATH)"
 	fi
 
+	# Stop it and settle, but never block on it: the wait is bounded and then
+	# forced, because a server that would not die must not be able to stop the
+	# run at its last section, and `wait` on a live process blocks for as long
+	# as it lives.
 	kill $serve_pid 2>/dev/null
-	wait $serve_pid 2>/dev/null
+	i=0
+	while kill -0 $serve_pid 2>/dev/null && [ $i -lt 20 ]; do
+		i=$((i + 1))
+		sleep 0.5
+	done
+	kill -9 $serve_pid 2>/dev/null
 	cd "$repo" || exit 2
 fi
 
