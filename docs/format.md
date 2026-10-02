@@ -127,6 +127,13 @@ the merge brought in from the other side. There is no `gp-prompt` on the session
 file or the response file: they are not prompts, and only the prompt files
 directly under the prompt directory are read this way.
 
+A replayed commit — one `cherry-pick` or `rebase` wrote again somewhere else —
+is measured the same way, against the parent it has now rather than the one it
+had. So a prompt the new branch already holds is not carried a second time and
+one it lacks travels with the commit, which is what moves the prompts along with
+the code without copying anything: replaying a commit is a three-way merge whose
+base is the commit's own parent, and the prompt list falls out of the result.
+
 **tag** — an annotated tag: `object`, `type`, `tag`, `tagger`, blank line,
 message.
 
@@ -368,6 +375,7 @@ Inside `.gitprompt/`:
 | `gitprompt-seq` | the last prompt sequence number handed out |
 | `MERGE_HEAD` | the id of the revision being merged in; present only during an unfinished merge |
 | `MERGE_MSG` | the message the concluding commit should default to |
+| `sequencer/` | a replay stopped part way: `kind`, `orig-head`, `head-name` and `todo` |
 | `COMMIT_EDITMSG` | the buffer an editor was given, left behind afterwards as git leaves it |
 | `RERUN_MSG` | the prompt being handed to an agent during `rerun`, and removed when the run ends |
 
@@ -388,6 +396,16 @@ Which paths are still in conflict is not a file here but the index itself (see
 it is staged, which is the same thing `git add` does to declare a conflict
 resolved, and `MERGE_HEAD` deliberately outlives that: the resolution is staged,
 but the merge is not finished until it is committed.
+
+`sequencer/` is the same fact for a replay. `todo` is the list of commits still
+to replay, newest last, with the one in flight at its head; `kind` says which
+command is running, so the hints and the reflog entry name the right one;
+`orig-head` is what `--abort` puts back; and `head-name` is the branch a
+`rebase` moves when the list runs out, which is how the branch stays where it is
+while the replay is under way. There is deliberately no `CHERRY_PICK_HEAD`
+beside `MERGE_HEAD`: a replayed commit has one parent, so there is no second
+parent to record, and the commit that concludes a replay is written by the
+sequencer rather than by `commit`, which refuses while any of this exists.
 
 ## 8. What a gitprompt repository looks like to git
 

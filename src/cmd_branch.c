@@ -126,6 +126,42 @@ static int strlist_has(const struct strlist *l, const char *s)
 	return 0;
 }
 
+/*
+ * dirty_paths for a caller outside this file, which has no strlist to hand it:
+ * the same list as a NULL-terminated array the caller frees with
+ * path_list_free.  Returns how many there are.
+ */
+int worktree_dirty_paths(struct repo *r, char ***paths)
+{
+	struct strlist l = { NULL, 0, 0 };
+	size_t i, n;
+
+	dirty_paths(r, &l);
+	*paths = NULL;
+	n = l.nr;
+	if (!n) {
+		strlist_release(&l);
+		return 0;
+	}
+	*paths = xmalloc((n + 1) * sizeof(**paths));
+	for (i = 0; i < n; i++)
+		(*paths)[i] = xstrdup(l.v[i]);
+	(*paths)[n] = NULL;
+	strlist_release(&l);
+	return (int)n;
+}
+
+void path_list_free(char **paths)
+{
+	size_t i;
+
+	if (!paths)
+		return;
+	for (i = 0; paths[i]; i++)
+		free(paths[i]);
+	free(paths);
+}
+
 /* ------------------------------------------------------------------ */
 /* branch                                                             */
 
@@ -700,11 +736,6 @@ static int merge_base(struct repo *r, const oid_t *a, const oid_t *b, oid_t *out
 /* ------------------------------------------------------------------ */
 /* three-way merge of two trees against their base                     */
 
-struct merge_result {
-	int conflicts;
-	size_t files_changed;
-};
-
 /*
  * Record a conflicted path the way git does: as index entries above stage 0
  * -- 1 for the merge base, 2 for our side, 3 for theirs.  A stage is left out
@@ -811,10 +842,10 @@ static int renamed_two_ways(const struct rename_list *a,
 	return pa && pb && strcmp(pa->to, pb->to) != 0;
 }
 
-static void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
-			const oid_t *theirs, struct merge_result *res,
-			struct index_state *merged, enum merge_favor favor,
-			const char *label)
+void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
+		 const oid_t *theirs, struct merge_result *res,
+		 struct index_state *merged, enum merge_favor favor,
+		 const char *label)
 {
 	struct index_state bi, oi, ti;
 	struct rename_list rts, rus;

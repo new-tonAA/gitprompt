@@ -480,8 +480,8 @@ names are git's, and the behaviour is meant to match:
   `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
-- **branch and history** — `branch`, `checkout`, `switch`, `merge`, `tag`,
-  `reset`, `describe`
+- **branch and history** — `branch`, `checkout`, `switch`, `merge`,
+  `cherry-pick`, `rebase`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
   `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
@@ -538,18 +538,18 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 54. Missing are `stash`, `rebase`,
-  `cherry-pick`, `revert`, `bisect`, `blame`, `clean`, `grep`,
+  gitprompt built from this tree lists 56. Missing are `stash`, `revert`,
+  `bisect`, `blame`, `clean`, `grep`,
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
   and `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
-  merging including conflicts, tags, reset, the ref plumbing, remotes and the
-  prompt layer are all here.
+  merging including conflicts, replaying a commit elsewhere, tags, reset, the
+  ref plumbing, remotes and the prompt layer are all here.
 
 ## Status
 
-The end-to-end suite passes: **609 checks, 0 failures**.
+The end-to-end suite passes: **649 checks, 0 failures**.
 
 ```console
 $ make test
@@ -563,7 +563,9 @@ conversations it maps sessions to, and what `response` and `rerun --record` keep
 and how every rendering shows it, branches, tags, history editing, the reflog of
 where HEAD has been, the commits a range of revisions reaches, merges
 including conflicts
-and `--abort`, merges that follow a file that moved, `status` and `diff` on a
+and `--abort`, merges that follow a file that moved, commits replayed with
+`cherry-pick` and `rebase` including their conflicts, empty results and
+`--continue`/`--skip`/`--abort`, `status` and `diff` on a
 move, the commit editor, per-command option validation, that the replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
@@ -656,6 +658,36 @@ where git merges cleanly, or merge cleanly where git conflicts. Neither
 direction loses an edit: a clean merge is still both sides' changes applied, and
 a conflict is still both sides' text. It takes a repeated line with an edit
 beside it for the two to part company.
+
+### A replay is a merge read the other way
+
+`cherry-pick` and `rebase` are not a second merge implementation. Applying a
+commit somewhere else is the three-way merge `merge` already performs, with the
+roles read differently: the commit's own parent is the base, the tree `HEAD`
+holds now is ours, and the commit being replayed is theirs. So the line-wise
+merge, the index stages a conflict leaves, the letters `status` reports for them
+and `-X ours|theirs` are the ones described above — a replay that conflicts
+stops in the same shape a merge does, and is resolved the same way. `rebase` is
+that, once per commit, with the branch moved to the last one at the end.
+
+What the replayed commit carries is the same rule every other commit follows,
+read against the parent it has now: the prompts its new tree holds that its new
+parent does not. A prompt the branch already has is therefore not carried twice,
+and one it lacks travels with the code — nothing has to be copied, and the
+prompt history of the replayed commit stays the prompt history it had. The suite
+checks that from both sides: a prompt is carried by the commit that introduced
+it and by no other, and no prompt appears twice in the history a rebase wrote.
+
+A merge commit is not replayed, which is the choice git makes too: the commits
+it joined are replayed and the merge commit itself is dropped, so a branch that
+merged its upstream and then moved on comes back as a line. And the branch stays
+where it is until the replay is done — the rebase detaches `HEAD` at the
+upstream — so an interrupted replay, or one ended with `--abort`, leaves the
+branch exactly where it was. Where an ordinary `merge` put a `MERGE_HEAD`, a
+replay puts `sequencer/` (§7 of [docs/format.md](docs/format.md)), and `commit`
+refuses while either is there: an interrupted replay is finished by
+`cherry-pick`/`rebase --continue`, `--skip` or `--abort`, not by committing by
+hand.
 
 ### An option belongs to its command
 

@@ -576,6 +576,28 @@ int merge3(const struct buf *base, const struct buf *ours,
 int merge3_similarity(const struct buf *a, const struct buf *b);
 
 /* ------------------------------------------------------------------ */
+/* three-way merge of whole trees                                      */
+
+struct merge_result {
+	int conflicts;
+	size_t files_changed;
+};
+
+/*
+ * Merge two trees against their base, writing the result to the work tree and
+ * filling `merged` with the index that records it -- a conflicted path as its
+ * unmerged stages rather than as a resolved entry.  `base` may be NULL, which
+ * is how a commit with no parent is replayed: everything is an addition.
+ *
+ * `label` names the far side in the messages, and is the revision the merge is
+ * being made from: a branch for `merge`, the commit for a replay.
+ */
+void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
+		 const oid_t *theirs, struct merge_result *res,
+		 struct index_state *merged, enum merge_favor favor,
+		 const char *label);
+
+/* ------------------------------------------------------------------ */
 /* the working tree                                                    */
 
 int write_tree_from_index(struct repo *r, const struct index_state *istate,
@@ -584,6 +606,13 @@ int write_tree_from_index(struct repo *r, const struct index_state *istate,
 int checkout_tree(struct repo *r, const oid_t *tree, int force, int update_index);
 int read_tree_into_index(struct repo *r, struct index_state *istate,
 			 const oid_t *tree, const char *prefix);
+
+/*
+ * The paths whose work tree file differs from what the index holds -- what a
+ * checkout would have to overwrite.  The caller frees the array.
+ */
+int worktree_dirty_paths(struct repo *r, char ***paths);
+void path_list_free(char **paths);
 
 /* paths */
 void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
@@ -875,7 +904,17 @@ int cmd_branch(struct repo *, int, char **);
 int cmd_checkout(struct repo *, int, char **);
 int cmd_switch(struct repo *, int, char **);
 int cmd_merge(struct repo *, int, char **);
+int cmd_cherry_pick(struct repo *, int, char **);
+int cmd_rebase(struct repo *, int, char **);
 int cmd_tag(struct repo *, int, char **);
+
+/*
+ * Whether a replay is stopped part way, and which kind, so that a commit made
+ * while one is -- which would record the replayed commit by hand and leave the
+ * state behind naming it -- can be refused.  `kind`, when given, is the
+ * caller's to free.
+ */
+int replay_in_progress(struct repo *r, char **kind);
 
 int cmd_remote(struct repo *, int, char **);
 int cmd_push(struct repo *, int, char **);

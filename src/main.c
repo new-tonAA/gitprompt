@@ -280,6 +280,15 @@ const struct command commands[] = {
 	{ "merge",      cmd_merge,      "Join another history into this one",
 	  "merge [-m MSG] [--no-commit] [--ff-only] [--no-ff] [--squash] [-X ours|theirs]\n"
 	  "   merge --abort" },
+	{ "cherry-pick", cmd_cherry_pick, "Apply the changes a commit carries here",
+	  "cherry-pick [-X ours|theirs] <commit>...\n"
+	  "   cherry-pick --continue|--skip|--abort" },
+	{ "rebase",     cmd_rebase,     "Replay this branch's commits onto another one",
+	  "rebase [-X ours|theirs] <upstream>\n"
+	  "   rebase --continue|--skip|--abort\n"
+	  "   A merge commit is not replayed -- the commits it joined are, and the\n"
+	  "   history comes back a line -- and the branch stays where it is until\n"
+	  "   the replay is done, so an interrupted rebase leaves it untouched." },
 	{ "tag",        cmd_tag,        "Create, list or delete tags",
 	  "tag [-d <name>] [-m MSG] [-l] [<name> [<rev>]]" },
 	{ "reset",      cmd_reset,      "Move HEAD and the index",

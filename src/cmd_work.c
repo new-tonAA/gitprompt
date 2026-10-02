@@ -1249,6 +1249,23 @@ static int do_commit(struct repo *r, const char *message, int amend,
 	char *br = NULL, *branch_ref = NULL;
 	int had_head, have_prev;
 
+	/*
+	 * A replayed commit is recorded by the replay, which also knows what is
+	 * still to come; recording it here instead would make it by hand and
+	 * leave the state naming a commit that has already been made.
+	 */
+	{
+		char *kind = NULL;
+
+		if (replay_in_progress(r, &kind)) {
+			gp_error("a %s is in progress", kind);
+			fprintf(stderr, "hint: record the commit and carry on with "
+					"'gitprompt %s --continue'\n", kind);
+			free(kind);
+			return 1;
+		}
+	}
+
 	memset(&ist, 0, sizeof ist);
 	index_read(&ist, repo_index_path(r));
 

@@ -3071,6 +3071,259 @@ expect "a fast-forward is on HEAD's reflog too" "merge: fast-forward" gp reflog
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "a commit replayed somewhere else"
+
+# cherry-pick and rebase both apply a commit's diff to what HEAD holds now,
+# which is the three-way merge `merge` performs with the commit's own parent as
+# the base.  What the replayed commit carries is decided by the rule every other
+# commit follows -- the prompts it has that its first parent does not -- read
+# against the parent it has now: a prompt the branch already holds is not
+# carried a second time, and one it lacks travels with the commit.
+cp=$work/replay
+rm -rf "$cp"
+mkdir -p "$cp" || exit 2
+cd "$cp" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email cp@example.com
+gp config user.name "Replay Tester"
+gp session start -t "the replayed work" >/dev/null 2>&1
+echo base > base.txt
+gp add base.txt >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+
+gp prompt -m "the prompt behind the picked commit" >/dev/null 2>&1
+echo picked > picked.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to pick" >/dev/null 2>&1
+picked=$(gp rev-parse HEAD)
+pickedp=$(gp show HEAD | sed -n 's/^Prompts: //p')
+
+gp checkout side >/dev/null 2>&1
+echo own > own.txt
+gp add own.txt >/dev/null 2>&1
+gp commit -m "the branch's own work" >/dev/null 2>&1
+
+expect_status "a cherry-pick of a diverged commit succeeds" 0 \
+	gp cherry-pick "$picked"
+expect_file "and the file it carried is here" "$cp/picked.txt"
+expect_file "and the branch's own file is still here" "$cp/own.txt"
+parents=$(gp cat-file -p HEAD | grep -c '^parent ')
+if [ "$parents" = 1 ]; then
+	ok "a replayed commit has one parent"
+else
+	bad "a replayed commit has one parent" "got $parents"
+fi
+expect "the replay is on the branch's reflog" "cherry-pick:" gp reflog
+expect "the replayed commit carries the prompt the original had" \
+	"Prompts: $pickedp" gp show HEAD
+
+# the same commit again finds its change already here, which is nothing to
+# record: stopping is what git does, and --skip is how it is left out
+pickedagain=$(gp cherry-pick "$picked" 2>&1)
+case "$pickedagain" in
+*"now empty"*) ok "picking it again stops because the result is empty" ;;
+*) bad "picking it again stops because the result is empty" "got [$pickedagain]" ;;
+esac
+expect_status "and --skip leaves it out" 0 gp cherry-pick --skip
+expect_absent "and the state is gone" "$cp/.gitprompt/sequencer"
+expect "nothing was added by the empty pick" "$pickedp" gp show HEAD
+cd "$back" || exit 2
+
+# a pick that lands on a conflicting change stops with the conflict in the index
+cpc=$work/replay-conflict
+rm -rf "$cpc"
+mkdir -p "$cpc" || exit 2
+cd "$cpc" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email cpc@example.com
+gp config user.name "Conflict Tester"
+printf 'one\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+printf 'ONE\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to pick" >/dev/null 2>&1
+mainc=$(gp rev-parse HEAD)
+gp checkout side >/dev/null 2>&1
+printf 'FIRST\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the branch's own edit" >/dev/null 2>&1
+sidebefore=$(gp rev-parse side)
+
+pickout=$(gp cherry-pick "$mainc" 2>&1)
+pickrc=$?
+case "$pickout" in
+*"could not apply"*)
+	ok "a conflicting pick names the commit it could not apply" ;;
+*) bad "a conflicting pick names the commit it could not apply" \
+	"got [$pickout]" ;;
+esac
+if [ "$pickrc" = 1 ]; then
+	ok "a conflicting pick stops"
+else
+	bad "a conflicting pick stops" "exit $pickrc: $pickout"
+fi
+expect "and --continue says the paths are still unmerged" "unmerged paths" \
+	gp cherry-pick --continue
+expect "and status shows the conflict" "both modified" gp status
+# a commit made here would record the pick by hand and leave the state naming it
+expect "a commit while a pick is stopped is refused" "is in progress" \
+	gp commit -m "by hand"
+printf 'resolved\ntwo\n' > f.txt
+gp add f.txt >/dev/null 2>&1
+expect_status "with the conflict resolved, --continue records it" 0 \
+	gp cherry-pick --continue
+expect "and the resolution is what landed" "resolved" cat f.txt
+expect_absent "and the state is gone" "$cpc/.gitprompt/sequencer"
+cd "$back" || exit 2
+
+# an abort is the way out of a stopped pick, and it puts the branch back
+cpa=$work/replay-abort
+rm -rf "$cpa"
+mkdir -p "$cpa" || exit 2
+cd "$cpa" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email cpa@example.com
+gp config user.name "Abort Tester"
+printf 'one\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+printf 'ONE\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the commit to pick" >/dev/null 2>&1
+mainc=$(gp rev-parse HEAD)
+gp checkout side >/dev/null 2>&1
+printf 'FIRST\ntwo\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the branch's own edit" >/dev/null 2>&1
+sidebefore=$(gp rev-parse side)
+gp cherry-pick "$mainc" >/dev/null 2>&1
+expect_status "an abort of a stopped pick succeeds" 0 gp cherry-pick --abort
+expect "the branch is where it was" "$sidebefore" gp rev-parse side
+expect "and the file is back" "FIRST" cat f.txt
+expect_absent "and the state is gone" "$cpa/.gitprompt/sequencer"
+cd "$back" || exit 2
+
+# a rebase replays the branch's own commits onto another one, which is a
+# cherry-pick per commit with the branch moved at the end
+rb=$work/rebase
+rm -rf "$rb"
+mkdir -p "$rb" || exit 2
+cd "$rb" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rb@example.com
+gp config user.name "Rebase Tester"
+gp session start -t "the rebased work" >/dev/null 2>&1
+echo base > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+gp prompt -m "the first side prompt" >/dev/null 2>&1
+echo one > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the first of the branch's own" >/dev/null 2>&1
+p1=$(gp show HEAD | sed -n 's/^Prompts: //p')
+gp prompt -m "the second side prompt" >/dev/null 2>&1
+echo two > b.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the second of the branch's own" >/dev/null 2>&1
+p2=$(gp show HEAD | sed -n 's/^Prompts: //p')
+gp checkout main >/dev/null 2>&1
+gp prompt -m "the mainline's prompt" >/dev/null 2>&1
+echo mainline > c.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the mainline moves on" >/dev/null 2>&1
+pmain=$(gp show HEAD | sed -n 's/^Prompts: //p')
+gp checkout side >/dev/null 2>&1
+
+rbout=$(gp rebase main 2>&1)
+case "$rbout" in
+*"Successfully rebased and updated refs/heads/side"*)
+	ok "a rebase says which branch it moved" ;;
+*) bad "a rebase says which branch it moved" "got [$rbout]" ;;
+esac
+expect "and leaves the branch checked out" "On branch side" gp status
+expect_file "the mainline's file is here" "$rb/c.txt"
+expect_file "and the first commit's" "$rb/a.txt"
+expect_file "and the second commit's" "$rb/b.txt"
+expect "the first replayed commit carries its own prompt" "Prompts: $p1" \
+	gp show side~1
+expect "and the second carries the other" "Prompts: $p2" gp show side
+expect "and the commit it landed on keeps its own" "Prompts: $pmain" \
+	gp show side~2
+expect "the reflog names each replayed commit the way git does" \
+	"rebase (pick): the second of the branch's own" gp reflog
+expect "and says when the replay finished" "rebase (finish)" gp reflog
+# each prompt was written once and the replay must not have written it again
+carried=$(gp rev-list side | while read -r r; do
+	gp cat-file -p "$r" | grep '^gp-prompt '
+done | sort)
+distinct=$(printf '%s\n' "$carried" | sort -u | wc -l | tr -d ' ')
+lines=$(printf '%s\n' "$carried" | grep -c '^gp-prompt ')
+if [ "$distinct" = 3 ] && [ "$lines" = 3 ]; then
+	ok "no prompt is carried twice by the rebased history"
+else
+	bad "no prompt is carried twice by the rebased history" \
+		"$distinct distinct over $lines lines: $carried"
+fi
+expect "a rebase that has nothing left to do says so" "up to date" gp rebase main
+# a rebase onto a commit that is ahead moves the branch without replaying
+gp checkout main >/dev/null 2>&1
+expect "a rebase onto a descendant fast-forwards" "Fast-forwarded main to side" \
+	gp rebase side
+expect "and the two branches are the same commit" "$(gp rev-parse side)" \
+	gp rev-parse main
+cd "$back" || exit 2
+
+# a branch that merged the upstream in and then moved on rebases back to a line
+rbm=$work/rebase-merge
+rm -rf "$rbm"
+mkdir -p "$rbm" || exit 2
+cd "$rbm" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email rbm@example.com
+gp config user.name "Merge Rebase Tester"
+echo base > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+echo a > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the branch's own" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+echo mainline > b.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the mainline" >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+gp merge main --no-ff -m "join the mainline" >/dev/null 2>&1
+echo later > c.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "and moves on" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+echo more > d.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the mainline moves on" >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+gp rebase main >/dev/null 2>&1
+merges=$(gp rev-list side | while read -r r; do
+	gp cat-file -p "$r" | grep -c '^parent .*'
+done | grep -c '^2$')
+if [ "$merges" = 0 ]; then
+	ok "a rebase leaves no merge commit behind"
+else
+	bad "a rebase leaves no merge commit behind" "got $merges"
+fi
+expect_file "and the commits it joined are still here" "$rbm/a.txt"
+expect_file "and the one that followed them" "$rbm/c.txt"
+expect_file "and the mainline's own" "$rbm/d.txt"
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 say "the same history reads the same from any clock"
 
 # A history is recorded with an offset and replayed elsewhere, so anything that
