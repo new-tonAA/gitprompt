@@ -295,6 +295,17 @@ const struct command commands[] = {
 	  "   The undo is a commit of its own, so it is attributed to whoever ran\n"
 	  "   it and says what it undid.  -m names which parent of a merge commit\n"
 	  "   the undo goes back to, and is required for one." },
+	{ "stash",      cmd_stash,      "Set the work tree and index aside, and put them back",
+	  "stash [push [-m MSG] [-u] [-k]]\n"
+	  "   stash list\n"
+	  "   stash show [-p] [<stash>]\n"
+	  "   stash pop|apply|drop [<stash>]\n"
+	  "   stash clear\n"
+	  "   stash branch <name> [<stash>]\n"
+	  "   A stash is three commits under refs/stash: the work tree, the\n"
+	  "   index, and with -u the untracked files.  Putting one back is the\n"
+	  "   merge a replay is, so an entry is a revision anything can be\n"
+	  "   pointed at, and a conflict stops in the shape a merge stops in." },
 	{ "tag",        cmd_tag,        "Create, list or delete tags",
 	  "tag [-d <name>] [-m MSG] [-l] [<name> [<rev>]]" },
 	{ "reset",      cmd_reset,      "Move HEAD and the index",

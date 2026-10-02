@@ -481,7 +481,7 @@ names are git's, and the behaviour is meant to match:
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`,
-  `cherry-pick`, `rebase`, `revert`, `tag`, `reset`, `describe`
+  `cherry-pick`, `rebase`, `revert`, `stash`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
   `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
@@ -538,18 +538,24 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 57. Missing are `stash`,
+  gitprompt built from this tree lists 58. Missing are
   `bisect`, `blame`, `clean`, `grep`,
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
   and `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
-  merging including conflicts, replaying a commit elsewhere, undoing one, tags,
+  merging including conflicts, replaying a commit elsewhere, undoing one,
+  setting work aside, tags,
   reset, the ref plumbing, remotes and the prompt layer are all here.
+- **`stash` with `--index`, and with a pathspec.** Everything else is here:
+  `push` (with `-m`, `-u` and `-k`), `list`, `show` (with `-p`),
+  `apply`/`pop`, `drop`, `clear` and `branch`, with a conflict stopping in the
+  shape a merge stops in and left at the `refs/stash` entry it came from. The
+  two absent forms are refused as unknown options rather than quietly ignored.
 
 ## Status
 
-The end-to-end suite passes: **806 checks, 0 failures** — 703 in
+The end-to-end suite passes: **860 checks, 0 failures** — 757 in
 `test/smoke.sh`, 67 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
@@ -566,7 +572,9 @@ where HEAD has been, the commits a range of revisions reaches, merges
 including conflicts
 and `--abort`, merges that follow a file that moved, commits replayed with
 `cherry-pick`, `rebase` and `revert` including their conflicts, empty results and
-`--continue`/`--skip`/`--abort`, `status` and `diff` on a
+`--continue`/`--skip`/`--abort`, work set aside and put back with `stash`
+including the untracked files, the index kept, a clash and the entry a branch
+can be made from, `status` and `diff` on a
 move, the commit editor, per-command option validation, that the replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
@@ -733,6 +741,33 @@ elsewhere, so its author and committer are whoever ran it and its message says
 which commit it undid. It conflicts, continues, skips and aborts through the same
 `sequencer/` state the other two use, and `commit` refuses while one is in
 flight.
+
+### Setting work aside
+
+A stash is not a special kind of storage. An entry is three commits written
+under `refs/stash`: the work tree, the index, and -- when `-u` is given -- the
+untracked files as a commit with no parents, so that nothing else reaches them
+and they cannot be mistaken for history. The work tree commit's first parent is
+`HEAD`, its second is the index commit, and it is an ordinary revision: anything
+that takes a revision takes a stash entry, and `stash branch` exists because
+that is literally what it does.
+
+That shape is chosen for the prompt rule's sake, not the other way round. The
+prompts of the work tree are files in the stash commit's tree, so the prompt for
+work in progress is set aside with the code it was written for and comes back
+with it, with no rule for prompts and none for stashes. A stash made from a
+repository that had just had a prompt written for it names that prompt on the
+entry, and putting the entry back puts the prompt back with the rest.
+
+Putting one back is the merge a replay performs, read with the commit the stash
+was made on as the base: the stashed state is the far side, the index is the
+near side, and the result is written to the work tree with the index left at
+`HEAD` -- which is what makes a stash read as unstaged changes, and what makes
+`-k` put an entry back as a clash rather than an overwrite, since the index a
+`-k` push left behind is still ahead of `HEAD`. A conflict is a merge's
+conflict, with git's names for the two sides, `Updated upstream` and `Stashed
+changes`, and the entry is kept when `pop` stops there: a half-applied stash is
+still the only copy of the rest.
 
 ### An option belongs to its command
 

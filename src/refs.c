@@ -300,6 +300,145 @@ void refs_reflog_head(struct ref_store *r, const char *ref, const oid_t *old,
 	refs_reflog(r, "HEAD", old, new, msg);
 }
 
+/*
+ * Read a ref's reflog back.  A line is "<old> <new> <ident>\t<message>", the
+ * same shape git writes, so only the two fields a reader needs are parsed: the
+ * id the entry moved to, and the message after the tab.  The entries come back
+ * oldest first, which is the order they were written in, and the caller frees
+ * them with reflog_entries_free.
+ *
+ * A ref with no reflog is not an error -- it is a ref that has never moved --
+ * so this answers -1 and the caller decides what that means.
+ */
+int refs_reflog_read(struct ref_store *r, const char *name,
+		     struct reflog_entry **out)
+{
+	char *path = xstrfmt("%s/logs/%s", r->dir, name);
+	struct reflog_entry *v = NULL;
+	int nr = 0;
+	struct buf b;
+	const char *p, *end;
+
+	*out = NULL;
+	buf_init(&b);
+	if (read_file(path, &b) < 0) {
+		free(path);
+		buf_release(&b);
+		return -1;
+	}
+	free(path);
+
+	p = (const char *)b.b;
+	end = p + b.len;
+	while (p < end) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+		size_t len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+		const char *tab;
+		size_t mlen;
+		char hex[GP_SHA1_HEXSZ + 1];
+
+		/*
+		 * Everything before the first tab that is not a two-id preamble
+		 * is a line this reader does not understand; skipping it keeps a
+		 * hand-edited or truncated log from being read as an entry with
+		 * an id made of whatever came first.
+		 */
+		if (len < GP_SHA1_HEXSZ * 2 + 2 ||
+		    p[GP_SHA1_HEXSZ] != ' ') {
+			p = nl ? nl + 1 : end;
+			continue;
+		}
+		memcpy(hex, p + GP_SHA1_HEXSZ + 1, GP_SHA1_HEXSZ);
+		hex[GP_SHA1_HEXSZ] = '\0';
+
+		tab = memchr(p, '\t', len);
+		mlen = tab ? len - (size_t)(tab + 1 - p) : 0;
+
+		v = xrealloc(v, (size_t)(nr + 1) * sizeof(*v));
+		oid_parse(&v[nr].oid, hex);
+		v[nr].msg = tab ? xstrndup(tab + 1, mlen) : xstrdup("");
+		nr++;
+		p = nl ? nl + 1 : end;
+	}
+	buf_release(&b);
+
+	*out = v;
+	return nr;
+}
+
+void reflog_entries_free(struct reflog_entry *e, int nr)
+{
+	int i;
+
+	for (i = 0; i < nr; i++)
+		free(e[i].msg);
+	free(e);
+}
+
+/*
+ * Drop one entry, counting from the newest, and leave the file holding the
+ * rest.  The file goes when the last entry does: a ref whose reflog is empty
+ * has no history, and leaving a zero-length log behind would make `@{0}` read
+ * as a ref that exists and cannot be found.
+ */
+int refs_reflog_drop(struct ref_store *r, const char *name, int n)
+{
+	char *path = xstrfmt("%s/logs/%s", r->dir, name);
+	struct buf b, keep;
+	const char *p, *end;
+	int total = 0, i = 0, want;
+	int rc = -1;
+
+	buf_init(&b);
+	buf_init(&keep);
+	if (read_file(path, &b) < 0)
+		goto out;
+
+	for (p = (const char *)b.b, end = p + b.len; p < end; ) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+
+		total++;
+		p = nl ? nl + 1 : end;
+	}
+	want = total - 1 - n;
+	if (want < 0 || want >= total)
+		goto out;
+
+	for (p = (const char *)b.b, end = p + b.len; p < end; ) {
+		const char *nl = memchr(p, '\n', (size_t)(end - p));
+		size_t len = nl ? (size_t)(nl - p) + 1 : (size_t)(end - p);
+
+		if (i != want)
+			buf_add(&keep, p, len);
+		i++;
+		p = nl ? nl + 1 : end;
+	}
+
+	if (keep.len)
+		rc = write_file(path, keep.b, keep.len) < 0 ? -1 : 0;
+	else
+		rc = remove_file(path) < 0 ? -1 : 0;
+out:
+	buf_release(&b);
+	buf_release(&keep);
+	free(path);
+	return rc;
+}
+
+/*
+ * The whole log goes, which is what `stash clear` does: dropping the entries
+ * one at a time would say the same thing more slowly, and a ref whose history
+ * is being forgotten has no use for the file that held it.
+ */
+int refs_reflog_delete(struct ref_store *r, const char *name)
+{
+	char *path = xstrfmt("%s/logs/%s", r->dir, name);
+	int rc = remove_file(path);
+
+	free(path);
+	return rc;
+}
+
 /* ------------------------------------------------------------------ */
 /* listing                                                             */
 

@@ -847,6 +847,22 @@ void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		 struct index_state *merged, enum merge_favor favor,
 		 const char *label)
 {
+	merge_trees_labeled(r, base, ours, theirs, res, merged, favor,
+			    "HEAD", label);
+}
+
+/*
+ * The side being merged into is called HEAD everywhere a merge is a merge,
+ * but a stash is not merging a branch in: git calls the two sides "Updated
+ * upstream" and "Stashed changes" there, and a reader who has seen one stash
+ * conflict can find the other side of the next one by the name it was given.
+ * So the label is a parameter, and the callers that are merges pass HEAD.
+ */
+void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
+			 const oid_t *theirs, struct merge_result *res,
+			 struct index_state *merged, enum merge_favor favor,
+			 const char *ours_label, const char *label)
+{
 	struct index_state bi, oi, ti;
 	struct rename_list rts, rus;
 	size_t i;
@@ -1036,17 +1052,17 @@ void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 				odb_read(&r->odb, &o->oid, NULL, &ours_text);
 				printf("Auto-merging %s\n", ti.e[i].path);
 				conflicted = merge3(&base_text, &ours_text,
-						    &theirs_text, favor, "HEAD", label,
-						    &content);
+						    &theirs_text, favor, ours_label,
+						    label, &content);
 				if (conflicted)
 					printf("CONFLICT (%s): Merge conflict in %s\n",
 					       b ? "content" : "add/add",
 					       ti.e[i].path);
 			} else {
 				printf("CONFLICT (modify/delete): %s deleted in "
-				       "HEAD and modified in %s.  Version %s of "
-				       "%s left in tree.\n", ti.e[i].path, label,
-				       label, ti.e[i].path);
+				       "%s and modified in %s.  Version %s of "
+				       "%s left in tree.\n", ti.e[i].path,
+				       ours_label, label, label, ti.e[i].path);
 				buf_add(&content, theirs_text.b, theirs_text.len);
 				conflicted = 1;
 			}

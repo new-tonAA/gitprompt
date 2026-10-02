@@ -3606,6 +3606,230 @@ expect "and there is no undo left to continue" \
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "work set aside and put back"
+
+# A stash is not a special kind of storage.  It is three commits under
+# refs/stash whose first parent is HEAD, so an entry is an ordinary revision
+# that anything can point at -- and it is built that way for the prompt rule's
+# sake: the prompts of the work tree sit in the stash commit's tree, so a prompt
+# and the code it was written for are set aside together and come back
+# together, with no rule for prompts and none for stashes.
+st=$work/stash
+rm -rf "$st"
+mkdir -p "$st" || exit 2
+cd "$st" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email st@example.com
+gp config user.name "Stash Tester"
+gp session start -t "the work in progress" >/dev/null 2>&1
+echo one > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+abbr=$(gp rev-parse --short HEAD)
+
+# the prompt for work that is not finished
+gp prompt -m "a change still in progress" >/dev/null 2>&1
+stpfile=$(ls prompts/*.md)
+stpid=$(sed -n 's/^id: //p' "$stpfile")
+
+echo two > a.txt
+echo new > b.txt
+gp add a.txt >/dev/null 2>&1
+expect_out "stashing says what it set aside and names where it was" \
+	"Saved working directory and index state WIP on main: $abbr the root" \
+	gp stash push
+expect "the tracked file is back where HEAD has it" "one" cat a.txt
+expect_file "an untracked file is left alone" "$st/b.txt"
+expect_absent "the prompt goes with the work it was written for" "$st/$stpfile"
+expect "the entry is listed the way git lists one" \
+	"stash@{0}: WIP on main: $abbr the root" gp stash list
+expect "showing it names the file the work touched" "a.txt" gp stash show
+expect "the entry carries the prompt that belongs to that work" \
+	"Prompts: $stpid" gp show refs/stash
+
+expect_status "putting it back succeeds" 0 gp stash pop
+expect "the change is back in the work tree" "two" cat a.txt
+expect_file "and so is the prompt that goes with it" "$st/$stpfile"
+expect_out "and there is nothing left to list" "" gp stash list
+expect_absent "the ref goes when its last entry does" "$st/.gitprompt/refs/stash"
+cd "$back" || exit 2
+
+# the message, the untracked files and the index are three separate choices,
+# and git has a spelling for each
+sto=$work/stash-options
+rm -rf "$sto"
+mkdir -p "$sto" || exit 2
+cd "$sto" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email sto@example.com
+gp config user.name "Stash Options"
+echo one > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+abbr=$(gp rev-parse --short HEAD)
+
+echo two > a.txt
+gp add a.txt >/dev/null 2>&1
+expect_out "a message is the entry's name, written where git writes it" \
+	"Saved working directory and index state On main: a note" \
+	gp stash push -m "a note"
+expect "and the entry is listed under it" "stash@{0}: On main: a note" gp stash list
+expect_out "with nothing in the work tree it says so instead" \
+	"No local changes to save" gp stash push
+expect_status "popping the entry succeeds" 0 gp stash pop
+expect "and it is gone" "" gp stash list
+
+# -u takes the untracked files in as well, as a third commit nothing else
+# reaches, and taking them in means taking them out of the work tree
+echo three > a.txt
+gp add a.txt >/dev/null 2>&1
+echo added > u.txt
+expect "the untracked files are named by the entry's message" \
+	"WIP on main: $abbr the root" gp stash push -u
+expect_absent "and taking them in removes them from the work tree" "$sto/u.txt"
+note=$(gp cat-file -p refs/stash | grep -c '^parent ')
+if [ "$note" = 3 ]; then
+	ok "the untracked files are a third commit under the entry"
+else
+	bad "the untracked files are a third commit under the entry" \
+		"$note parents"
+fi
+expect_status "putting it back succeeds" 0 gp stash pop
+expect_file "and it brings the untracked file back with it" "$sto/u.txt"
+expect "with its contents" "added" cat u.txt
+
+# -k leaves the index alone, so what was staged stays staged and the work tree
+# is reset to the index rather than to HEAD
+echo four > a.txt
+gp add a.txt >/dev/null 2>&1
+echo five > a.txt
+gp stash push -k >/dev/null 2>&1
+expect "with keep-index the work tree is reset to the index" "four" cat a.txt
+expect "and the change is still staged" "M  a.txt" gp status --short
+# the index is ahead of HEAD, so putting the entry back meets it as a clash and
+# not as an overwrite: the side the merge goes into is the index, which is the
+# side git merges into too
+expect_status "putting an entry back onto the kept index clashes" 1 gp stash apply
+expect "and it names the sides the way git names them" \
+	">>>>>>> Stashed changes" cat a.txt
+expect "and the entry is kept, still being the only copy" "stash@{0}:" gp stash list
+cd "$back" || exit 2
+
+# apply is the same work as pop, without forgetting the entry
+sta=$work/stash-apply
+rm -rf "$sta"
+mkdir -p "$sta" || exit 2
+cd "$sta" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email sta@example.com
+gp config user.name "Stash Apply"
+echo one > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+abbr=$(gp rev-parse --short HEAD)
+
+echo two > a.txt
+gp stash push >/dev/null 2>&1
+expect_status "applying an entry succeeds" 0 gp stash apply
+expect "the stashed change is back in the work tree" "two" cat a.txt
+expect "and the entry is kept" "stash@{0}:" gp stash list
+
+echo three > a.txt
+gp stash push >/dev/null 2>&1
+want="stash@{0}: WIP on main: $abbr the root
+stash@{1}: WIP on main: $abbr the root"
+expect_out "entries are numbered from the newest" "$want" gp stash list
+expect "dropping by number takes the older one away" \
+	"Dropped refs/stash@{1} (" gp stash drop "stash@{1}"
+expect "and the newer one keeps its number" \
+	"stash@{0}: WIP on main: $abbr the root" gp stash list
+expect_status "which the bare drop takes next" 0 gp stash drop
+expect_out "leaving nothing to list" "" gp stash list
+expect_absent "and no ref to list it from" "$sta/.gitprompt/refs/stash"
+expect "and nothing to show" "No stash entries found." gp stash show
+
+gp stash push >/dev/null 2>&1
+echo four > a.txt
+gp stash push >/dev/null 2>&1
+expect_status "clear forgets them all" 0 gp stash clear
+expect_out "and the list is empty" "" gp stash list
+expect_absent "with no ref and no log left behind" "$sta/.gitprompt/refs/stash"
+cd "$back" || exit 2
+
+# putting an entry back is a merge, so it stops where a merge stops
+stc=$work/stash-conflict
+rm -rf "$stc"
+mkdir -p "$stc" || exit 2
+cd "$stc" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email stc@example.com
+gp config user.name "Stash Conflict"
+echo base > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+echo stashed > a.txt
+gp stash push >/dev/null 2>&1
+echo head > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "another change to the same line" >/dev/null 2>&1
+
+expect_status "an entry that clashes stops rather than guessing" 1 gp stash apply
+expect "and it stops in the shape a merge stops in" \
+	"<<<<<<< Updated upstream" cat a.txt
+expect "labelling the two sides the way git labels them" \
+	">>>>>>> Stashed changes" cat a.txt
+expect "the entry stays, because it is still the only copy" \
+	"stash@{0}:" gp stash list
+
+# a clash is not the only reason to stop: a file the entry would write over is
+# refused before anything is written
+sts=$work/stash-clobber
+rm -rf "$sts"
+mkdir -p "$sts" || exit 2
+cd "$sts" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email sts@example.com
+gp config user.name "Stash Clobber"
+echo base > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+echo stashed > a.txt
+gp stash push >/dev/null 2>&1
+echo uncommitted > a.txt
+expect "an entry onto a file with uncommitted work is refused" \
+	"would be overwritten by merge" gp stash apply
+expect "and it says what it is aborting" "Aborting" gp stash apply
+expect "and the uncommitted work is untouched" "uncommitted" cat a.txt
+expect "and the entry is kept" "stash@{0}:" gp stash list
+cd "$back" || exit 2
+
+# an entry is a revision, so it can be the base of a branch
+stb=$work/stash-branch
+rm -rf "$stb"
+mkdir -p "$stb" || exit 2
+cd "$stb" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email stb@example.com
+gp config user.name "Stash Branch"
+echo base > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the root" >/dev/null 2>&1
+echo work > a.txt
+gp stash push >/dev/null 2>&1
+echo dirty > a.txt
+expect "a branch cannot be cut while the work tree is dirty" \
+	"would be overwritten by" gp stash branch side
+echo base > a.txt
+expect "an entry can be the base of a branch" \
+	"Switched to a new branch 'side'" gp stash branch side
+expect "which the reflog reads as a switch, since a branch is what it made" \
+	"checkout: moving from main to side" gp reflog
+expect "with the work on it" "work" cat a.txt
+expect_absent "and the entry goes, having been replayed" \
+	"$stb/.gitprompt/refs/stash"
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 say "the same history reads the same from any clock"
 
 # A history is recorded with an offset and replayed elsewhere, so anything that

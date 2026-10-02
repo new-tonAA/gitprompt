@@ -476,6 +476,24 @@ int refs_exists(struct ref_store *r, const char *name);
 void refs_reflog(struct ref_store *r, const char *name, const oid_t *old,
 		 const oid_t *new, const char *msg);
 /*
+ * One line of a ref's reflog, read back: the id it moved to, and what the
+ * entry says.  `refs_reflog_read` returns them oldest first, -1 when the ref
+ * has no reflog at all, and the caller frees the array with
+ * `reflog_entries_free`.  `refs_reflog_drop` removes entry `n`, counting from
+ * the newest, and takes the file away when that was the last one.
+ * `refs_reflog_delete` takes the whole log, for a ref whose history is being
+ * forgotten rather than trimmed.
+ */
+struct reflog_entry {
+	oid_t oid;
+	char *msg;              /* owned */
+};
+int refs_reflog_read(struct ref_store *r, const char *name,
+		     struct reflog_entry **out);
+void reflog_entries_free(struct reflog_entry *e, int nr);
+int refs_reflog_drop(struct ref_store *r, const char *name, int n);
+int refs_reflog_delete(struct ref_store *r, const char *name);
+/*
  * The entry HEAD's own reflog gets when `ref` moves.  `ref` is the ref that
  * was updated, and the entry is written only when that is the one HEAD names;
  * pass NULL to say HEAD moved without any ref being rewritten, which is what
@@ -591,11 +609,19 @@ struct merge_result {
  *
  * `label` names the far side in the messages, and is the revision the merge is
  * being made from: a branch for `merge`, the commit for a replay.
+ *
+ * merge_trees_labeled is the same merge with the near side named too, because
+ * a stash conflict is not a merge and git gives its two sides the names it
+ * gives them.
  */
 void merge_trees(struct repo *r, const oid_t *base, const oid_t *ours,
 		 const oid_t *theirs, struct merge_result *res,
 		 struct index_state *merged, enum merge_favor favor,
 		 const char *label);
+void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
+			 const oid_t *theirs, struct merge_result *res,
+			 struct index_state *merged, enum merge_favor favor,
+			 const char *ours_label, const char *label);
 
 /* ------------------------------------------------------------------ */
 /* the working tree                                                    */
@@ -907,6 +933,7 @@ int cmd_merge(struct repo *, int, char **);
 int cmd_cherry_pick(struct repo *, int, char **);
 int cmd_rebase(struct repo *, int, char **);
 int cmd_revert(struct repo *, int, char **);
+int cmd_stash(struct repo *, int, char **);
 int cmd_tag(struct repo *, int, char **);
 
 /*

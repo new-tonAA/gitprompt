@@ -99,6 +99,66 @@ static int resolve_refname(struct repo *r, const char *name, oid_t *out)
 	return -1;
 }
 
+/*
+ * "<ref>@{n}" names a reflog entry rather than a ref: 0 is where the ref is
+ * now and n counts back from it.  It is how a stash is named -- stash@{2} is
+ * the third-most-recent one -- and how a branch's earlier positions are, and
+ * both read the file the same way.
+ *
+ * Answers 1 for a name that is not of this form at all, 0 when it resolved,
+ * and -1 when it named an entry the log does not have, having said so.  The
+ * prefixes are tried in the order a bare name is tried in, so `stash@{0}`
+ * finds refs/stash and `main@{1}` finds refs/heads/main.
+ */
+static int reflog_lookup(struct repo *r, const char *name, oid_t *out)
+{
+	static const char *prefixes[] = { "", "refs/heads/", "refs/" };
+	char *at = strstr(name, "@{");
+	struct reflog_entry *e = NULL;
+	char *base, *num;
+	size_t i, len;
+	int n, nr = -1, found = 0, rc = 1;
+	long v;
+	char *end;
+
+	if (!at || at == name || at[strlen(at) - 1] != '}')
+		return 1;
+
+	len = strlen(at + 2);
+	num = xstrndup(at + 2, len ? len - 1 : 0);
+	v = strtol(num, &end, 10);
+	if (*end || v < 0 || v > 1000000) {
+		gp_error("bad revision: %s", name);
+		free(num);
+		return -1;
+	}
+	n = (int)v;
+	free(num);
+	base = xstrndup(name, (size_t)(at - name));
+
+	for (i = 0; i < sizeof prefixes / sizeof prefixes[0] && !found; i++) {
+		char *cand = xstrfmt("%s%s", prefixes[i], base);
+
+		nr = refs_reflog_read(&r->refs, cand, &e);
+		found = nr >= 0;
+		free(cand);
+	}
+	if (!found) {
+		gp_error("unknown revision: %s", name);
+		rc = -1;
+	} else if (n >= nr) {
+		gp_error("log for '%s' only has %d entr%s", base, nr,
+			 nr == 1 ? "y" : "ies");
+		rc = -1;
+	} else {
+		*out = e[nr - 1 - n].oid;
+		rc = 0;
+	}
+	reflog_entries_free(e, nr > 0 ? nr : 0);
+	free(base);
+	return rc;
+}
+
 /* ------------------------------------------------------------------ */
 /* revision strings                                                    */
 
@@ -241,9 +301,17 @@ int resolve_rev(struct repo *r, const char *rev, oid_t *out)
 			free(name);
 			return -1;
 		}
-	} else if (resolve_refname(r, name, &base) < 0) {
-		free(name);
-		return -1;
+	} else {
+		int lr = reflog_lookup(r, name, &base);
+
+		if (lr < 0) {
+			free(name);
+			return -1;
+		}
+		if (lr > 0 && resolve_refname(r, name, &base) < 0) {
+			free(name);
+			return -1;
+		}
 	}
 
 	rc = 0;

@@ -145,8 +145,9 @@ Reverting the undo brings both back.
 **tag** — an annotated tag: `object`, `type`, `tag`, `tagger`, blank line,
 message.
 
-Three or more parents are representable and are read back correctly, though
-only `merge` writes a second one.
+Three or more parents are representable and are read back correctly. `merge`
+writes a second one; `stash` writes a second, the index it was taken with, and
+a third for the untracked files when it was asked to take those too.
 
 ## 2. Refs
 
@@ -155,6 +156,7 @@ only `merge` writes a second one.
 | `refs/heads/<name>` | a branch |
 | `refs/tags/<name>` | a tag (may point at a tag object or straight at a commit) |
 | `refs/remotes/<remote>/<name>` | the last known position of a remote branch |
+| `refs/stash` | the newest stash entry, and `logs/refs/stash` the rest of them |
 | `HEAD` | `ref: refs/heads/main`, or a raw id when detached |
 | `logs/<ref>` | the reflog for that ref |
 | `logs/HEAD` | the reflog of where the work tree has been |
