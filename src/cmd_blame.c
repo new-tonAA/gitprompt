@@ -141,7 +141,8 @@ int cmd_blame(struct repo *r, int argc, char **argv)
 	buf_init(&revtext);
 	buf_add(&revtext, cur.b, cur.len);
 
-	diff_split_lines(revtext.b ? revtext.b : "", revtext.len, &rd, &nrev);
+	diff_split_lines(revtext.b ? (const char *)revtext.b : "", revtext.len,
+			 &rd, &nrev);
 	att = xcalloc(nrev + 1, sizeof(*att));
 
 	{
@@ -197,10 +198,10 @@ int cmd_blame(struct repo *r, int argc, char **argv)
 					break;
 				}
 
-				diff_split_lines(cur.b ? cur.b : "", cur.len,
-						 &lc, &nc);
-				diff_split_lines(par.b ? par.b : "", par.len,
-						 &lp, &np);
+				diff_split_lines(cur.b ? (const char *)cur.b : "",
+						 cur.len, &lc, &nc);
+				diff_split_lines(par.b ? (const char *)par.b : "",
+						 par.len, &lp, &np);
 				lcs_diff(lp, np, lc, nc, &ol, &no, &counts);
 
 				next = xmalloc((np + 1) * sizeof(*next));
