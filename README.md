@@ -479,7 +479,7 @@ names are git's, and the behaviour is meant to match:
   `add`, `rm`,
   `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
-- **examine** — `status`, `log`, `show`, `diff`, `reflog`
+- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`,
   `cherry-pick`, `rebase`, `revert`, `stash`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
@@ -538,8 +538,8 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 58. Missing are
-  `bisect`, `blame`, `clean`, `grep`,
+  gitprompt built from this tree lists 59. Missing are
+  `bisect`, `clean`, `grep`,
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
   and `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
@@ -555,7 +555,7 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **860 checks, 0 failures** — 757 in
+The end-to-end suite passes: **881 checks, 0 failures** — 778 in
 `test/smoke.sh`, 67 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
@@ -574,7 +574,9 @@ and `--abort`, merges that follow a file that moved, commits replayed with
 `cherry-pick`, `rebase` and `revert` including their conflicts, empty results and
 `--continue`/`--skip`/`--abort`, work set aside and put back with `stash`
 including the untracked files, the index kept, a clash and the entry a branch
-can be made from, `status` and `diff` on a
+can be made from, a change traced back to the prompt that asked for it -- line
+by line with `blame`, hunk by hunk with `--prompt-hunks`, and the commit-level
+fallback for a prompt recorded without a snapshot -- `status` and `diff` on a
 move, the commit editor, per-command option validation, that the replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
@@ -635,6 +637,47 @@ to` spell the pair out. The hunks follow only when the move carried a change, an
 file changed with nothing added or removed. The score is the share of lines the
 two copies have in common — the same measure the merge uses to decide the move
 happened at all.
+
+### Tracing a line back to its prompt
+
+A commit binds code to prompt, but only as a whole: the commit says which
+prompts it carries, not which block of the change each one asked for. Two
+prompts that touch the same file are one diff, and no reading of the result
+recovers the split. So gitprompt writes it down as the prompts are given: each
+prompt file records, in its `snapshot:`, the work tree as it stood **before**
+that prompt's change. A run of prompts is then a chain of states — the parent's
+tree, the first prompt's snapshot, the second's, up to the commit's own tree —
+and the step between two of them is one prompt's work. The last prompt's step
+ends at the commit's tree.
+
+None of this is inferred. A commit whose prompts predate snapshots, or whose
+snapshots are gone, has no chain, and the tools say so rather than guess.
+
+`gp blame <file>` reads the chain back line by line. It walks the file the way
+git's blame does — diffing each version against its parent, carrying unmatched
+lines back — and lands every line on the commit that introduced it; inside that
+commit it lands the line on the block whose step added it, and names the prompt.
+The first column is the prompt, the second the abbreviated commit, then the line
+number and the text. A prompt id with a `?` is the commit's as a whole, because
+that commit keeps no snapshots and the block behind the line is not known, and a
+`-` means no prompt claims the line at all.
+
+`gp show --prompt-hunks` and `gp diff --prompt-hunks` annotate the ordinary diff:
+before each `@@` hunk header comes a `prompt <id>` line naming the prompt whose
+step it belongs to, or `prompt (none)` for a step no prompt owns. The prompt
+files themselves never appear — a prompt file is not in the index, so it cannot
+be in a snapshot, and its block would say nothing about the code.
+
+`gp show <prompt-id>` completes the picture from the other side: it lists every
+commit that carries the prompt, oldest first, as `<abbrev> <date> <subject>`.
+
+Snapshots are tree objects, so they cost what any tree costs and share the
+objects they have in common with their neighbours. A tree named only by text in
+a prompt file would otherwise be unreachable, and `gc` would prune it once it
+was older than the grace period — so both `fsck` and `gc` read the prompt files
+they walk past and treat the snapshot a prompt names as a root. What that buys
+is the one thing the feature cannot do without: a snapshot a user can still
+check out from after a `gc`.
 
 ### The commit message, when there is no `-m`
 

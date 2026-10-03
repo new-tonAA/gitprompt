@@ -251,13 +251,22 @@ struct prompt {
 	char *path;             /* repo-relative path of the file form */
 	char *body;             /* the prompt text itself */
 	/*
+	 * The work tree as it stood when this prompt was recorded, named by a
+	 * tree object.  It is taken before the prompt's own change, so a run of
+	 * prompts is a chain of states and each one's change is the step between
+	 * its snapshot and the next -- the commit's tree closing the last step.
+	 * NULL when it could not be taken (an unmerged index, say), which is also
+	 * what every prompt recorded before snapshots existed carries.
+	 */
+	char *snapshot;
+	/*
 	 * The answer, when one has been recorded.  Not part of the prompt
 	 * file: it is folded on at load time, so that everything which reads
 	 * the history sees the prompt and what came back together.
 	 */
 	struct response *response;
 };
-#define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL }
+#define PROMPT_INIT { NULL,NULL,0,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL }
 void prompt_release(struct prompt *p);
 
 /*
@@ -628,6 +637,16 @@ void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
 
 int write_tree_from_index(struct repo *r, const struct index_state *istate,
 			  oid_t *out);
+/*
+ * The index the work tree would make: every path `idx` knows, hashed again from
+ * disk, with the ones no longer there dropped.  What the index holds is the set
+ * of paths that count as tracked; what the files hold is the state.  Writing the
+ * result with write_tree_from_index is how a snapshot of the work tree is taken.
+ */
+void index_from_worktree(struct repo *r, const struct index_state *idx,
+			 struct index_state *out);
+/* hash one work-tree file into the object store; -1 when it is not there */
+int hash_worktree_blob(struct repo *r, const char *relpath, oid_t *oid, u32 *mode);
 /* check out a tree into the work tree; force==0 refuses to clobber */
 int checkout_tree(struct repo *r, const oid_t *tree, int force, int update_index);
 int read_tree_into_index(struct repo *r, struct index_state *istate,
@@ -904,6 +923,7 @@ int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);
 int cmd_reflog(struct repo *, int, char **);
+int cmd_blame(struct repo *, int, char **);
 int cmd_describe(struct repo *, int, char **);
 
 int cmd_prompt(struct repo *, int, char **);
@@ -966,6 +986,83 @@ int diff_buffers(const char *a_label, const void *a, size_t alen,
 		 struct buf *out, int stat_only);
 void diff_trees(struct repo *r, const oid_t *old_tree, const oid_t *new_tree,
 		struct buf *out, int stat_only);
+
+/* ------------------------------------------------------------------ */
+/* the line diff engine (cmd_work.c)                                   */
+
+/* one line, as a slice of the buffer it was split out of */
+struct dline {
+	const char *p;
+	size_t len;
+};
+
+/* one line of the edit script, in the order the diff reads */
+struct oline {
+	char op;                /* ' ', '-', '+' */
+	const char *p;
+	size_t len;
+	size_t a, b;            /* 0-based indices into a[] and b[] */
+};
+
+struct stat_counts {
+	long add, del;
+};
+
+void diff_split_lines(const void *data, size_t len, struct dline **out, size_t *nr);
+int lcs_diff(const struct dline *a, size_t na, const struct dline *b, size_t nb,
+	     struct oline **out, size_t *nout, struct stat_counts *counts);
+
+/*
+ * Whether `path` is a prompt file in `dir`, which is the configured prompt
+ * directory; `rest`, when given, is what is left of the path after it.
+ */
+int is_prompt_path(const char *dir, size_t dl, const char *path,
+		   const char **rest);
+
+/* ------------------------------------------------------------------ */
+/* tracing a prompt's code (trace.c)                                   */
+
+/*
+ * One step of a commit's history: the change one prompt asked for, held as the
+ * pair of trees the step is the difference between.  A step with no prompt is
+ * the work that was already in the tree when the commit's first prompt was
+ * recorded -- nobody asked for it, so nothing is named for it.
+ */
+struct trace_step {
+	char *prompt;           /* p_..., or NULL */
+	oid_t from;
+	oid_t to;
+	int have_from;          /* 0 when the step starts from an empty tree */
+};
+
+struct trace {
+	struct trace_step *e;
+	size_t nr;
+	char *why;              /* why there are no steps, or NULL */
+};
+
+/*
+ * The steps a commit went through, oldest first.  A commit whose prompts all
+ * carry snapshots has one step per prompt, plus a step before the first when
+ * work predates it; the steps telescope from the parent's tree to the commit's
+ * own, so they are the commit's whole change and nothing else.  A commit that
+ * carries no prompt, or a prompt with no snapshot, gets no steps and a `why`,
+ * and the caller falls back to the commit-level prompt list.
+ *
+ * The caller releases the result with trace_release.
+ */
+void trace_of_commit(struct repo *r, const struct commit *c, struct trace *out);
+void trace_release(struct trace *t);
+/* the steps' diffs, each under the prompt it belongs to */
+void trace_render(struct repo *r, const struct trace *t, struct buf *out);
+/*
+ * For a file as the commit holds it, the prompt each line came from, NULL for a
+ * line that predates the commit's first prompt.  `nr` is the file's line count
+ * and the ids are borrowed from the trace.  -1 when the commit has no chain to
+ * trace the file through, or does not hold the file at all.
+ */
+int trace_file_prompts(struct repo *r, const struct trace *t, const char *path,
+		       const char ***out, size_t *nr);
 
 /* check a tree out onto the work tree; both used by checkout and merge */
 void write_blob_to_worktree(struct repo *r, const char *relpath, const oid_t *oid);

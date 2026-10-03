@@ -1144,8 +1144,8 @@ static int lookup_dir_tree(struct repo *r, const oid_t *root, const char *dir,
 	return 0;
 }
 
-static int is_prompt_path(const char *dir, size_t dl, const char *path,
-			  const char **rest)
+int is_prompt_path(const char *dir, size_t dl, const char *path,
+		   const char **rest)
 {
 	size_t n, rn;
 
@@ -1536,7 +1536,9 @@ int cmd_log(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* show                                                                */
 
-static void print_prompt_detail(const struct prompt_ref *ref)
+static void print_prompt_carriers(struct repo *r, const char *id);
+
+static void print_prompt_detail(struct repo *r, const struct prompt_ref *ref)
 {
 	const struct prompt *p = ref->prompt;
 
@@ -1564,6 +1566,8 @@ static void print_prompt_detail(const struct prompt_ref *ref)
 	}
 	if (ref->path)
 		printf("  file:      %s\n", ref->path);
+	if (p->id)
+		print_prompt_carriers(r, p->id);
 	printf("\n");
 	body_print_indented(p->body, "  ");
 
@@ -1574,6 +1578,110 @@ static void print_prompt_detail(const struct prompt_ref *ref)
 		printf("\n\n");
 		body_print_indented(p->response->body, "  ");
 	}
+}
+
+/*
+ * The commits that carry a prompt, oldest first.
+ *
+ * A prompt is carried by the commits whose header names it, and it is the one
+ * thing about a prompt that history can answer on its own -- no snapshot is
+ * needed, because "which commits named this prompt" is written in the commit
+ * headers.  A prompt replayed onto another branch is carried by the copy there
+ * as well as by the original, so this is a list and not a single commit, and
+ * it is listed in the order the work happened rather than the order the walk
+ * found it, which is what a reader asking "where did this prompt land" wants.
+ */
+struct carrier {
+	oid_t oid;
+	i64 when;
+	char *subject;
+};
+
+struct carries {
+	struct carrier *e;
+	size_t nr, alloc;
+};
+
+struct carries_ctx {
+	const char *id;
+	struct carries *c;
+};
+
+static void carries_cb(const oid_t *oid, const struct commit *cm, void *ud)
+{
+	struct carries_ctx *c = ud;
+	struct carrier *k;
+	size_t i;
+
+	for (i = 0; i < cm->nr_prompts; i++) {
+		if (!cm->prompts[i] || strcmp(cm->prompts[i], c->id))
+			continue;
+		if (c->c->nr == c->c->alloc) {
+			c->c->alloc = c->c->alloc ? c->c->alloc * 2 : 8;
+			c->c->e = xrealloc(c->c->e,
+					   c->c->alloc * sizeof(*c->c->e));
+		}
+		k = &c->c->e[c->c->nr++];
+		k->oid = *oid;
+		k->when = commit_time(cm);
+		k->subject = commit_message_line(cm);
+		return;
+	}
+}
+
+static int carrier_cmp(const void *a, const void *b)
+{
+	const struct carrier *x = a, *y = b;
+
+	if (x->when != y->when)
+		return x->when < y->when ? -1 : 1;
+	return 0;
+}
+
+static void tips_cb(const char *name, const oid_t *oid, void *ud)
+{
+	struct oid_array *out = ud;
+
+	(void)name;
+	if (!oid_array_contains(out, oid))
+		oid_array_append(out, oid);
+}
+
+static void print_prompt_carriers(struct repo *r, const char *id)
+{
+	struct oid_array tips = OID_ARRAY_INIT;
+	struct carries cs;
+	struct carries_ctx cc;
+	size_t i;
+
+	memset(&cs, 0, sizeof cs);
+	refs_list(&r->refs, "refs/heads/", tips_cb, &tips);
+	refs_list(&r->refs, "refs/tags/", tips_cb, &tips);
+	refs_list(&r->refs, "refs/remotes/", tips_cb, &tips);
+	refs_list_packed(&r->refs, "refs/", tips_cb, &tips);
+
+	cc.id = id;
+	cc.c = &cs;
+	walk_commits(r, &tips, carries_cb, &cc);
+	oid_array_clear(&tips);
+
+	if (!cs.nr)
+		return;
+
+	qsort(cs.e, cs.nr, sizeof(*cs.e), carrier_cmp);
+	printf("  carried by:\n");
+	for (i = 0; i < cs.nr; i++) {
+		struct buf when;
+		char *ab = abbrev_oid(&cs.e[i].oid);
+
+		buf_init(&when);
+		epoch_to_iso8601(cs.e[i].when, &when);
+		printf("    %s %s %s\n", ab, buf_cstr(&when), cs.e[i].subject);
+		buf_release(&when);
+		free(ab);
+		free(cs.e[i].subject);
+	}
+	free(cs.e);
 }
 
 /*
@@ -1620,7 +1728,7 @@ static int show_gp_id(struct repo *r, const char *want)
 			const struct prompt *p = ref->prompt;
 
 			if (p->id && !strcmp(p->id, want)) {
-				print_prompt_detail(ref);
+				print_prompt_detail(r, ref);
 				shown = 1;
 				break;
 			}
@@ -1646,6 +1754,29 @@ static int show_gp_id(struct repo *r, const char *want)
 	return shown;
 }
 
+/*
+ * A commit's change, told the way it was asked for: one step per prompt, each
+ * under the prompt that asked for it.  A commit with no chain -- one recorded
+ * before snapshots were kept, or one whose prompts came from somewhere else --
+ * gets the ordinary diff and a line saying why, because a diff with no prompt
+ * names on it is still the whole truth about what changed.
+ */
+static void trace_or_diff(struct repo *r, const struct commit *c,
+			  const oid_t *old_tree, int have_old, struct buf *out)
+{
+	struct trace tr;
+
+	trace_of_commit(r, c, &tr);
+	if (tr.nr) {
+		trace_render(r, &tr, out);
+	} else {
+		if (c->nr_prompts && tr.why)
+			buf_addf(out, "(no breakdown: %s)\n", tr.why);
+		diff_trees(r, have_old ? old_tree : NULL, &c->tree, out, 0);
+	}
+	trace_release(&tr);
+}
+
 int cmd_show(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
@@ -1653,7 +1784,7 @@ int cmd_show(struct repo *r, int argc, char **argv)
 	enum obj_type t;
 
 	opts_init(&o, argc, argv,
-		   (const char *const[]){ "--stat", NULL });
+		   (const char *const[]){ "--stat", "--prompt-hunks", NULL });
 	if (!opts_arg(&o, 0)) {
 		gp_error("show: expected a revision");
 		return 1;
@@ -1729,9 +1860,19 @@ int cmd_show(struct repo *r, int argc, char **argv)
 		}
 		new_tree = c.tree;
 
+		if (opts_flag(&o, "--prompt-hunks") && stat_only) {
+			gp_error("show: --stat and --prompt-hunks cannot both be "
+				 "asked for");
+			commit_release(&c);
+			return 1;
+		}
+
 		buf_init(&diff);
-		diff_trees(r, have_old ? &old_tree : NULL, &new_tree, &diff,
-			   stat_only);
+		if (opts_flag(&o, "--prompt-hunks"))
+			trace_or_diff(r, &c, &old_tree, have_old, &diff);
+		else
+			diff_trees(r, have_old ? &old_tree : NULL, &new_tree,
+				   &diff, stat_only);
 		fwrite(diff.b, 1, diff.len, stdout);
 		buf_release(&diff);
 		commit_release(&c);
@@ -1770,13 +1911,7 @@ int cmd_show(struct repo *r, int argc, char **argv)
 /* ------------------------------------------------------------------ */
 /* the line diff engine                                                */
 
-struct dline {
-	const char *p;
-	size_t len;
-};
-
-static void split_lines(const void *data, size_t len, struct dline **out,
-			size_t *nr)
+void diff_split_lines(const void *data, size_t len, struct dline **out, size_t *nr)
 {
 	struct dline *v = NULL;
 	size_t n = 0, alloc = 0;
@@ -1798,25 +1933,14 @@ static void split_lines(const void *data, size_t len, struct dline **out,
 	*nr = n;
 }
 
-struct oline {
-	char op;                /* ' ', '-', '+' */
-	const char *p;
-	size_t len;
-	size_t a, b;            /* 0-based indices into a[] and b[] */
-};
-
-struct stat_counts {
-	long add, del;
-};
-
 /*
  * A plain longest-common-subsequence diff.  The table is quadratic, so
  * a pathological pair of files falls back to "replace everything" rather
  * than allocating gigabytes.
  */
-static int lcs_diff(const struct dline *a, size_t na, const struct dline *b,
-		    size_t nb, struct oline **out, size_t *nout,
-		    struct stat_counts *counts)
+int lcs_diff(const struct dline *a, size_t na, const struct dline *b,
+	     size_t nb, struct oline **out, size_t *nout,
+	     struct stat_counts *counts)
 {
 	u32 *dp;
 	size_t i, j, n = 0;
@@ -2071,8 +2195,8 @@ int diff_buffers(const char *a_label, const void *a, size_t alen,
 		return 1;
 	}
 
-	split_lines(a ? a : "", a ? alen : 0, &la, &na);
-	split_lines(b ? b : "", b ? blen : 0, &lb, &nb);
+	diff_split_lines(a ? a : "", a ? alen : 0, &la, &na);
+	diff_split_lines(b ? b : "", b ? blen : 0, &lb, &nb);
 	lcs_diff(la, na, lb, nb, &o, &n, &counts);
 
 	if (!counts.add && !counts.del) {
@@ -2405,8 +2529,8 @@ static void diff_counts(const void *a, size_t alen, const void *b, size_t blen,
 	struct oline *o = NULL;
 	size_t na = 0, nb = 0, n = 0;
 
-	split_lines(a ? a : "", a ? alen : 0, &la, &na);
-	split_lines(b ? b : "", b ? blen : 0, &lb, &nb);
+	diff_split_lines(a ? a : "", a ? alen : 0, &la, &na);
+	diff_split_lines(b ? b : "", b ? blen : 0, &lb, &nb);
 	lcs_diff(la, na, lb, nb, &o, &n, counts);
 	free(la);
 	free(lb);
@@ -2691,12 +2815,51 @@ int cmd_diff(struct repo *r, int argc, char **argv)
 	struct stat_totals totals;
 
 	opts_init(&o, argc, argv, (const char *const[]){
-		"--cached", "--staged", "--stat", NULL });
+		"--cached", "--staged", "--stat", "--prompt-hunks", NULL });
 	cached = opts_flag(&o, "--cached") || opts_flag(&o, "--staged");
 	stat_only = opts_flag(&o, "--stat");
 	memset(&totals, 0, sizeof totals);
 
 	buf_init(&out);
+
+	/*
+	 * With this, the commit's own change is what is asked for, broken down
+	 * by the prompt that asked for each part of it.  A range has no chain:
+	 * the prompts that made the far end of it are not the ones that made the
+	 * near end, so there is nothing single to break down, and saying so is
+	 * better than picking one end and pretending.
+	 */
+	if (opts_flag(&o, "--prompt-hunks")) {
+		oid_t coid, parent_tree;
+		struct commit c = COMMIT_INIT;
+		enum obj_type t;
+		int have_parent = 0;
+
+		if (stat_only)
+			gp_die("diff: --stat and --prompt-hunks cannot both be "
+			       "asked for");
+		if (o.nargs != 1)
+			gp_die("diff: --prompt-hunks takes one commit\n"
+			       "hint: a range has no single chain of prompts "
+			       "to break it down");
+		if (resolve_rev(r, o.args[0], &coid) < 0 ||
+		    odb_type_of(&r->odb, &coid, &t) < 0 || t != OBJ_COMMIT)
+			gp_die("diff: not a commit: %s", o.args[0]);
+		read_commit(r, &coid, &c);
+		if (c.parents.nr) {
+			struct commit parent = COMMIT_INIT;
+
+			read_commit(r, &c.parents.oid[0], &parent);
+			parent_tree = parent.tree;
+			have_parent = 1;
+			commit_release(&parent);
+		}
+		trace_or_diff(r, &c, &parent_tree, have_parent, &out);
+		fwrite(out.b, 1, out.len, stdout);
+		buf_release(&out);
+		commit_release(&c);
+		return 0;
+	}
 
 	if (o.nargs >= 1) {
 		if (resolve_rev_tree(r, o.args[0], &old_tree) < 0)

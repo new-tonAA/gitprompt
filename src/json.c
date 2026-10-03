@@ -479,6 +479,7 @@ void prompt_release(struct prompt *p)
 	free(p->attachments);
 	free(p->path);
 	free(p->body);
+	free(p->snapshot);
 	if (p->response) {
 		response_release(p->response);
 		free(p->response);
@@ -496,6 +497,8 @@ void prompt_to_file(const struct prompt *p, struct buf *out)
 	buf_addf(out, "seq: %d\n", p->seq);
 	buf_addf(out, "timestamp: %s\n", p->timestamp ? p->timestamp : "");
 	buf_addf(out, "author: %s\n", p->author ? p->author : "");
+	if (p->snapshot)
+		buf_addf(out, "snapshot: %s\n", p->snapshot);
 	if (p->model)
 		buf_addf(out, "model: %s\n", p->model);
 	if (p->nr_tags) {
@@ -541,6 +544,8 @@ static void prompt_fm_kv(const char *key, const char *val, void *ud)
 		p->timestamp = xstrdup(val);
 	else if (!strcmp(key, "author"))
 		p->author = xstrdup(val);
+	else if (!strcmp(key, "snapshot") && val[0])
+		p->snapshot = xstrdup(val);
 	else if (!strcmp(key, "model") && val[0])
 		p->model = xstrdup(val);
 	else if (!strcmp(key, "outcome") && val[0])

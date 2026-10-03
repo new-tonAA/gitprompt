@@ -381,6 +381,41 @@ static void session_autotitle(struct repo *r, const char *sid, const char *body)
 	free(s);
 }
 
+/*
+ * The work tree as it stands, named by a tree, or NULL when there is no honest
+ * tree to name -- an index still holding conflicts, which is the one state
+ * write_tree_from_index refuses.  The snapshot is taken before the prompt's own
+ * change is made, so a run of prompts recorded over a stretch of work is a chain
+ * of states, and the step between two of them is what one prompt asked for.
+ *
+ * A snapshot that cannot be taken is not a reason to refuse the prompt: the
+ * prompt is the record, and the tracing it would have made possible is a
+ * footnote on it.
+ */
+static char *worktree_snapshot(struct repo *r)
+{
+	struct index_state idx, wt;
+	oid_t tree;
+	char hex[GP_SHA1_HEXSZ + 1];
+
+	memset(&idx, 0, sizeof idx);
+	memset(&wt, 0, sizeof wt);
+	index_read(&idx, repo_index_path(r));
+	if (index_has_unmerged(&idx)) {
+		index_release(&idx);
+		return NULL;
+	}
+	index_from_worktree(r, &idx, &wt);
+	index_release(&idx);
+	if (write_tree_from_index(r, &wt, &tree) < 0) {
+		index_release(&wt);
+		return NULL;
+	}
+	index_release(&wt);
+	oid_hex(&tree, hex);
+	return xstrdup(hex);
+}
+
 static int record_prompt(struct repo *r, const struct prompt_input *in,
 			 int stage_it)
 {
@@ -432,6 +467,8 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 		buf_release(&body);
 	}
 
+	p.snapshot = worktree_snapshot(r);
+
 	rel = new_prompt_path(r, seq, p.body);
 
 	buf_reset(&file);
@@ -453,6 +490,7 @@ static int record_prompt(struct repo *r, const struct prompt_input *in,
 	free(p.model);
 	free(p.parent_prompt);
 	free(p.body);
+	free(p.snapshot);
 	buf_release(&file);
 	return rc < 0 ? 1 : 0;
 }

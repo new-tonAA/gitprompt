@@ -68,57 +68,6 @@ static int sl_has(const struct strlist *l, const char *s)
 	return 0;
 }
 
-/* hash one work-tree file into the object store; -1 when it is not there */
-static int hash_wt(struct repo *r, const char *relpath, oid_t *oid, u32 *mode)
-{
-	struct buf b;
-	char *full = r->root ? xstrfmt("%s/%s", r->root, relpath)
-			     : xstrdup(relpath);
-	int rc;
-
-	buf_init(&b);
-	if (read_file(full, &b) < 0) {
-		free(full);
-		buf_release(&b);
-		return -1;
-	}
-	*mode = MODE_BLOB;
-#ifndef _WIN32
-	{
-		struct stat st;
-
-		if (stat(full, &st) == 0 && (st.st_mode & 0111))
-			*mode = MODE_EXEC;
-	}
-#endif
-	free(full);
-	rc = odb_write(&r->odb, OBJ_BLOB, b.b, b.len, oid);
-	buf_release(&b);
-	return rc;
-}
-
-/*
- * The index the work tree would make: every path the index knows, hashed
- * again, with the ones no longer in the work tree dropped.  What the index
- * holds is the set of paths that count as tracked; what the files hold is the
- * state.
- */
-static void index_from_worktree(struct repo *r, const struct index_state *idx,
-				struct index_state *out)
-{
-	size_t i;
-
-	for (i = 0; i < idx->nr; i++) {
-		struct index_entry e = idx->e[i];
-		u32 mode;
-
-		if (hash_wt(r, e.path, &e.oid, &mode) < 0)
-			continue;
-		e.mode = mode;
-		index_add(out, &e);
-	}
-}
-
 struct ut_ctx {
 	struct repo *r;
 	const struct index_state *idx;
@@ -141,7 +90,7 @@ static void ut_one(const char *relpath, void *ud)
 
 	if (index_get(c->idx, relpath))
 		return;
-	if (hash_wt(c->r, relpath, &oid, &mode) < 0)
+	if (hash_worktree_blob(c->r, relpath, &oid, &mode) < 0)
 		return;
 	memset(&e, 0, sizeof e);
 	full = xstrfmt("%s/%s", c->r->root, relpath);

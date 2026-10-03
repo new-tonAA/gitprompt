@@ -115,6 +115,50 @@ int write_tree_from_index(struct repo *r, const struct index_state *istate,
 	return build_tree(r, (struct index_state *)istate, "", out);
 }
 
+int hash_worktree_blob(struct repo *r, const char *relpath, oid_t *oid, u32 *mode)
+{
+	struct buf b;
+	char *full = r->root ? xstrfmt("%s/%s", r->root, relpath)
+			     : xstrdup(relpath);
+	int rc;
+
+	buf_init(&b);
+	if (read_file(full, &b) < 0) {
+		free(full);
+		buf_release(&b);
+		return -1;
+	}
+	*mode = MODE_BLOB;
+#ifndef _WIN32
+	{
+		struct stat st;
+
+		if (stat(full, &st) == 0 && (st.st_mode & 0111))
+			*mode = MODE_EXEC;
+	}
+#endif
+	free(full);
+	rc = odb_write(&r->odb, OBJ_BLOB, b.b, b.len, oid);
+	buf_release(&b);
+	return rc;
+}
+
+void index_from_worktree(struct repo *r, const struct index_state *idx,
+			 struct index_state *out)
+{
+	size_t i;
+
+	for (i = 0; i < idx->nr; i++) {
+		struct index_entry e = idx->e[i];
+		u32 mode;
+
+		if (hash_worktree_blob(r, e.path, &e.oid, &mode) < 0)
+			continue;
+		e.mode = mode;
+		index_add(out, &e);
+	}
+}
+
 /* ------------------------------------------------------------------ */
 /* walking a tree                                                      */
 

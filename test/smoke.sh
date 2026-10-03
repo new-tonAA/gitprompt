@@ -3894,6 +3894,181 @@ fi
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "tracing a change back to the prompt that asked for it"
+
+# A diff says what changed; it cannot say which prompt asked for the change,
+# because two prompts that touch one file are one diff.  What makes the answer
+# recoverable is a snapshot: recording a prompt names the work tree as it stood
+# at that moment, so a run of prompts is a chain of states and each one's
+# change is the step between its snapshot and the next.  These checks are that
+# chain on one file, with two prompts interleaved -- which is the case no
+# amount of looking at the history could untangle.
+tr=$work/trace
+rm -rf "$tr"
+mkdir -p "$tr" || exit 2
+cd "$tr" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.email trace@example.com
+gp config user.name "Trace Tester"
+
+printf 'line one\nline two\nline three\nline four\nline five\n' > app.c
+gp add -A >/dev/null 2>&1
+gp commit -m "base" >/dev/null 2>&1
+
+# the second prompt is recorded while the first one's change is already on
+# disk, so the two snapshots name two different states of the same file
+gp prompt -m "change line two" >/dev/null 2>&1
+t1=$(sed -n 's/^id: //p' prompts/0001-change-line-two.md)
+sed 's/^line two$/LINE TWO/' app.c > app.new && mv app.new app.c
+gp add -A >/dev/null 2>&1
+
+gp prompt -m "change line four" >/dev/null 2>&1
+t2=$(sed -n 's/^id: //p' prompts/0002-change-line-four.md)
+sed 's/^line four$/LINE FOUR/' app.c > app.new && mv app.new app.c
+gp add -A >/dev/null 2>&1
+gp commit -m "two prompts, one file" >/dev/null 2>&1
+
+expect "the prompt file names the state it was recorded over" \
+	"snapshot: " cat prompts/0001-change-line-two.md
+
+# Every line of the blamed file, told apart: the two the prompts changed belong
+# to a prompt each, and the three that carried through belong to no prompt at
+# all, having been in the tree before the first prompt was recorded.
+got=$(gp blame app.c | awk '{print $1}')
+want="-
+$t1
+-
+$t2
+-"
+if [ "$got" = "$want" ]; then
+	ok "each line names the prompt that asked for it, and the rest name none"
+else
+	bad "each line names the prompt that asked for it, and the rest name none" \
+		"wanted [$want] got [$got]"
+fi
+
+# The commit column has to agree: the two changed lines came from the commit
+# the prompts went into, and the untouched ones from the commit before it.
+b_now=$(gp blame app.c | awk 'NR==2 {print $2}')
+b_old=$(gp blame app.c | awk 'NR==1 {print $2}')
+b_also=$(gp blame app.c | awk 'NR==4 {print $2}')
+if [ -n "$b_now" ] && [ "$b_now" = "$b_also" ] && [ "$b_now" != "$b_old" ]; then
+	ok "and each line names the commit that line came from"
+else
+	bad "and each line names the commit that line came from" \
+		"new [$b_now] also [$b_also] old [$b_old]"
+fi
+
+if [ "$(gp blame app.c)" = "$(gp blame HEAD -- app.c)" ]; then
+	ok "the revision may be named, and HEAD is the one assumed"
+else
+	bad "the revision may be named, and HEAD is the one assumed" \
+		"$(gp blame HEAD -- app.c 2>&1)"
+fi
+
+# The base commit carries no prompt, so nothing in it can be attributed.
+if [ "$(gp blame HEAD~1 app.c | awk '{print $1}' | tr -d '\n')" = "-----" ]; then
+	ok "a commit that carries no prompt blames every line on no prompt"
+else
+	bad "a commit that carries no prompt blames every line on no prompt" \
+		"$(gp blame HEAD~1 app.c 2>&1)"
+fi
+
+# The annotated view is the same ordering, done on the text: the deletion of
+# `line two` has to fall between the first prompt's marker and the second's.
+ann=$(gp show --prompt-hunks HEAD)
+m1=$(printf '%s\n' "$ann" | grep -n "^prompt $t1\$" | cut -d: -f1)
+m2=$(printf '%s\n' "$ann" | grep -n "^prompt $t2\$" | cut -d: -f1)
+d1=$(printf '%s\n' "$ann" | grep -n '^-line two$' | cut -d: -f1)
+d2=$(printf '%s\n' "$ann" | grep -n '^-line four$' | cut -d: -f1)
+if [ -n "$m1" ] && [ -n "$m2" ] && [ "$m1" -lt "$d1" ] && \
+   [ "$d1" -lt "$m2" ] && [ "$m2" -lt "$d2" ]; then
+	ok "--prompt-hunks puts each hunk under the prompt that asked for it"
+else
+	bad "--prompt-hunks puts each hunk under the prompt that asked for it" \
+		"markers [$m1][$m2] deletions [$d1][$d2]"
+fi
+
+# A prompt file is in the commit like any other file and the step that wrote it
+# really did add it, but naming it underneath its own prompt says nothing about
+# the code, so it is left out of the breakdown.
+if [ "$(printf '%s\n' "$ann" | grep -c 'diff --git a/prompts/')" = "0" ]; then
+	ok "and the prompt files are not filed under their own prompts"
+else
+	bad "and the prompt files are not filed under their own prompts" \
+		"$ann"
+fi
+
+expect "diff --prompt-hunks breaks a commit down the same way" \
+	"prompt $t1" gp diff --prompt-hunks HEAD
+expect "and names the second prompt too" "prompt $t2" gp diff --prompt-hunks HEAD
+expect_status "a range has no single chain of prompts to break down" 128 \
+	gp diff --prompt-hunks HEAD~1 HEAD
+expect_status "and --stat is a different question" 128 \
+	gp diff --prompt-hunks --stat HEAD
+
+# The other direction: given a prompt, which commits carry it.  A prompt
+# replayed onto another branch is carried by the copy there as well as by the
+# original, which is why the answer is a list.
+expect "show names the commits that carry a prompt" "carried by:" gp show "$t1"
+expect "and lists each by its subject" "two prompts, one file" gp show "$t1"
+expect_status "an id that names no prompt is refused" 128 gp show p_nosuchid
+
+# A snapshot is named inside a blob, which no walk reads, so nothing would
+# reach it -- and gc would be free to reclaim the state the attribution is
+# built from.  fsck calling nothing dangling is what says it is a root.
+if [ "$(gp fsck 2>&1 | grep -c dangling)" = "0" ]; then
+	ok "a snapshot is reachable, so fsck calls nothing dangling"
+else
+	bad "a snapshot is reachable, so fsck calls nothing dangling" "$(gp fsck 2>&1)"
+fi
+before=$(gp blame app.c)
+gp gc >/dev/null 2>&1
+if [ "$(gp fsck 2>&1 | grep -c dangling)" = "0" ]; then
+	ok "and gc leaves the snapshot in place"
+else
+	bad "and gc leaves the snapshot in place" "$(gp fsck 2>&1)"
+fi
+if [ "$before" = "$(gp blame app.c)" ]; then
+	ok "so the blame reads the same after a gc"
+else
+	bad "so the blame reads the same after a gc" "$(gp blame app.c)"
+fi
+
+# `outcome` rewrites the prompt file from what it parsed, so a key that is
+# written but not read back would be dropped here and the chain lost with it.
+# It comes after the checks above because the rewritten file is staged, and a
+# staged blob is not reachable from a ref until it is committed.
+gp outcome "$t1" "the retry count doubled" >/dev/null 2>&1
+expect "an outcome does not lose the snapshot" "snapshot: " \
+	cat prompts/0001-change-line-two.md
+
+# A prompt can have no snapshot: one recorded before snapshots were kept, or a
+# prompt file put into the tree by hand.  The chain is then gone, and the most
+# the history can say is which prompts the commit carries as a whole.
+sed 's/^line three$/LINE THREE/' app.c > app.new && mv app.new app.c
+gp add app.c >/dev/null 2>&1
+printf '%s\n' '---' 'id: p_handmade0' 'seq: 3' \
+	'timestamp: 2026-01-01T00:00:00+08:00' 'author: T <t@e>' '---' \
+	'hand made, with no snapshot' > prompts/0003-hand-made.md
+gp add prompts/0003-hand-made.md >/dev/null 2>&1
+gp commit -m "a prompt with no snapshot" >/dev/null 2>&1
+
+got=$(gp blame app.c | awk '{print $1}' | sed -n 3p)
+case "$got" in
+*'?')
+	ok "a commit with no chain names the prompt it carries, marked as the commit's" ;;
+*)
+	bad "a commit with no chain names the prompt it carries, marked as the commit's" \
+		"got [$got]" ;;
+esac
+expect "and the prompt named is one the commit carries" \
+	"$(printf '%s' "$got" | sed 's/?$//')" gp show HEAD
+expect "and --prompt-hunks says why there is no breakdown" \
+	"(no breakdown:" gp show --prompt-hunks HEAD
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

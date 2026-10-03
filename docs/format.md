@@ -238,6 +238,7 @@ session: s_1790354733_42fkw2
 seq: 1
 timestamp: 2026-09-26T00:45:33+08:00
 author: Your Name <you@example.com>
+snapshot: 4f2a1c9e7b3d5a6081c2e4f6a8b0d2c4e6f8a0b1
 model: claude-sonnet-5
 tags: [validation, frontend]
 outcome: Fields render; validation misses empty input.
@@ -265,6 +266,19 @@ an offset after it (`1700000000 +0800`), which is what a commit object carries,
 is accepted wherever a date is.
 
 Both `tags` and `attachments` are inline bracketed lists, comma-separated.
+
+`snapshot` is the hex of a tree object: the work tree, as it stood, at the moment
+this prompt was recorded — before this prompt's change. It is what lets a
+changed block of a commit be traced back to the prompt that asked for it. It is
+written when it can be
+computed and omitted when it cannot, so its absence is not an error: a prompt
+recorded against a tree with unmerged paths gets no snapshot, and records
+anyway.
+
+Because a snapshot tree is named only by this text, nothing in the object graph
+points at it. Both `gc` and `fsck` therefore read the prompt files they walk
+past and treat the snapshot a prompt names as a reachable root, so a snapshot
+that only a prompt file refers to is neither dangling nor pruned.
 
 What an agent answered the prompt is not in this file: it is an object of its
 own, named after this prompt's id (§6).

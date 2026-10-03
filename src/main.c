@@ -269,6 +269,12 @@ const struct command commands[] = {
 	  "diff [--cached] [--stat] [<rev>] [<rev>]" },
 	{ "reflog",     cmd_reflog,     "Show where HEAD has been, or a ref has pointed",
 	  "reflog [<ref>]" },
+	{ "blame",      cmd_blame,      "Show which prompt asked for each line of a file",
+	  "blame [<rev>] [--] <file>\n"
+	  "   Each line names the prompt that asked for it, and the commit it came\n"
+	  "   from.  A prompt id with a `?` is the commit's as a whole -- that\n"
+	  "   commit keeps no snapshots, so the block that asked for the line is not\n"
+	  "   known -- and `-` means no prompt claims the line at all." },
 
 	/* grow, mark and tweak */
 	{ "branch",     cmd_branch,     "List, create or delete branches",

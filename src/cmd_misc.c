@@ -97,6 +97,15 @@ struct fsck {
 	int commits;
 	int trees;
 	int refs;
+	/*
+	 * Prompt files name a snapshot tree in their frontmatter, which nothing
+	 * else in the object graph points at -- the reference is a path written
+	 * inside a blob, and a walk cannot see that.  It is read out here so
+	 * that a snapshot is reachable, and gc does not reclaim the state a
+	 * prompt's attribution is built from.
+	 */
+	const char *pdir;
+	size_t pdir_len;
 };
 
 static void fsck_err(struct fsck *f, const char *fmt, ...)
@@ -129,7 +138,39 @@ static int fsck_load(struct fsck *f, const oid_t *oid, enum obj_type want,
 	return 0;
 }
 
-static void fsck_tree(struct fsck *f, const oid_t *oid)
+static void fsck_tree(struct fsck *f, const oid_t *oid, const char *prefix);
+
+/*
+ * A prompt file names the work tree it was recorded over, and nothing else in
+ * the object graph points at that tree: the name is written inside a blob, and
+ * a walk does not read blobs.  Reading it here is what makes a snapshot a root
+ * -- gc leaves it alone, and fsck counts it as the tree it is.  A name that no
+ * longer resolves is left alone rather than reported: the attribution is what
+ * degrades, and trace.c is where that is said.
+ */
+static void fsck_prompt_snapshot(struct fsck *f, const char *path,
+				 const oid_t *oid)
+{
+	const char *rest;
+	struct buf b;
+	struct prompt p = PROMPT_INIT;
+	oid_t snap;
+
+	if (!f->pdir || !is_prompt_path(f->pdir, f->pdir_len, path, &rest))
+		return;
+
+	buf_init(&b);
+	if (odb_read(&f->r->odb, oid, NULL, &b) == 0 &&
+	    prompt_from_file(&p, b.b, b.len) && p.snapshot &&
+	    oid_parse(&snap, p.snapshot) == 0 &&
+	    odb_exists(&f->r->odb, &snap))
+		fsck_tree(f, &snap, "");
+
+	prompt_release(&p);
+	buf_release(&b);
+}
+
+static void fsck_tree(struct fsck *f, const oid_t *oid, const char *prefix)
 {
 	struct buf b;
 	struct tree t;
@@ -149,6 +190,7 @@ static void fsck_tree(struct fsck *f, const oid_t *oid)
 
 	for (i = 0; i < t.nr; i++) {
 		const struct tree_entry *e = &t.e[i];
+		char *full;
 
 		if (!e->name || !e->name[0]) {
 			fsck_err(f, "%s: tree entry with an empty name",
@@ -160,21 +202,28 @@ static void fsck_tree(struct fsck *f, const oid_t *oid)
 				 abbrev_oid(oid), e->name);
 			continue;
 		}
+		full = xstrfmt("%s%s", prefix, e->name);
 		if (e->mode == MODE_TREE) {
-			fsck_tree(f, &e->oid);
+			char *dir = xstrfmt("%s/", full);
+
+			fsck_tree(f, &e->oid, dir);
+			free(dir);
 		} else if (e->mode == MODE_BLOB || e->mode == MODE_EXEC ||
 			   e->mode == MODE_LINK) {
 			if (!odb_exists(&f->r->odb, &e->oid)) {
 				fsck_err(f, "%s: missing blob %s (for '%s')",
 					 abbrev_oid(oid), abbrev_oid(&e->oid),
 					 e->name);
+				free(full);
 				continue;
 			}
 			oid_set_add(&f->seen, &e->oid);
+			fsck_prompt_snapshot(f, full, &e->oid);
 		} else {
 			fsck_err(f, "%s: entry '%s' has bad mode %06o",
 				 abbrev_oid(oid), e->name, e->mode);
 		}
+		free(full);
 	}
 	tree_release(&t);
 	buf_release(&b);
@@ -214,7 +263,7 @@ static void fsck_commit(struct fsck *f, const oid_t *oid, struct oid_array *todo
 		fsck_err(f, "%s: commit points at missing tree %s",
 			 abbrev_oid(oid), abbrev_oid(&c.tree));
 	else
-		fsck_tree(f, &c.tree);
+		fsck_tree(f, &c.tree, "");
 
 	for (i = 0; i < c.parents.nr; i++) {
 		if (!odb_exists(&f->r->odb, &c.parents.oid[i]))
@@ -299,7 +348,7 @@ static void fsck_tag(struct fsck *f, const oid_t *oid)
 			}
 			oid_array_clear(&todo);
 		} else if (t == OBJ_TREE) {
-			fsck_tree(f, &target);
+			fsck_tree(f, &target, "");
 		} else if (t == OBJ_TAG) {
 			fsck_tag(f, &target);
 		}
@@ -339,7 +388,7 @@ static void fsck_ref_cb(const char *refname, const oid_t *oid, void *ud)
 		break;
 	}
 	case OBJ_TREE:
-		fsck_tree(f, oid);
+		fsck_tree(f, oid, "");
 		break;
 	case OBJ_TAG:
 		fsck_tag(f, oid);
@@ -375,9 +424,19 @@ static int dangling_one(const oid_t *oid, void *ud)
 /* mark everything reachable from the refs, for gc to work from */
 static void mark_reachable(struct repo *r, struct fsck *f)
 {
+	/* repo_prompt_dir hands back a static buffer, so the walk gets a copy
+	 * of its own to read for as long as it runs */
+	char *dir = xstrdup(repo_prompt_dir(r));
+
+	f->pdir = dir;
+	f->pdir_len = strlen(dir);
+
 	refs_list(&r->refs, "refs/", fsck_ref_cb, f);
 	refs_list_packed(&r->refs, "refs/", fsck_ref_cb, f);
 	oid_set_sort(&f->seen);
+
+	f->pdir = NULL;
+	free(dir);
 }
 
 int cmd_fsck(struct repo *r, int argc, char **argv)
