@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **969 checks, 0 failures** — 852 in
-`test/smoke.sh`, 81 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1039 checks, 0 failures** — 909 in
+`test/smoke.sh`, 94 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -27,7 +27,10 @@ including the untracked files, the index kept, a clash and the entry a branch
 can be made from, a change traced back to the prompt that asked for it -- line
 by line with `blame`, hunk by hunk with `--prompt-hunks`, and the commit-level
 fallback for a prompt recorded without a snapshot -- `status` and `diff` on a
-move, the commit editor, finding lines with `grep` in the work tree, in the
+move, `clean` in each of its three modes together with the collapse of a
+directory it reports whole, the pathspec that decides where that collapse lands,
+and the store it will not touch however many `-f` it is given -- the commit
+editor, finding lines with `grep` in the work tree, in the
 index and in a revision, the pattern syntax under each of the default, `-E` and
 `-F`, and the three exit statuses, halving a range with `bisect` — the order it
 probes in, a probe that cannot be judged, a script judging for it, and a refusal
@@ -47,7 +50,10 @@ branch, merge, tag, describe, reset, mv, rm, checkout `--`, clone, push, pull �
 run against a history of prompts, and each has to produce the thing git
 produces. `bisect` is compared as the walk it is rather than as its answer: the
 same eight commits are halved by both, and the probes have to come back in the
-same order with the same widths. What needs git itself is skipped rather than
+same order with the same widths. `clean` is compared on one fixture built to
+give each branch of its decision something to decide, in each mode and under
+each shape of pathspec and `-e`, with each tool run on its own copy so that the
+store each one skips is its own. What needs git itself is skipped rather than
 faked when git is not on PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

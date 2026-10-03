@@ -309,6 +309,43 @@ Three things it does not do exactly as git does:
   work tree — a different case, and the more common one — is refused in git's
   words exactly, down to the list of paths and the `Aborting` that ends it.
 
+## Taking out what the index does not know about
+
+`clean` is the one command here whose work is deletion, so it asks two questions
+of every path and refuses up front rather than printing a list and then acting on
+it. The first is whether a path may go at all: the index is what makes a file
+somebody's work, and a path the index holds is never a candidate. The second is
+which candidates this run was asked for, and that is what the three modes choose
+between — the untracked-but-not-ignored ones, all of them, or the ignored alone.
+`-e` is a third attitude to the same question: an exclude rule that takes a path
+out of the plain and `-x` modes and puts it into `-X`, which is why
+`clean -nX -e plain.txt` names a file nothing had called ignored.
+
+A directory is reported whole when everything under it is going, so `-ndx` says
+`Would remove allign/` rather than naming its files one at a time; the removal is
+recursive either way and the shorter line is the truer one. The collapse is
+decided by counting — every file under the directory, and the ones this run wants
+— and the three answers are one line when they are all wanted, silence when none
+are, and a walk into it when they are mixed. `-d` is what makes an untracked
+directory a candidate at all, with two exceptions that are not arbitrary: a
+directory holding something the index knows is always walked into, since its
+untracked side is exactly what the run is about, and `-X` with no `-d` descends
+into a mixed directory, because an ignored file under a directory that is not
+itself ignored is reachable no other way.
+
+A directory that is a repository in its own right is left alone however many `-f`
+are given. What makes it one is not the name — a stray directory called `.git`
+holding nothing but a config file is removed like any other — but the three
+things a store has: a `HEAD`, an `objects/` and a `refs/`.
+
+Which names count as ignored is `.gitpromptignore`, the file `status` and `add`
+already read, rather than `.gitignore`: whole basenames at any depth and whole
+paths, a trailing slash meaning directories only, and no globs at all. `-i` is
+refused as an unknown option, and a pathspec is the path of the directory it
+names rather than a wildmatch pattern, so `clean -nd -- a/b` collapses at `a/b/`
+even though the only thing under `a/` is `b/` and everything under `b/` is going
+too.
+
 ## The store
 
 The pack reader is exercised against packs git wrote, not only against the ones

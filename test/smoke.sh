@@ -4187,6 +4187,198 @@ expect_status "a file with a NUL in it is not text, and is left unsearched" 1 \
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "taking out what the index does not know about"
+
+# clean is the one command here whose job is deletion, so it is checked from
+# both ends: what it says it would do, which is where every decision lives and
+# where the three modes differ, and what is really left afterwards.  The
+# fixture is built so that each decision has something to decide -- a directory
+# holding nothing but ignored files, one holding a mixture, one that is empty,
+# one the index knows, and one that only -X can reach into.
+cl=$work/clean
+rm -rf "$cl"
+mkdir -p "$cl" || exit 2
+cd "$cl" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.name "Clean Tester" >/dev/null 2>&1
+gp config user.email clean@example.com >/dev/null 2>&1
+
+mkdir -p ignored_dir allign mixdir a/b/c emptyd tracked_dir two
+printf 'thing.log\na.log\nb.log\nignored_dir/\n' > .gitpromptignore
+printf 'tracked\n' > tracked.txt
+printf 'kept\n' > tracked_dir/kept.txt
+gp add .gitpromptignore tracked.txt tracked_dir/kept.txt >/dev/null 2>&1
+gp commit -m "base" >/dev/null 2>&1
+
+printf 'plain\n' > plain.txt
+printf 'log\n' > thing.log
+printf 'x\n' > ignored_dir/x.txt
+printf 'a\n' > allign/a.log
+printf 'm\n' > mixdir/plain.txt
+printf 'b\n' > mixdir/b.log
+printf 'c\n' > a/b/c/c.txt
+printf 'i\n' > tracked_dir/inner.txt
+printf '1\n' > two/a.log
+printf '2\n' > two/plain.txt
+
+# expect_absent_from <description> <text> <command...> -- the inverse of expect
+expect_absent_from() {
+	desc=$1; unwanted=$2; shift 2
+	got=$("$@" 2>&1)
+	case "$got" in
+	*"$unwanted"*) bad "$desc" "found [$unwanted] in [$got]" ;;
+	*) ok "$desc" ;;
+	esac
+}
+
+expect "nothing is removed without -f" \
+	"clean.requireForce is true and -f not given: refusing to clean" gp clean
+expect_status "and the refusal is fatal rather than a list" 128 gp clean
+expect "the two ignored modes cannot be asked for at once" \
+	"options '-x' and '-X' cannot be used together" gp clean -n -x -X
+expect_status "and that is fatal too" 128 gp clean -n -x -X
+
+# The plain mode is the narrow one: files the index does not know about, and
+# not the ignored ones.  tracked_dir is walked into although it needs no -d,
+# because the index knows a path inside it.
+expect_out "the plain mode names the untracked files" \
+"Would remove plain.txt
+Would remove tracked_dir/inner.txt" gp clean -n
+expect_absent_from "and says nothing about the ignored file" "thing.log" gp clean -n
+expect_absent_from "nor about anything under an ignored directory" \
+	"mixdir" gp clean -n
+expect_absent_from "nor about an untracked directory without -d" "a/" gp clean -n
+
+expect_out "-d brings the untracked directories in" \
+"Would remove a/
+Would remove emptyd/
+Would remove mixdir/plain.txt
+Would remove plain.txt
+Would remove tracked_dir/inner.txt
+Would remove two/plain.txt" gp clean -nd
+expect_absent_from "-d still leaves the ignored files alone" "thing.log" gp clean -nd
+expect_absent_from "-nd hides a directory whose files are all ignored" \
+	"allign/" gp clean -nd
+
+expect_out "-x takes the ignored files as well" \
+"Would remove plain.txt
+Would remove thing.log
+Would remove tracked_dir/inner.txt" gp clean -nx
+expect_absent_from "-x without -d still leaves directories" "mixdir/" gp clean -nx
+
+expect_out "-X takes only the ignored files" \
+"Would remove mixdir/b.log
+Would remove thing.log
+Would remove two/a.log" gp clean -nX
+expect_absent_from "and an empty directory is not an ignored one" "emptyd" gp clean -nX
+
+expect_out "-d and -X together collapse whole ignored directories" \
+"Would remove allign/
+Would remove ignored_dir/
+Would remove mixdir/b.log
+Would remove thing.log
+Would remove two/a.log" gp clean -ndX
+expect_absent_from "an all-ignored directory is left out of -ndx too" "a/b/c" \
+	gp clean -ndX
+expect_out "-d and -x collapse everything that is going whole" \
+"Would remove a/
+Would remove allign/
+Would remove emptyd/
+Would remove ignored_dir/
+Would remove mixdir/
+Would remove plain.txt
+Would remove thing.log
+Would remove tracked_dir/inner.txt
+Would remove two/" gp clean -ndx
+
+expect_out "-q says nothing at all" "" gp clean -n -q
+
+# -e is an exclude rule, and the three modes are three attitudes to exclude
+# rules, so it adds to what -X is after rather than taking from it.
+expect_out "an excluded file is not offered up in the plain mode" \
+"Would remove plain.txt
+Would remove tracked_dir/inner.txt" gp clean -nx -e thing.log
+expect_out "but -X is exactly what -e adds to" \
+"Would remove plain.txt
+Would remove thing.log" gp clean -nX -e plain.txt
+expect_out "an excluded directory is skipped whole" \
+"Would remove a/
+Would remove emptyd/
+Would remove plain.txt
+Would remove tracked_dir/inner.txt
+Would remove two/plain.txt" gp clean -nd -e mixdir
+expect_out "a trailing slash makes an -e pattern about a directory" \
+"Would remove mixdir/b.log
+Would remove thing.log" gp clean -nX -e two/
+expect_out "so without -d it is one entry or nothing" \
+"Would remove allign/
+Would remove ignored_dir/
+Would remove mixdir/b.log
+Would remove thing.log
+Would remove two/" gp clean -ndX -e two/
+
+# A pathspec is what says which part of the tree was meant.  It names the
+# directory it stops at -- that is where a collapse happens -- and it can take
+# the run into a directory that -d alone would not have opened.
+expect_out "a pathspec naming a directory decides where the collapse lands" \
+"Would remove a/b/" gp clean -nd -- a/b
+expect_out "and one that reaches below it is followed down with no -d" \
+"Would remove a/b/c/c.txt" gp clean -n -- a/b/c/c.txt
+expect_out "a pathspec naming a file takes the file" \
+"Would remove mixdir/plain.txt" gp clean -nx -- mixdir/plain.txt
+expect_out "a pathspec naming a mixture descends into it" \
+"Would remove mixdir/plain.txt" gp clean -n -- mixdir
+expect_status "a pathspec that matches nothing is not an error" 0 \
+	gp clean -n -- nosuch
+expect_out "and prints nothing" "" gp clean -n -- nosuch
+
+# What is actually left.  Without -d only files go.
+expect_out "a forced run says what it took, in the present tense" \
+"Removing plain.txt
+Removing tracked_dir/inner.txt" gp clean -f
+expect_absent "the untracked file is gone" plain.txt
+expect_absent "and so is the untracked one inside a tracked directory" \
+	tracked_dir/inner.txt
+expect_file "the ignored file is still there" thing.log
+expect_file "the ignored directory is still there" ignored_dir/x.txt
+expect_out "the tracked file kept its contents" "tracked" cat tracked.txt
+expect_out "and the one in the tracked directory kept its own" "kept" \
+	cat tracked_dir/kept.txt
+expect_file "the empty directory is still there, -d was not given" emptyd
+
+expect_status "with -d the directories go too" 0 gp clean -fd
+expect_absent "the untracked directory is gone" a
+expect_absent "the empty directory is gone" emptyd
+expect_absent "the wanted file in the mixture is gone" mixdir/plain.txt
+expect_file "the ignored one beside it is still there" mixdir/b.log
+expect_file "the all-ignored directory is still there" allign/a.log
+
+expect_status "-x finally takes the ignored ones" 0 gp clean -fdx
+expect_absent "the ignored file at the top is gone" thing.log
+expect_absent "the all-ignored directory is gone" allign
+expect_absent "and so is the ignored directory itself" ignored_dir
+expect_file "what the index knows is what is left" tracked.txt
+expect_file "including what is in a directory it knows" tracked_dir/kept.txt
+expect_out "and its contents are untouched" "kept" cat tracked_dir/kept.txt
+
+# A directory that is a repository in its own right is left alone however many
+# -f are given.  The three names a store always has are what makes it one, and
+# a directory that merely happens to be called .git is not one.
+mkdir -p nest/.git/objects nest/.git/refs sub/.git
+printf 'ref: refs/heads/main\n' > nest/.git/HEAD
+printf 'not-a-store\n' > sub/.git/config
+expect_out "a nested store is not named, nor descended into" \
+"Would remove sub/" gp clean -ndx
+expect_status "a forced run leaves it alone" 0 gp clean -fdx -- nest
+expect_file "and it is still there" nest/.git/HEAD
+expect_file "objects and all" nest/.git/objects
+expect_status "a directory called .git with no store in it is not one" 0 \
+	gp clean -fdx -- sub
+expect_absent "so it goes like any other directory" sub
+
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 say "halving a range to find the first bad commit"
 
 # bisect is a loop over a shrinking range, and nearly everything it can get

@@ -235,6 +235,8 @@ const struct command commands[] = {
 	  "rm [--cached] <path>..." },
 	{ "mv",         cmd_mv,         "Move or rename a file, and update the index",
 	  "mv <source> <destination>" },
+	{ "clean",      cmd_clean,      "Remove untracked files from the work tree",
+	  "clean [-n] [-f] [-d] [-x | -X] [-q] [-e PATTERN] [--] <path>..." },
 	{ "commit",     cmd_commit,     "Record the staged changes",
 	  "commit [-m MSG] [-F FILE] [-e] [--no-edit] [-a] [--amend]"
 	  " [--allow-empty] [-q]" },

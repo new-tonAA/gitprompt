@@ -703,6 +703,7 @@ void path_list_free(char **paths);
 /* paths */
 void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
 int path_is_ignored(struct repo *r, const char *relpath);
+int path_is_ignored_dir(struct repo *r, const char *relpath);
 int read_file(const char *path, struct buf *out);
 int write_file(const char *path, const void *data, size_t len);
 int is_directory(const char *path);
@@ -957,6 +958,7 @@ int cmd_ls_files(struct repo *, int, char **);
 int cmd_add(struct repo *, int, char **);
 int cmd_rm(struct repo *, int, char **);
 int cmd_mv(struct repo *, int, char **);
+int cmd_clean(struct repo *, int, char **);
 int cmd_status(struct repo *, int, char **);
 int cmd_commit(struct repo *, int, char **);
 int cmd_log(struct repo *, int, char **);

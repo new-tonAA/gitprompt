@@ -237,6 +237,74 @@ printf 'not wanted\n' > a.txt
 chk "reset --hard throws the hand edit away" "ours" \
 	"$(tail -1 a.txt | tr -d '\r')"
 
+# -------------------------------------------------------------------------- cleaning
+say "taking out what the index does not know about"
+
+# clean decides, per path, whether it may go, and the modes are three different
+# answers to that question.  So the whole output of each mode is compared
+# against git's on one fixture built to give each branch of the decision
+# something to decide: a directory of nothing but ignored files, one holding a
+# mixture, an empty one, one that is nested several deep, and one only -X
+# reaches into.  Both tools read the same file -- the ignore file is written
+# out twice under the two names.
+printf 'thing.log\na.log\nb.log\nignored_dir/\n' > .gitignore
+cp .gitignore .gitpromptignore
+"$GP" add .gitignore .gitpromptignore >/dev/null
+"$GP" commit -m "an ignore file both of them read" >/dev/null
+mkdir -p ignored_dir allign mixdir a/b/c emptyd tracked_dir two
+printf 'log\n' > thing.log
+printf 'x\n' > ignored_dir/x.txt
+printf 'a\n' > allign/a.log
+printf 'm\n' > mixdir/plain.txt
+printf 'b\n' > mixdir/b.log
+printf 'c\n' > a/b/c/c.txt
+printf 'i\n' > tracked_dir/inner.txt
+printf '1\n' > two/a.log
+printf '2\n' > two/plain.txt
+printf 'u\n' > plain.txt
+if [ "$have_git" = 1 ]; then
+	# Each tool is run on its own copy, and git's copy has its store renamed to
+	# .git.  Both of them skip their own store, but a store is only ever the one
+	# a tool found itself: git told --git-dir=.gitprompt still sees a plain
+	# directory called that, and offers to delete it, while gitprompt skips it
+	# the way it must.  The copies make that difference go away, and the ignore
+	# file is already written under both names with the same contents.
+	rm -rf "$work/cg" "$work/cp"
+	cp -r . "$work/cg"
+	mv "$work/cg/.gitprompt" "$work/cg/.git"
+	cp -r . "$work/cp"
+	gc() { ( cd "$work/cg" && git clean "$@" 2>&1 ) | tr -d '\r'; }
+	pc() { ( cd "$work/cp" && "$GP" clean "$@" 2>&1 ) | tr -d '\r'; }
+	gcrc() { ( cd "$work/cg" && git clean "$@" 2>&1; echo "rc=$?" ) | tr -d '\r'; }
+	pcrc() { ( cd "$work/cp" && "$GP" clean "$@" 2>&1; echo "rc=$?" ) | tr -d '\r'; }
+
+	for f in -n -nd -nx -ndx -nX -ndX; do
+		chk "git and gitprompt agree on clean $f" "$(gc $f)" "$(pc $f)"
+	done
+	chk "a pathspec names the directory the collapse lands at" \
+		"$(gc -nd -- a/b)" "$(pc -nd -- a/b)"
+	chk "and reaches below one with no -d" \
+		"$(gc -n -- a/b/c/c.txt)" "$(pc -n -- a/b/c/c.txt)"
+	chk "an -e pattern takes a path out of the plain mode" \
+		"$(gc -nd -e mixdir)" "$(pc -nd -e mixdir)"
+	chk "and puts it into -X" \
+		"$(gc -nX -e plain.txt)" "$(pc -nX -e plain.txt)"
+	chk "and a -e pattern ending in a slash is about a directory" \
+		"$(gc -ndX -e two/)" "$(pc -ndX -e two/)"
+	chk "the refusal without -f is git's, word for word" "$(gcrc)" "$(pcrc)"
+
+	# and it really takes them out: the two trees left behind are the same
+	( cd "$work/cg" && git clean -fdx >/dev/null 2>&1 )
+	( cd "$work/cp" && "$GP" clean -fdx >/dev/null 2>&1 )
+	chk "a forced run leaves the same tree behind" \
+		"$(cd "$work/cg" && find . -path ./.git -prune -o -print | sort)" \
+		"$(cd "$work/cp" && find . -path ./.gitprompt -prune -o -print | sort)"
+else
+	skip "the clean comparison with git (git is not on PATH)"
+fi
+"$GP" clean -fdx >/dev/null 2>&1
+cd "$repo" || exit 2
+
 # -------------------------------------------------------------------------- searching
 say "searching"
 # A pattern language is the one part of grep the user has already learned

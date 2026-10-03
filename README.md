@@ -98,7 +98,7 @@ names are git's, and the behaviour is meant to match:
 - **start** — `init`, `clone`, `config`
 - **record prompts** — `session`, `prompt`, `capture`, `response`, `outcome`,
   `add`, `rm`,
-  `mv`, `commit`
+  `mv`, `clean`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`, `grep`,
   `bisect`
@@ -160,7 +160,7 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 62. Missing are `clean`,
+  gitprompt built from this tree lists 62. Missing are
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog` and
   `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
@@ -168,6 +168,14 @@ one that says no:
   merging including conflicts, replaying a commit elsewhere, undoing one,
   setting work aside, tags,
   reset, the ref plumbing, remotes and the prompt layer are all here.
+- **`clean`, and what it reads.** Which files may go is decided by
+  `.gitpromptignore`, the same file `status` and `add` read: whole basenames and
+  whole paths, a trailing slash for directories, no globs. It is not
+  `.gitignore`, so `*.log` is a pattern matching one file that would have to be
+  called that. `-i`/`--interactive` is refused as an unknown option, a directory
+  that is a repository in its own right is left alone however many `-f` are
+  given, and a pathspec is the path of the directory it names rather than a
+  wildmatch pattern.
 - **`stash` with `--index`, and with a pathspec.** Everything else is here:
   `push` (with `-m`, `-u` and `-k`), `list`, `show` (with `-p`),
   `apply`/`pop`, `drop`, `clear` and `branch`, with a conflict stopping in the
@@ -176,7 +184,7 @@ one that says no:
 
 ## Status
 
-**969 checks, 0 failures** — 852 in `test/smoke.sh`, 81 in `test/surface.sh`
+**1039 checks, 0 failures** — 909 in `test/smoke.sh`, 94 in `test/surface.sh`
 and 36 in `test/restore.sh`.
 
 ```console

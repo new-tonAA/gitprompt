@@ -893,7 +893,7 @@ static void ignore_load(struct repo *r)
 	buf_release(&b);
 }
 
-int path_is_ignored(struct repo *r, const char *relpath)
+static int ignore_match(struct repo *r, const char *relpath, int is_dir)
 {
 	size_t i;
 	const char *base;
@@ -905,7 +905,7 @@ int path_is_ignored(struct repo *r, const char *relpath)
 	base = base ? base + 1 : relpath;
 	for (i = 0; i < ignore_nr; i++) {
 		const char *pat = ignore_rules[i].pattern;
-		if (ignore_rules[i].dir_only)
+		if (ignore_rules[i].dir_only && !is_dir)
 			continue;
 		if (strchr(pat, '/')) {
 			if (!strcmp(pat, relpath))
@@ -915,4 +915,19 @@ int path_is_ignored(struct repo *r, const char *relpath)
 		}
 	}
 	return 0;
+}
+
+int path_is_ignored(struct repo *r, const char *relpath)
+{
+	return ignore_match(r, relpath, 0);
+}
+
+/*
+ * The same question asked about a directory.  A pattern may name a directory
+ * or a file -- "build/" has to mean the directory, "build" means either --
+ * so this is the only form that can honour a trailing slash.
+ */
+int path_is_ignored_dir(struct repo *r, const char *relpath)
+{
+	return ignore_match(r, relpath, 1);
 }
