@@ -237,6 +237,43 @@ printf 'not wanted\n' > a.txt
 chk "reset --hard throws the hand edit away" "ours" \
 	"$(tail -1 a.txt | tr -d '\r')"
 
+# -------------------------------------------------------------------------- searching
+say "searching"
+# A pattern language is the one part of grep the user has already learned
+# somewhere else, so what is asserted is not that a pattern works but that it
+# means what git means by it: basic by default, extended under -E, literal under
+# -F -- and that the exit status is the one a script would branch on.
+printf 'alpha beta\nGamma delta\nfoo+bar\nfoobar\n' > s.txt
+"$GP" add s.txt >/dev/null
+"$GP" commit -m "a file to search" >/dev/null
+chk "grep finds a line and names the file" "s.txt:alpha beta" \
+	"$("$GP" grep alpha -- s.txt)"
+chk "and -n numbers it" "s.txt:1:alpha beta" "$("$GP" grep -n beta -- s.txt)"
+chk "a + is an ordinary byte in a basic pattern" "s.txt:foo+bar" \
+	"$("$GP" grep 'foo+bar' -- s.txt)"
+chk "so -E is what makes it repeat" "s.txt:foobar" \
+	"$("$GP" grep -E 'fo+bar' -- s.txt)"
+chk "-F reads the pattern as nothing but bytes" "s.txt:foo+bar" \
+	"$("$GP" grep -F 'foo+bar' -- s.txt)"
+chk "-i ignores case" "s.txt:Gamma delta" "$("$GP" grep -i gamma -- s.txt)"
+rc_is "a hit is exit 0" 0 "$GP" grep alpha -- s.txt
+rc_is "nothing found is exit 1" 1 "$GP" grep zzzz -- s.txt
+rc_is "a pattern that will not compile is exit 128" 128 "$GP" grep 'a\{2\}' -- s.txt
+if [ "$have_git" = 1 ]; then
+	G="git --git-dir=.gitprompt --work-tree=."
+	chk "git reads the same lines from the same tree" \
+		"$($G grep -n alpha -- s.txt | tr -d '\r')" \
+		"$("$GP" grep -n alpha -- s.txt | tr -d '\r')"
+	chk "and reads a basic pattern the same way" \
+		"$($G grep -n 'foo+bar' -- s.txt | tr -d '\r')" \
+		"$("$GP" grep -n 'foo+bar' -- s.txt | tr -d '\r')"
+	chk "and names the file once under -l" "$($G grep -l alpha -- s.txt)" \
+		"$("$GP" grep -l alpha -- s.txt)"
+	rc_is "and both call nothing found exit 1" 1 $G grep zzzz -- s.txt
+else
+	skip "the grep comparison with git (git is not on PATH)"
+fi
+
 # ---------------------------------------------------------------- integrity
 say "integrity and maintenance"
 rc_is "verify-objects passes" 0 "$GP" verify-objects

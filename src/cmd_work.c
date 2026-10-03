@@ -13,12 +13,7 @@
 /* ------------------------------------------------------------------ */
 /* a small string list                                                 */
 
-struct slist {
-	char **v;
-	size_t nr, alloc;
-};
-
-static void slist_push(struct slist *l, const char *s)
+void slist_push(struct slist *l, const char *s)
 {
 	if (l->nr == l->alloc) {
 		l->alloc = l->alloc ? l->alloc * 2 : 16;
@@ -27,7 +22,7 @@ static void slist_push(struct slist *l, const char *s)
 	l->v[l->nr++] = xstrdup(s);
 }
 
-static void slist_release(struct slist *l)
+void slist_release(struct slist *l)
 {
 	size_t i;
 	for (i = 0; i < l->nr; i++)
@@ -182,7 +177,7 @@ int stage_worktree_path(struct repo *r, const char *relpath)
 }
 
 /* does `path` match any of the pathspecs?  No pathspecs means everything. */
-static int matches(const struct slist *specs, const char *path)
+int slist_matches(const struct slist *specs, const char *path)
 {
 	size_t i, n;
 	if (!specs->nr)
@@ -263,7 +258,7 @@ int cmd_add(struct repo *r, int argc, char **argv)
 	if (update_only) {
 		/* only paths already tracked are of interest */
 		for (i = 0; i < ist.nr; i++) {
-			if (!matches(&specs, ist.e[i].path))
+			if (!slist_matches(&specs, ist.e[i].path))
 				continue;
 			if (slist_has(&paths, ist.e[i].path)) {
 				if (dry_run)
@@ -279,7 +274,7 @@ int cmd_add(struct repo *r, int argc, char **argv)
 		for (i = 0; i < paths.nr; i++) {
 			if (path_is_ignored(r, paths.v[i]))
 				continue;
-			if (!matches(&specs, paths.v[i]))
+			if (!slist_matches(&specs, paths.v[i]))
 				continue;
 			if (dry_run)
 				printf("add '%s'\n", paths.v[i]);
@@ -289,7 +284,7 @@ int cmd_add(struct repo *r, int argc, char **argv)
 		/* -A and an explicit list also record deletions */
 		if (all || specs.nr) {
 			for (i = 0; i < ist.nr; i++) {
-				if (!matches(&specs, ist.e[i].path))
+				if (!slist_matches(&specs, ist.e[i].path))
 					continue;
 				if (!slist_has(&paths, ist.e[i].path)) {
 					if (dry_run)

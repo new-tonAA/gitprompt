@@ -479,7 +479,7 @@ names are git's, and the behaviour is meant to match:
   `add`, `rm`,
   `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
-- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`
+- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`, `grep`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`,
   `cherry-pick`, `rebase`, `revert`, `stash`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
@@ -538,10 +538,9 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 59. Missing are
-  `bisect`, `clean`, `grep`,
-  `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog`
-  and `range-diff`, along with the layers under them -- packfile writing of the
+  gitprompt built from this tree lists 61. Missing are `bisect`, `clean`,
+  `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog` and
+  `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
@@ -555,8 +554,8 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **881 checks, 0 failures** — 778 in
-`test/smoke.sh`, 67 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **934 checks, 0 failures** — 818 in
+`test/smoke.sh`, 80 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -577,7 +576,10 @@ including the untracked files, the index kept, a clash and the entry a branch
 can be made from, a change traced back to the prompt that asked for it -- line
 by line with `blame`, hunk by hunk with `--prompt-hunks`, and the commit-level
 fallback for a prompt recorded without a snapshot -- `status` and `diff` on a
-move, the commit editor, per-command option validation, that the replay plan and
+move, the commit editor, finding lines with `grep` in the work tree, in the
+index and in a revision, the pattern syntax under each of the default, `-E` and
+`-F`, and the three exit statuses, per-command option validation, that the
+replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
 the section that matters most, since a gitprompt repository is meant to be an
@@ -826,6 +828,40 @@ nothing: `checkout --source`, `commit --author`, `fetch --depth`, `gc --prune`,
 and `version --build-options` are all errors here; `gitprompt help <command>`
 shows the list each one really takes. `show --stat` was the one option of that
 kind cheap enough to implement instead, and it is implemented.
+
+### Finding a line without a regex library
+
+`grep` needs a pattern engine and there is none to borrow: the compiler this is
+developed with ships no POSIX regex for C, and a borrowed one would behave
+differently on each of the three runners besides. So `src/regex.c` is the
+engine — a parser that compiles a pattern into a tree, and a backtracking
+matcher that walks it — written to the contract git's patterns are already
+written against: basic by default, extended under `-E`, literal under `-F`, with
+`+ ? | ( )` ordinary bytes in a basic pattern and their backslashed forms the
+operators.
+
+Which of the three stores is read is the other half of the command, and the same
+half in every case: the work tree by default, the index under `--cached`, and a
+revision's tree for a `<rev>`, whose lines are printed with the revision as it
+was typed in front of the path.
+
+What it cannot do it refuses at compile time and exits 128 rather than answering
+something else, and the refusal is the design rather than a gap: interval
+expressions `{n,m}`, back references `\1`, the POSIX classes `[[:alpha:]]`, the
+word boundaries `\<`, `\>`, `\b` and `\B`, and a repetition of an expression
+that can match nothing (`(a*)*`, the one construct that can hang a backtracking
+matcher) are errors here where git matches them. git's other options —
+`-A/-B/-C`, `-P`, `--and`/`--or`/`--not`, `--untracked`, `-o`, `-H` — are
+refused as unknown options rather than quietly ignored.
+
+Two smaller differences. A file with a NUL in it is not text and is passed over
+in silence, where git prints `Binary file <path> matches` and counts that as a
+hit, so the exit status differs for such a file. And a usage error — no pattern,
+an unknown option — exits 1 throughout gitprompt where git exits 128 or 129.
+What is held exactly is the status the command exists to report: `0` when
+something was printed, `1` when nothing was, `128` for a pattern that will not
+compile or an argument that is neither a revision nor a path — which is git's,
+and is the thing a script branches on.
 
 ### The store
 

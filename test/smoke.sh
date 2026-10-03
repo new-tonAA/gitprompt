@@ -4069,6 +4069,124 @@ expect "and --prompt-hunks says why there is no breakdown" \
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "finding a line in the files"
+
+# grep is one loop over lines, so almost all of what can go wrong is not the
+# searching but the answers around it: which of the three stores was read, and
+# what the exit status says afterwards.  That status is git's -- 0 for a hit, 1
+# for none, 128 for a pattern that will not compile -- and a script can branch
+# on it, so it is asserted here rather than assumed.
+gr=$work/grep
+rm -rf "$gr"
+mkdir -p "$gr" || exit 2
+cd "$gr" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.name "Grep Tester" >/dev/null 2>&1
+gp config user.email grep@example.com >/dev/null 2>&1
+printf 'alpha beta\nGamma delta\nfoo+bar\nfzzbar\nfoobar\n' > a.txt
+printf 'alpha again\nnothing here\nalphabet soup\n' > b.txt
+mkdir -p sub
+printf 'one\ntwo\nthree\n' > sub/c.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the lines to search" >/dev/null 2>&1
+
+expect_out "a match is printed as the path, a colon, and the line" \
+	"$(printf 'a.txt:alpha beta\nb.txt:alpha again\nb.txt:alphabet soup')" \
+	gp grep alpha
+expect_out "-n puts the line number in front" "a.txt:1:alpha beta" gp grep -n beta
+expect_out "^ anchors to the start of a line" "a.txt:2:Gamma delta" \
+	gp grep -n '^Gamma'
+expect_out '$ anchors to the end of one' \
+	"$(printf 'a.txt:3:foo+bar\na.txt:4:fzzbar\na.txt:5:foobar')" \
+	gp grep -n 'bar$'
+expect_out ". stands for any one byte" \
+	"$(printf 'a.txt:4:fzzbar\na.txt:5:foobar')" gp grep -n 'f..bar'
+expect_out "a class is a set of one byte" \
+	"$(printf 'a.txt:1:alpha beta\na.txt:3:foo+bar\na.txt:4:fzzbar\na.txt:5:foobar\nb.txt:3:alphabet soup')" \
+	gp grep -n 'b[ae]'
+expect_out "and a class may be negated" "a.txt:2:Gamma delta" gp grep -n '^[^a-z]'
+
+# The default is git's: a basic pattern, where + ? | ( ) are ordinary bytes and
+# their backslashed forms are the operators.  -E swaps the two, -F drops the
+# question.  All three are checked on the same bytes so that a pattern that
+# reads one way cannot pass by matching the other way.
+expect_out "+ is an ordinary byte in a basic pattern" "a.txt:foo+bar" \
+	gp grep 'foo+bar'
+expect_out "and an escaped one repeats the byte before it" "a.txt:foobar" \
+	gp grep 'foo\+bar'
+expect_out "-E makes a bare + repeat" "a.txt:foobar" gp grep -E 'foo+bar'
+expect_out "and there an escaped + is the ordinary byte" "a.txt:foo+bar" \
+	gp grep -E 'foo\+bar'
+expect_out "-F takes every byte of the pattern literally" "a.txt:foo+bar" \
+	gp grep -F 'foo+bar'
+expect_status "so a pattern with an escape in it finds nothing as -F" 1 \
+	gp grep -F 'foo\+bar'
+expect_out "\\| is the alternation in a basic pattern" \
+	"$(printf 'a.txt:Gamma delta\na.txt:fzzbar')" gp grep 'Gamma\|fzz'
+expect_status "where a bare | is just a byte" 1 gp grep 'Gamma|fzz'
+expect_out "-E makes a bare | the alternation" \
+	"$(printf 'a.txt:Gamma delta\na.txt:fzzbar')" gp grep -E 'Gamma|fzz'
+expect_out "-i matches without regard to case" "a.txt:Gamma delta" gp grep -i GAMMA
+expect_out "-w keeps the word whole" \
+	"$(printf 'a.txt:alpha beta\nb.txt:alpha again')" gp grep -w alpha
+expect_status "so the front of a longer word is not a match" 1 gp grep -w alph
+
+expect_out "-l names the file once, however many lines matched" "a.txt" \
+	gp grep -l beta
+expect_out "-L names the files that had no match at all" \
+	"$(printf 'b.txt\nsub/c.txt')" gp grep -L beta
+expect_out "-c counts the matching lines instead" \
+	"$(printf 'a.txt:1\nb.txt:2')" gp grep -c alpha
+expect_out "-v counts the lines that did not match" \
+	"$(printf 'a.txt:4\nb.txt:1\nsub/c.txt:3')" gp grep -vc alpha
+expect_out "-L wins over -l when both are asked for" \
+	"$(printf 'b.txt\nsub/c.txt')" gp grep -l -L beta
+expect_out "and -l wins over -c" "a.txt" gp grep -c -l beta
+expect_out "-e may be given more than once, and the patterns are alternatives" \
+	"$(printf 'a.txt:alpha beta\nsub/c.txt:three')" gp grep -e beta -e three
+
+expect_out "a pathspec narrows the search to it" "sub/c.txt:2:two" \
+	gp grep -n two sub
+expect_out "a revision is searched from its tree, named as it was spelled" \
+	"HEAD:a.txt:1:alpha beta" gp grep -n alpha HEAD -- a.txt
+expect_out "and -l names the file under that revision" "HEAD:a.txt" \
+	gp grep -l beta HEAD
+
+# The work tree is what is on disk; the index is what was staged.  A file that
+# is changed after being added is the one case where the two disagree, which is
+# the whole reason --cached exists.
+printf 'alpha staged\n' > d.txt
+gp add d.txt >/dev/null 2>&1
+printf 'alpha unstaged\n' > d.txt
+expect_out "the work tree is read from disk" "d.txt:1:alpha unstaged" \
+	gp grep -n alpha d.txt
+expect_out "and --cached reads what was staged instead" "d.txt:1:alpha staged" \
+	gp grep -n --cached alpha d.txt
+
+expect_status "a hit is exit 0" 0 gp grep alpha
+expect_status "nothing found is exit 1" 1 gp grep zzz
+expect "a pattern that cannot be compiled says so" \
+	"grep: invalid regular expression" gp grep 'a\{2\}'
+expect_status "and that is exit 128, not a wrong answer" 128 gp grep 'a\{2\}'
+expect_status "as is a back reference, which is not supported" 128 gp grep '\1'
+expect_status "and a POSIX class the engine does not carry" 128 \
+	gp grep '[[:alpha:]]'
+expect_status "an argument that is neither a revision nor a path is 128" 128 \
+	gp grep alpha nosuch
+expect "and it is the same complaint git makes" \
+	"ambiguous argument 'nosuch'" gp grep alpha nosuch
+
+# A NUL makes a file not text.  git would still report it -- "Binary file
+# bin.dat matches" -- where we pass over it and say nothing; that difference is
+# written down in the README.  `tr` is the portable way to put a NUL in a file
+# here: printf's \0 is not spelled the same on every shell.
+printf 'alpha~beta\n' | tr '~' '\000' > bin.dat
+gp add bin.dat >/dev/null 2>&1
+expect_status "a file with a NUL in it is not text, and is left unsearched" 1 \
+	gp grep alpha -- bin.dat
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

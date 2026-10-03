@@ -275,6 +275,12 @@ const struct command commands[] = {
 	  "   from.  A prompt id with a `?` is the commit's as a whole -- that\n"
 	  "   commit keeps no snapshots, so the block that asked for the line is not\n"
 	  "   known -- and `-` means no prompt claims the line at all." },
+	{ "grep",       cmd_grep,       "Print the lines that match a pattern",
+	  "grep [-e <pattern>]... [-i] [-w] [-v] [-n] [-l|-L|-c] [-F|-E]\n"
+	  "   [--cached] <pattern> [<rev>...] [--] [<pathspec>...]\n"
+	  "   The pattern is a basic regular expression, as in git; -E takes an\n"
+	  "   extended one and -F a literal string.  The exit status is 0 when\n"
+	  "   something matched, 1 when nothing did, and 128 on a bad pattern." },
 
 	/* grow, mark and tweak */
 	{ "branch",     cmd_branch,     "List, create or delete branches",

@@ -125,6 +125,45 @@ int oid_array_contains(const struct oid_array *a, const oid_t *o);
 void oid_array_clear(struct oid_array *a);
 void oid_array_sort(struct oid_array *a);
 
+/*
+ * A list of strings, used for path sets and pathspecs.  The paths in one have
+ * been through path_normalize, so matching is a prefix comparison rather than
+ * a string comparison -- see slist_matches.
+ */
+struct slist {
+	char **v;
+	size_t nr, alloc;
+};
+#define SLIST_INIT { NULL, 0, 0 }
+void slist_push(struct slist *l, const char *s);
+void slist_release(struct slist *l);
+/* does `path` match any of the specs?  No specs means everything. */
+int slist_matches(const struct slist *specs, const char *path);
+
+/*
+ * A compiled regular expression -- see regex.c.  `ere` picks the extended
+ * syntax over the basic one, `icase` folds case.  Compiling returns -1 and
+ * puts one line of English in *err (which the caller frees) when the pattern
+ * uses something the engine does not implement; `_fixed` is `-F`, where every
+ * byte of the pattern stands for itself.
+ */
+struct rx;
+int rx_compile(struct rx **out, const char *pattern, int ere, int icase,
+	       char **err);
+int rx_compile_fixed(struct rx **out, const char *pattern, int icase, char **err);
+void rx_release(struct rx *re);
+/*
+ * The first match at or after `from` in s[0..len): 1 and [*ms,*me) if there is
+ * one, 0 if there is not, -1 if the pattern would have taken longer than the
+ * engine's budget allows.  `len` is the line without its newline, so `$` is
+ * "pos == len".
+ */
+int rx_search(const struct rx *re, const char *s, size_t len, size_t from,
+	      size_t *ms, size_t *me);
+/* the same over several patterns, with `-w` if asked for */
+int rx_search_any(struct rx *const *res, size_t n, const char *s, size_t len,
+		  int word, size_t *ms, size_t *me);
+
 /* ------------------------------------------------------------------ */
 /* sha1                                                                */
 
@@ -924,6 +963,7 @@ int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);
 int cmd_reflog(struct repo *, int, char **);
 int cmd_blame(struct repo *, int, char **);
+int cmd_grep(struct repo *, int, char **);
 int cmd_describe(struct repo *, int, char **);
 
 int cmd_prompt(struct repo *, int, char **);
