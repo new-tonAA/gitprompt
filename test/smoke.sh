@@ -4178,7 +4178,7 @@ expect "and it is the same complaint git makes" \
 
 # A NUL makes a file not text.  git would still report it -- "Binary file
 # bin.dat matches" -- where we pass over it and say nothing; that difference is
-# written down in the README.  `tr` is the portable way to put a NUL in a file
+# written down in docs/notes.md.  `tr` is the portable way to put a NUL in a file
 # here: printf's \0 is not spelled the same on every shell.
 printf 'alpha~beta\n' | tr '~' '\000' > bin.dat
 gp add bin.dat >/dev/null 2>&1

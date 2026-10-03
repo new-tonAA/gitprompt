@@ -37,18 +37,9 @@ Four things make that work, and each is a thing a chat log cannot do:
   repository: `git clone`, `git push`, GitHub's file view, `git reset --hard`
   and `git gc` all work on it unchanged.
 
-## The one design decision
-
-**A prompt is an ordinary git blob.** A prompt is a markdown file with a
-frontmatter block at git's normal file mode, `100644`, stored in a tree under
-`prompts/`. There are no extension object types, no unusual file modes, no
-side-channel format. Only git's four object types — blob, tree, commit, tag —
-are ever written, which is why `git clone`, `git log`, `git gc` and GitHub's
-file view all work on a gitprompt repository unchanged.
-
-What that buys, and what a commit joins together, is in
-[The design](docs/design.md), along with how the prompt files, their
-sessions and their answers are laid out on disk.
+A prompt is an ordinary git blob, and that one decision is why the rest needs no
+special cases: [The design](docs/design.md) says what a commit joins together,
+and how the files sit on disk.
 
 ## Build
 
@@ -90,104 +81,6 @@ $ gitprompt timeline            # the prompts, in order, with their sessions
 $ gitprompt replay -o PROMPTS.md
 ```
 
-## Commands
-
-`gitprompt help` lists them all; `gitprompt help <command>` describes one. The
-names are git's, and the behaviour is meant to match:
-
-- **start** — `init`, `clone`, `config`
-- **record prompts** — `session`, `prompt`, `capture`, `response`, `outcome`,
-  `add`, `rm`,
-  `mv`, `clean`, `commit`
-- **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
-- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`, `grep`,
-  `bisect`
-- **branch and history** — `branch`, `checkout`, `switch`, `merge`,
-  `cherry-pick`, `rebase`, `revert`, `stash`, `tag`, `reset`, `describe`
-- **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
-- **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
-  `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
-  `symbolic-ref`, `for-each-ref`, `ls-files`, `count-objects`,
-  `verify-objects`, `check-ref-format`
-- **maintenance** — `gc`, `fsck`, `stats`, `help`, `version`
-
-## Transports
-
-| URL form | how it works |
-| --- | --- |
-| `/path/to/repo`, `../repo`, `file:///path` | handled natively: every object is read out of the source and written into the target, and the other repository's refs are written directly |
-| `gp://host[:port][/path]` | gitprompt's own transport, with `gitprompt serve` on the far end: HTTP with a `Content-Length`, one request per connection |
-| `https://`, `git://`, `ssh://` | delegated to the `git` binary, as `git --git-dir=.gitprompt push <url> <refspec>` |
-
-The delegation is not a workaround. It is correct precisely because
-`.gitprompt` is a real git object store: git fetches and pushes it as it would
-any other repository, and authentication, proxies and credential helpers come
-along for free.
-
-It is also why packfiles are read. A `git fetch` does not leave loose objects
-behind above a small threshold: it leaves a pack, with the objects inside it
-delta-compressed against each other. A store with no pack reader would be
-unable to read back its own fetched history.
-
-## What is not implemented
-
-Stated plainly, because a tool that quietly does the wrong thing is worse than
-one that says no:
-
-- **Byte-for-byte `diff` output.** A move is reported as a move, and the changes
-  are the changes git reports, but the text around them is not git's. No `index`
-  line is printed, nor a `deleted file mode` or `new file mode` one; a hunk that
-  empties one side is notated `-1,0` where git writes `-0,0`; and `--stat`
-  neither widens its path column to fit the longest path in the block nor scales
-  its bar to the terminal, so a change of a thousand lines draws a thousand
-  marks. A reader skimming a diff sees the same changes; a script that parses one
-  should be pointed at git instead. The `similarity index` a rename reports is the
-  share of lines the two files still have in common rather than git's byte
-  estimate, so the number can read differently from git's even where the
-  judgement behind it does not.
-- **What an answer is.** `response` and `rerun --record` keep what the agent
-  wrote to standard output, verbatim — its own formatting, progress lines and
-  all, or a JSON envelope if that is what it was asked for. Nothing else about
-  the run is kept: not its standard error, not the files it changed, not what it
-  cost. And an agent nobody asked to record is not recorded, so a history is as
-  complete as whoever kept it.
-- **Platforms.** Developed and built on Windows with TDM-GCC. The code is
-  plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
-  `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in
-  binary mode so that a newline written out is a newline and not a carriage
-  return before it, and the sockets in `net.c`, which winsock provides on
-  Windows and libc on Unix. CI builds and runs the suite on Linux and macOS as
-  well as Windows, which is the only place the Unix builds are exercised: the
-  development machine has one compiler for one of the three.
-- **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 62. Missing are
-  `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog` and
-  `range-diff`, along with the layers under them -- packfile writing of the
-  kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
-  and `rerere`. The object model, the index, committing, history, branches,
-  merging including conflicts, replaying a commit elsewhere, undoing one,
-  setting work aside, tags,
-  reset, the ref plumbing, remotes and the prompt layer are all here.
-- **The ignore file, at its edges.** What `status`, `add` and `clean` read is
-  git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
-  in the index is never ignored -- and both `.gitignore` and
-  `.gitpromptignore` are read, the latter with the last word inside a
-  directory. What is missing is the edges: `[[:alpha:]]` character classes,
-  `core.excludesFile`, `.gitprompt/info/exclude`, `status --ignored` and
-  `clean -i`. `git add`'s third hint line is not printed either, since there is
-  no `advice.addIgnoredFile` here to turn the message off.
-- **`clean`, at its edges.** `-i`/`--interactive` is refused as an unknown
-  option, a directory that is a repository in its own right is left alone
-  however many `-f` are given, a pathspec is the path of the directory it
-  names rather than a wildmatch pattern, and an `-e` pattern is a whole
-  basename or a whole path rather than a wildmatch pattern, so
-  `-e '*.log'` names a file by that literal name and nothing else.
-- **`stash` with `--index`, and with a pathspec.** Everything else is here:
-  `push` (with `-m`, `-u` and `-k`), `list`, `show` (with `-p`),
-  `apply`/`pop`, `drop`, `clear` and `branch`, with a conflict stopping in the
-  shape a merge stops in and left at the `refs/stash` entry it came from. The
-  two absent forms are refused as unknown options rather than quietly ignored.
-
 ## Status
 
 **1103 checks, 0 failures** — 959 in `test/smoke.sh`, 108 in `test/surface.sh`
@@ -197,19 +90,18 @@ and 36 in `test/restore.sh`.
 $ make test
 ```
 
-[How it is tested](docs/testing.md) describes what each suite is for, and what
-the two of them have caught.
-
 ## Documentation
 
 - [The design](docs/design.md) — why a prompt is an ordinary git blob, what a
   commit joins together, and how the files are laid out on disk.
 - [The guide](docs/guide.md) — recording a task, following it across sessions,
   and handing the history back to an agent.
-- [Notes](docs/notes.md) — the decisions behind individual commands, and the
-  places where the agreement with git is not exact.
-- [How it is tested](docs/testing.md) — the three suites, and what each is for.
+- [The commands](docs/commands.md) — all 62, grouped by what they are for.
+- [Notes](docs/notes.md) — the decisions behind individual commands, the
+  transports, and the places where the agreement with git is not exact.
+- [What is not implemented](docs/limitations.md) — the gaps, stated plainly.
 - [The format](docs/format.md) — the on-disk format, in full.
+- [How it is tested](docs/testing.md) — the three suites, and what each is for.
 
 ## Layout
 
@@ -221,7 +113,9 @@ test/restore.sh      a history across two machines, restored to an agent
 third_party/         zlib 1.3.1, vendored as a static library
 docs/design.md       the design, and what a repository looks like on disk
 docs/guide.md        using it, end to end
+docs/commands.md     the commands, by what they are for
 docs/notes.md        the decisions behind the commands
+docs/limitations.md  what is not implemented
 docs/format.md       the on-disk format, in full
 docs/testing.md      the three suites
 ```

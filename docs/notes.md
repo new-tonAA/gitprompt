@@ -322,7 +322,7 @@ out of the plain and `-x` modes and puts it into `-X`, which is why
 `clean -nX -e plain.txt` names a file nothing had called ignored. Its pattern is
 narrower than one in an ignore file — a whole basename or a whole path, with a
 trailing slash meaning a directory and no globs at all — which is a divergence
-from git and is listed in the README.
+from git and is listed in [What is not implemented](limitations.md).
 
 A directory is reported whole when everything under it is going, so `-ndx` says
 `Would remove allign/` rather than naming its files one at a time; the removal is
@@ -404,9 +404,10 @@ only a path named outright is refused, so an ignored file never turns every
 `add .` into an error. Git prints a third line offering
 `advice.addIgnoredFile`; there is no such setting here, so it is not printed.
 
-The edges are not implemented and are listed in the README: `[[:alpha:]]`
-character classes, `core.excludesFile`, `.gitprompt/info/exclude`,
-`status --ignored` and `clean -i`.
+The edges are not implemented and are listed in
+[What is not implemented](limitations.md): `[[:alpha:]]` character classes,
+`core.excludesFile`, `.gitprompt/info/exclude`, `status --ignored` and
+`clean -i`.
 
 ## The store
 
@@ -424,6 +425,24 @@ loose copy to fall back on; and every reader — `replay`, `timeline`,
 `log-prompt`, `stats` — is run against a packed store, since wanting an object's
 contents without its type is a different path through the store from wanting
 both.
+
+## Transports
+
+| URL form | how it works |
+| --- | --- |
+| `/path/to/repo`, `../repo`, `file:///path` | handled natively: every object is read out of the source and written into the target, and the other repository's refs are written directly |
+| `gp://host[:port][/path]` | gitprompt's own transport, with `gitprompt serve` on the far end: HTTP with a `Content-Length`, one request per connection |
+| `https://`, `git://`, `ssh://` | delegated to the `git` binary, as `git --git-dir=.gitprompt push <url> <refspec>` |
+
+The delegation is not a workaround. It is correct precisely because
+`.gitprompt` is a real git object store: git fetches and pushes it as it would
+any other repository, and authentication, proxies and credential helpers come
+along for free.
+
+It is also why packfiles are read. A `git fetch` does not leave loose objects
+behind above a small threshold: it leaves a pack, with the objects inside it
+delta-compressed against each other. A store with no pack reader would be
+unable to read back its own fetched history.
 
 ## Serving the store
 
