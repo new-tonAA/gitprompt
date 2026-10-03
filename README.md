@@ -101,7 +101,8 @@ $ make test
   transports, and the places where the agreement with git is not exact.
 - [What is not implemented](docs/limitations.md) — the gaps, stated plainly.
 - [The format](docs/format.md) — the on-disk format, in full.
-- [How it is tested](docs/testing.md) — the three suites, and what each is for.
+- [How it is tested](docs/testing.md) — the three suites, what each is for, and
+  what they have caught.
 
 ## Layout
 

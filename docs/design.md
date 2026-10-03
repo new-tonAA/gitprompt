@@ -18,6 +18,8 @@ That is why the rest of the design needs no special cases:
   told exactly that if you ask it to do something, and `gitprompt init .` there
   takes the `prompts/` tree over as the history — one command, and the clone
   records, replays and pushes again.
+- `git log`, `git show` and the rest of git's readers read its history as any
+  other repository's.
 - GitHub renders the prompt files, diffs them, and shows their history.
 - `git --git-dir=.gitprompt push origin main` works.
 - `git reset --hard` in a directory whose `.git` is a copy of `.gitprompt`
