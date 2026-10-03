@@ -1,0 +1,363 @@
+# Notes
+
+The decisions behind individual commands, and the places where the
+agreement with git is not exact.
+
+## Following a file that moved
+
+Three places look for a move — a merge that has to follow one, `status` at the
+index, and `diff` between two trees — and all three look the same way, so they
+agree about what moved.
+
+The judgement itself: a path one side no longer has and the other side has
+gained is the same file when it holds the same object, and failing that when
+enough of its text is still the same — half the lines, the line git draws, which
+is what catches a file that was moved *and* edited. The pairing is one to one, so
+two copies of one file are not two renames of the original, and the search is
+capped at a thousand pairs the way git's `diff.renameLimit` is, past which the
+contents are not read.
+
+With the move recognised the merge happens under the new name, contents and all
+— a three-way merge of the file when both sides edited it. Where a move cannot be
+followed it comes back unmerged with git's own stages, so `status` prints git's
+letters: `DU`/`UD` when a move met a deletion, `DD`/`AU`/`UA` when both sides
+gave the file a different name.
+
+`status` reports a move where the index has one: a staged move is `renamed: a ->
+b` in the long report and `R  a -> b` in `--short`, both as git prints them. A
+move in the work tree that was never staged is not one — the index knows the old
+name and not the new — which is also what git says. The words in the long report
+are padded to the column git pads them to, and the staged section is printed
+before the unstaged one whatever order the paths sort in.
+
+`diff` reports the move in git's shape: the `diff --git` line names both paths, a
+`similarity index` says how much of the file survived, and `rename from`/`rename
+to` spell the pair out. The hunks follow only when the move carried a change, and
+`--stat` writes the move as `a.txt => b.txt` — one that changed no lines being a
+file changed with nothing added or removed. The score is the share of lines the
+two copies have in common — the same measure the merge uses to decide the move
+happened at all.
+
+## Tracing a line back to its prompt
+
+A commit binds code to prompt, but only as a whole: the commit says which
+prompts it carries, not which block of the change each one asked for. Two
+prompts that touch the same file are one diff, and no reading of the result
+recovers the split. So gitprompt writes it down as the prompts are given: each
+prompt file records, in its `snapshot:`, the work tree as it stood **before**
+that prompt's change. A run of prompts is then a chain of states — the parent's
+tree, the first prompt's snapshot, the second's, up to the commit's own tree —
+and the step between two of them is one prompt's work. The last prompt's step
+ends at the commit's tree.
+
+None of this is inferred. A commit whose prompts predate snapshots, or whose
+snapshots are gone, has no chain, and the tools say so rather than guess.
+
+`gp blame <file>` reads the chain back line by line. It walks the file the way
+git's blame does — diffing each version against its parent, carrying unmatched
+lines back — and lands every line on the commit that introduced it; inside that
+commit it lands the line on the block whose step added it, and names the prompt.
+The first column is the prompt, the second the abbreviated commit, then the line
+number and the text. A prompt id with a `?` is the commit's as a whole, because
+that commit keeps no snapshots and the block behind the line is not known, and a
+`-` means no prompt claims the line at all.
+
+`gp show --prompt-hunks` and `gp diff --prompt-hunks` annotate the ordinary diff:
+before each `@@` hunk header comes a `prompt <id>` line naming the prompt whose
+step it belongs to, or `prompt (none)` for a step no prompt owns. The prompt
+files themselves never appear — a prompt file is not in the index, so it cannot
+be in a snapshot, and its block would say nothing about the code.
+
+`gp show <prompt-id>` completes the picture from the other side: it lists every
+commit that carries the prompt, oldest first, as `<abbrev> <date> <subject>`.
+
+Snapshots are tree objects, so they cost what any tree costs and share the
+objects they have in common with their neighbours. A tree named only by text in
+a prompt file would otherwise be unreachable, and `gc` would prune it once it
+was older than the grace period — so both `fsck` and `gc` read the prompt files
+they walk past and treat the snapshot a prompt names as a root. What that buys
+is the one thing the feature cannot do without: a snapshot a user can still
+check out from after a `gc`.
+
+## The commit message, when there is no `-m`
+
+A commit with no `-m` and no `-F` opens an editor, looked for the way git looks
+for one: `GIT_EDITOR`, then `core.editor`, then `VISUAL`, then `EDITOR`. The
+buffer is `COMMIT_EDITMSG`, it starts from the message the commit already has
+when there is one — a merge's, or the one `--amend` is replacing — and what the
+editor saves is stripped the way git strips it, so `#` lines are comments, blank
+runs collapse, and a message that comes back empty aborts the commit rather than
+recording a commit with no reason. `-e` asks for the editor after a `-m`,
+`--no-edit` takes the message the commit already has and stops if there is none.
+The suite hands `commit` editors it writes itself: one that replaces the buffer,
+one that appends to it, one that fails, and none at all, and asserts on the
+message that ends up in the commit rather than on the exit status.
+
+## A merge is three-way, line by line
+
+A merge conflict is where the agreement with git is tested hardest, because a
+conflict is not only in the objects: it is in the index. gitprompt records one
+the way git does — the path's base, our version and their version as index
+stages 1, 2 and 3 — so `git ls-files -u` inside a gitprompt store lists the same
+stages for the same paths that `gitprompt status` reports, the letters
+`UU`/`AA`/`DU`/`UD` come off which stages are present, and resolving is staging
+the path, which drops them. The suite asserts that agreement with git directly,
+in both directions: git's own conflicted index is read back by gitprompt, and
+git's reader sees the one gitprompt wrote.
+
+What goes into those stages is a line-wise three-way merge, not a choice between
+whole files. Two sides that edit different lines of one file keep both edits;
+edits that meet conflict, and the file is marked the way git marks it — the
+lines the two sides agree on are left outside the markers rather than repeated
+in both halves, either half may come out empty, and the labels are `HEAD` and
+the branch being merged in. `--no-ff` records a merge commit where a
+fast-forward was possible, `--squash` stages the merge without moving `HEAD` or
+writing `MERGE_HEAD`, and `-X ours|theirs` settles a conflicting region for one
+side instead of stopping. The suite pins those bytes down exactly rather than
+checking the exit status alone: in the trimming case the whole conflicted file
+is spelled out and compared, and those are the bytes `git merge-file` prints for
+the same three inputs.
+
+One caveat, since it is not visible from the exit status: the alignment is not
+byte-for-byte git's. Where a file repeats a line, one edit can be described
+equally well as a change to the first copy or to the second, and the two
+descriptions disagree about whether a nearby edit overlaps. gitprompt keeps the
+alignment its longest-common-subsequence search finds, so on such a file the two
+can disagree about whether to conflict at all — gitprompt may report a conflict
+where git merges cleanly, or merge cleanly where git conflicts. Neither
+direction loses an edit: a clean merge is still both sides' changes applied, and
+a conflict is still both sides' text. It takes a repeated line with an edit
+beside it for the two to part company.
+
+## A replay is a merge read the other way
+
+`cherry-pick` and `rebase` are not a second merge implementation. Applying a
+commit somewhere else is the three-way merge `merge` already performs, with the
+roles read differently: the commit's own parent is the base, the tree `HEAD`
+holds now is ours, and the commit being replayed is theirs. So the line-wise
+merge, the index stages a conflict leaves, the letters `status` reports for them
+and `-X ours|theirs` are the ones described above — a replay that conflicts
+stops in the same shape a merge does, and is resolved the same way. `rebase` is
+that, once per commit, with the branch moved to the last one at the end.
+
+What the replayed commit carries is the same rule every other commit follows,
+read against the parent it has now: the prompts its new tree holds that its new
+parent does not. A prompt the branch already has is therefore not carried twice,
+and one it lacks travels with the code — nothing has to be copied, and the
+prompt history of the replayed commit stays the prompt history it had. The suite
+checks that from both sides: a prompt is carried by the commit that introduced
+it and by no other, and no prompt appears twice in the history a rebase wrote.
+
+A merge commit is not replayed, which is the choice git makes too: the commits
+it joined are replayed and the merge commit itself is dropped, so a branch that
+merged its upstream and then moved on comes back as a line. And the branch stays
+where it is until the replay is done — the rebase detaches `HEAD` at the
+upstream — so an interrupted replay, or one ended with `--abort`, leaves the
+branch exactly where it was. Where an ordinary `merge` put a `MERGE_HEAD`, a
+replay puts `sequencer/` (§7 of [format.md](format.md)), and `commit`
+refuses while either is there: an interrupted replay is finished by
+`cherry-pick`/`rebase --continue`, `--skip` or `--abort`, not by committing by
+hand.
+
+## An undo is that same merge, the other way round
+
+`revert` is not a third merge either. Where a replay adds a commit's change to
+where `HEAD` is, an undo subtracts it, which is the same three-way merge with the
+two sides swapped: the commit itself is the base, the tree `HEAD` holds now is
+ours, and the tree of the parent the change is measured against is theirs. `-m
+<parent number>` names which parent that is on a merge commit — a merge has no
+single side to undo, so it is required there — and a commit with no parents has
+nothing to measure against but the empty tree, so reverting a root commit takes
+away everything it introduced.
+
+The prompt rule needs no exception, and it is worth stating plainly because it
+reads the other way from the commit that is being undone. The undo is a commit
+like any other, so it carries the prompts its new tree adds against its new
+parent — which is to say, undoing a commit that introduced a prompt removes that
+prompt along with the code it described. Reverting the undo (git's wording,
+`Reapply "<subject>"`) brings both back. Nothing copies anything: the prompt
+moves because it is a file in the tree, exactly as it moves under `cherry-pick`
+and `rebase`.
+
+An undo is the reverter's own commit, not the original author's work landing
+elsewhere, so its author and committer are whoever ran it and its message says
+which commit it undid. It conflicts, continues, skips and aborts through the same
+`sequencer/` state the other two use, and `commit` refuses while one is in
+flight.
+
+## Setting work aside
+
+A stash is not a special kind of storage. An entry is three commits written
+under `refs/stash`: the work tree, the index, and -- when `-u` is given -- the
+untracked files as a commit with no parents, so that nothing else reaches them
+and they cannot be mistaken for history. The work tree commit's first parent is
+`HEAD`, its second is the index commit, and it is an ordinary revision: anything
+that takes a revision takes a stash entry, and `stash branch` exists because
+that is literally what it does.
+
+That shape is chosen for the prompt rule's sake, not the other way round. The
+prompts of the work tree are files in the stash commit's tree, so the prompt for
+work in progress is set aside with the code it was written for and comes back
+with it, with no rule for prompts and none for stashes. A stash made from a
+repository that had just had a prompt written for it names that prompt on the
+entry, and putting the entry back puts the prompt back with the rest.
+
+Putting one back is the merge a replay performs, read with the commit the stash
+was made on as the base: the stashed state is the far side, the index is the
+near side, and the result is written to the work tree with the index left at
+`HEAD` -- which is what makes a stash read as unstaged changes, and what makes
+`-k` put an entry back as a clash rather than an overwrite, since the index a
+`-k` push left behind is still ahead of `HEAD`. A conflict is a merge's
+conflict, with git's names for the two sides, `Updated upstream` and `Stashed
+changes`, and the entry is kept when `pop` stops there: a half-applied stash is
+still the only copy of the rest.
+
+## An option belongs to its command
+
+Each command hands the argument parser the list of options it accepts, and
+anything else is refused with `unknown option '--amend'` and a hint naming what
+that command does take; a name ending in `=` is one that takes a value. The
+distinction is the point: `gitprompt log --amend` used to be accepted and
+ignored, which is worse than an error, because an option that belongs to a
+different command looked as though it had taken effect. Options git has and
+gitprompt has not implemented are refused the same way rather than quietly doing
+nothing: `checkout --source`, `commit --author`, `fetch --depth`, `gc --prune`,
+`fsck --strict`, `cat-file --batch`, `for-each-ref --format`, `push --prune`,
+and `version --build-options` are all errors here; `gitprompt help <command>`
+shows the list each one really takes. `show --stat` was the one option of that
+kind cheap enough to implement instead, and it is implemented.
+
+## Finding a line without a regex library
+
+`grep` needs a pattern engine and there is none to borrow: the compiler this is
+developed with ships no POSIX regex for C, and a borrowed one would behave
+differently on each of the three runners besides. So `src/regex.c` is the
+engine — a parser that compiles a pattern into a tree, and a backtracking
+matcher that walks it — written to the contract git's patterns are already
+written against: basic by default, extended under `-E`, literal under `-F`, with
+`+ ? | ( )` ordinary bytes in a basic pattern and their backslashed forms the
+operators.
+
+Which of the three stores is read is the other half of the command, and the same
+half in every case: the work tree by default, the index under `--cached`, and a
+revision's tree for a `<rev>`, whose lines are printed with the revision as it
+was typed in front of the path.
+
+What it cannot do it refuses at compile time and exits 128 rather than answering
+something else, and the refusal is the design rather than a gap: interval
+expressions `{n,m}`, back references `\1`, the POSIX classes `[[:alpha:]]`, the
+word boundaries `\<`, `\>`, `\b` and `\B`, and a repetition of an expression
+that can match nothing (`(a*)*`, the one construct that can hang a backtracking
+matcher) are errors here where git matches them. git's other options —
+`-A/-B/-C`, `-P`, `--and`/`--or`/`--not`, `--untracked`, `-o`, `-H` — are
+refused as unknown options rather than quietly ignored.
+
+Two smaller differences. A file with a NUL in it is not text and is passed over
+in silence, where git prints `Binary file <path> matches` and counts that as a
+hit, so the exit status differs for such a file. And a usage error — no pattern,
+an unknown option — exits 1 throughout gitprompt where git exits 128 or 129.
+What is held exactly is the status the command exists to report: `0` when
+something was printed, `1` when nothing was, `128` for a pattern that will not
+compile or an argument that is neither a revision nor a path — which is git's,
+and is the thing a script branches on.
+
+## Halving a range
+
+`bisect` is the one command whose answer is a commit but whose work is a
+sequence of them, so what it prints on the way is as much of the contract as
+where it stops. The range is `bad` less everything reachable from each `good`
+and each `skip`, held as `refs/bisect/bad` and one `refs/bisect/good-<id>` or
+`refs/bisect/skip-<id>` per commit — the shape git uses, which is what lets git
+read a bisection gitprompt began, and the other way round. The probe is the
+candidate nearest half way: each is given the number of its ancestors that are
+themselves candidates, counted once per commit with a memo, and the one whose
+count falls closest to half the range is checked out. A set that leaves two of
+them equally far out is broken the way git breaks it, by object id.
+
+On a linear history the walk is deterministic, and `test/surface.sh` asserts the
+two are step for step identical there, counts and all; the commit finally named
+is the same on any history. What can differ on a history with merges is which
+commits were asked about, and — in the skip path, which is where git's sorted
+`best_bisection` comes in — the count printed beside them, because the id that
+breaks the tie is not gitprompt's.
+
+Everything the command leaves on disk is the storage, and it is all written and
+removed together: the refs under `refs/bisect/`, and the `BISECT_*` files §7 of
+[`format.md`](format.md) lists. A start that cannot get as far as its first
+probe takes them away again rather than leaving a range behind, so a refusal
+over a dirty work tree is a refusal and nothing more — worth saying because
+the range is written before the probe is tried, which makes this easy to get
+wrong.
+
+Three things it does not do exactly as git does:
+
+- **A failed `bisect run` exits 1.** The console reports the same things, but
+  the status the command itself exits with is git's own internal value, which
+  differs by failure and by platform — 126 for a command that gave 128 or more,
+  2 for a range with nothing left to test — where gitprompt answers 1 for every
+  way it can fail. What is not skimped is the check in front of it: 126 and 127
+  are the shell's own statuses for a command it could not run, so before either
+  is read as a verdict the command is run once more at a commit already known
+  good, and a command that is broken is reported rather than allowed to narrow
+  the range.
+- **`visualize` prints the range.** git hands it to gitk, or to `git log
+  --graph` when asked. gitprompt lists the commits still to be tested, newest
+  first, with the headers `show` prints.
+- **A staged change is refused in gitprompt's own words.** `cannot bisect: you
+  have staged changes`, with the hint `rebase` gives for the same situation,
+  where git lets `checkout` refuse and prints its message. A changed file in the
+  work tree — a different case, and the more common one — is refused in git's
+  words exactly, down to the list of paths and the `Aborting` that ends it.
+
+## The store
+
+The pack reader is exercised against packs git wrote, not only against the ones
+`gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
+in it. Packs written by `git repack` and by `git pack-objects`, with offset
+deltas and reference deltas, chains several deep, have been read back object by
+object and re-hashed.
+
+The packed-store section also pins down when a pack may be dropped. A second
+`gc` of an unchanged store rewrites the same pack under the same name, and
+deleting that as superseded would take every object with it; a pack holding an
+object no ref reaches is kept, because an object a fetch left packed has no
+loose copy to fall back on; and every reader — `replay`, `timeline`,
+`log-prompt`, `stats` — is run against a packed store, since wanting an object's
+contents without its type is a different path through the store from wanting
+both.
+
+## Serving the store
+
+`serve` is the one transport that is gitprompt's own, and it is deliberately not
+git's wire protocol. It does not have to be: the store is already a git object
+store, so the exchange it needs is the one the local transport already performs
+— read the far side's refs, copy across the objects that are missing here — and
+HTTP is only somewhere to carry those bytes, with a `Content-Length` so neither
+end has to guess where a body ends. `gitprompt serve` answers `/info/refs`,
+`/HEAD` and the objects, and takes a push at `/gp/push`; a push sends its objects
+first and the ref is checked afterwards, so a rewind is refused with a reason
+(`it would move backwards`) unless it is forced. It serves only the store:
+`config` and `index` are 404, and so is a path that tries to climb out.
+
+The same server answers git's *dumb* HTTP protocol, because a store that is a
+real git object store should be clonable by the real git — the suite clones one
+with `git` to say so. One request per connection also means a long-lived process
+that reloads nothing: the packs are re-listed for every request, because the
+repository being served is usually one whose owner is still using it, and a
+server that had answered a request before a `gc` would otherwise go on offering
+the loose objects that `gc` had just removed.
+
+## Offline, and on this machine
+
+The suite runs offline, so the transports it covers are the local ones: a path on
+disk, and `gp://` on loopback with a server it starts itself. `push`, `fetch`,
+`pull` and `clone` against an `https://` remote have been exercised by hand
+against a repository on GitHub; anything added there is worth running the same
+way before it is trusted.
+
+One caveat about the machine this was developed on: Windows Smart App Control
+blocks newly linked unsigned executables machine-wide, so `gitprompt.exe` cannot
+be run at all after some builds. Relinking (`make clean && make`) has cleared it
+every time so far, but a fresh Windows install or a different machine may need
+Smart App Control turned off (Windows Security → App and browser control) before
+the binary will start.
