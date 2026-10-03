@@ -313,17 +313,20 @@ if [ "$have_git" = 1 ]; then
 			o=$("$1" bisect "$step" 2>&1)
 			printf '%s\n' "$o"
 			case "$o" in
-			*"is the first bad commit"*) break ;;
+			*"is the first"*commit*) break ;;
 			esac
 		done
 	}
 
 	# two repositories built at different times have different ids, and the
-	# dump of the commit it names carries a date, so both are taken out
+	# dump of the commit it names carries a date, so both are taken out.  The
+	# sentence itself is matched by shape rather than by wording: git began
+	# quoting the term -- "is the first 'bad' commit" -- somewhere between 2.49
+	# and 2.55, and what is being compared here is the walk, not the prose.
 	strip_ids() {
-		sed -n '1,/is the first bad commit/p' |
+		sed -n '1,/is the first .*commit/p' |
 		sed 's/^\[[^]]*\]/[<id>]/' |
-		sed 's/^[0-9a-f][0-9a-f]* is the first bad commit/<id> is the first bad commit/' |
+		sed 's/^[0-9a-f][0-9a-f]* is the first .*commit/<id> is the first bad commit/' |
 		tr -d '\r'
 	}
 
