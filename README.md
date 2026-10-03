@@ -479,7 +479,8 @@ names are git's, and the behaviour is meant to match:
   `add`, `rm`,
   `mv`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
-- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`, `grep`
+- **examine** — `status`, `log`, `show`, `diff`, `reflog`, `blame`, `grep`,
+  `bisect`
 - **branch and history** — `branch`, `checkout`, `switch`, `merge`,
   `cherry-pick`, `rebase`, `revert`, `stash`, `tag`, `reset`, `describe`
 - **collaborate** — `remote`, `push`, `fetch`, `pull`, `serve`
@@ -538,7 +539,7 @@ one that says no:
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 61. Missing are `bisect`, `clean`,
+  gitprompt built from this tree lists 62. Missing are `clean`,
   `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog` and
   `range-diff`, along with the layers under them -- packfile writing of the
   kind `repack` and `prune` need, credential helpers, sparse checkout, `replace`
@@ -554,8 +555,8 @@ one that says no:
 
 ## Status
 
-The end-to-end suite passes: **934 checks, 0 failures** — 818 in
-`test/smoke.sh`, 80 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **969 checks, 0 failures** — 852 in
+`test/smoke.sh`, 81 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -578,7 +579,9 @@ by line with `blame`, hunk by hunk with `--prompt-hunks`, and the commit-level
 fallback for a prompt recorded without a snapshot -- `status` and `diff` on a
 move, the commit editor, finding lines with `grep` in the work tree, in the
 index and in a revision, the pattern syntax under each of the default, `-E` and
-`-F`, and the three exit statuses, per-command option validation, that the
+`-F`, and the three exit statuses, halving a range with `bisect` — the order it
+probes in, a probe that cannot be judged, a script judging for it, and a refusal
+to start over local changes — per-command option validation, that the
 replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
@@ -592,8 +595,10 @@ depth, but whether the whole surface still is when the commands are used in the
 order a user meets them. Every check is the operation git does — commit,
 branch, merge, tag, describe, reset, mv, rm, checkout `--`, clone, push, pull —
 run against a history of prompts, and each has to produce the thing git
-produces. What needs git itself is skipped rather than faked when git is not on
-PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
+produces. `bisect` is compared as the walk it is rather than as its answer: the
+same eight commits are halved by both, and the probes have to come back in the
+same order with the same widths. What needs git itself is skipped rather than
+faked when git is not on PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.
 
@@ -862,6 +867,54 @@ What is held exactly is the status the command exists to report: `0` when
 something was printed, `1` when nothing was, `128` for a pattern that will not
 compile or an argument that is neither a revision nor a path — which is git's,
 and is the thing a script branches on.
+
+### Halving a range
+
+`bisect` is the one command whose answer is a commit but whose work is a
+sequence of them, so what it prints on the way is as much of the contract as
+where it stops. The range is `bad` less everything reachable from each `good`
+and each `skip`, held as `refs/bisect/bad` and one `refs/bisect/good-<id>` or
+`refs/bisect/skip-<id>` per commit — the shape git uses, which is what lets git
+read a bisection gitprompt began, and the other way round. The probe is the
+candidate nearest half way: each is given the number of its ancestors that are
+themselves candidates, counted once per commit with a memo, and the one whose
+count falls closest to half the range is checked out. A set that leaves two of
+them equally far out is broken the way git breaks it, by object id.
+
+On a linear history the walk is deterministic, and `test/surface.sh` asserts the
+two are step for step identical there, counts and all; the commit finally named
+is the same on any history. What can differ on a history with merges is which
+commits were
+asked about, and — in the skip path, which is where git's sorted `best_bisection`
+comes in — the count printed beside them, because the id that breaks the tie is
+not gitprompt's.
+
+Everything the command leaves on disk is the storage, and it is all written and
+removed together: the refs under `refs/bisect/`, and the `BISECT_*` files §7 of
+`docs/format.md` lists. A start that cannot get as far as its first probe takes
+them away again rather than leaving a range behind, so a refusal over a dirty
+work tree is a refusal and nothing more — worth saying because the range is
+written before the probe is tried, which makes this easy to get wrong.
+
+Three things it does not do exactly as git does:
+
+- **A failed `bisect run` exits 1.** The console reports the same things, but
+  the status the command itself exits with is git's own internal value, which
+  differs by failure and by platform — 126 for a command that gave 128 or more,
+  2 for a range with nothing left to test — where gitprompt answers 1 for every
+  way it can fail. What is not skimped is the check in front of it: 126 and 127
+  are the shell's own statuses for a command it could not run, so before either
+  is read as a verdict the command is run once more at a commit already known
+  good, and a command that is broken is reported rather than allowed to narrow
+  the range.
+- **`visualize` prints the range.** git hands it to gitk, or to `git log
+  --graph` when asked. gitprompt lists the commits still to be tested, newest
+  first, with the headers `show` prints.
+- **A staged change is refused in gitprompt's own words.** `cannot bisect: you
+  have staged changes`, with the hint `rebase` gives for the same situation,
+  where git lets `checkout` refuse and prints its message. A changed file in the
+  work tree — a different case, and the more common one — is refused in git's
+  words exactly, down to the list of paths and the `Aborting` that ends it.
 
 ### The store
 

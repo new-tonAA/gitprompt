@@ -281,6 +281,13 @@ const struct command commands[] = {
 	  "   The pattern is a basic regular expression, as in git; -E takes an\n"
 	  "   extended one and -F a literal string.  The exit status is 0 when\n"
 	  "   something matched, 1 when nothing did, and 128 on a bad pattern." },
+	{ "bisect",     cmd_bisect,     "Find the commit that introduced a change",
+	  "bisect <start|good|bad|skip|run|visualize|log|reset> [<rev>...]\n"
+	  "   start [<bad> [<good>...]]  begin, and check out the first commit\n"
+	  "   run <cmd> [<args>...]      mark each commit by running a command\n"
+	  "   A good commit is one without the change, a bad one with it, and\n"
+	  "   the halving narrows the range to the first bad commit.  The state\n"
+	  "   is git's: refs/bisect/* and the BISECT_* files in the git dir." },
 
 	/* grow, mark and tweak */
 	{ "branch",     cmd_branch,     "List, create or delete branches",

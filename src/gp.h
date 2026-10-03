@@ -93,6 +93,8 @@ const char *buf_cstr(struct buf *b);
  * an indent */
 void body_oneline(const char *body, struct buf *out);
 void body_print_indented(const char *body, const char *indent);
+/* "Name <email> 1700000000 +0800" reduced to "Name <email>" */
+void format_author_line(const char *raw, struct buf *out);
 
 /* ------------------------------------------------------------------ */
 /* object ids                                                          */
@@ -965,6 +967,7 @@ int cmd_reflog(struct repo *, int, char **);
 int cmd_blame(struct repo *, int, char **);
 int cmd_grep(struct repo *, int, char **);
 int cmd_describe(struct repo *, int, char **);
+int cmd_bisect(struct repo *, int, char **);
 
 int cmd_prompt(struct repo *, int, char **);
 int cmd_capture(struct repo *, int, char **);

@@ -1423,7 +1423,7 @@ struct log_ctx {
 	int show_session;
 };
 
-static void format_author_line(const char *raw, struct buf *out)
+void format_author_line(const char *raw, struct buf *out)
 {
 	/* raw is "Name <email> 1700000000 +0800"; drop the timestamp */
 	const char *gt = raw ? strrchr(raw, '>') : NULL;

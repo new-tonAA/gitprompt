@@ -4187,6 +4187,171 @@ expect_status "a file with a NUL in it is not text, and is left unsearched" 1 \
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "halving a range to find the first bad commit"
+
+# bisect is a loop over a shrinking range, and nearly everything it can get
+# wrong is which commits it looks at.  So the walk below is asserted step by
+# step -- the middle, then the later one, then the answer -- and not only for
+# where it stops: a range that narrows in a different order can still name the
+# right commit after having asked about needless ones on the way, and on a
+# linear history the order is settled enough for pinning it down to be fair.
+bs=$work/bisect
+rm -rf "$bs"
+mkdir -p "$bs" || exit 2
+cd "$bs" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.name "Bisect Tester" >/dev/null 2>&1
+gp config user.email bisect@example.com >/dev/null 2>&1
+i=1
+while [ $i -le 8 ]; do
+	if [ $i -lt 5 ]; then printf 'state %d\n' "$i" > f.txt
+	else printf 'BROKEN %d\n' "$i" > f.txt; fi
+	gp add f.txt >/dev/null 2>&1
+	gp commit -m "commit $i" >/dev/null 2>&1
+	i=$((i + 1))
+done
+fifth=$(gp rev-parse HEAD~3)
+
+expect "nothing to bisect until a range is given" \
+	'You need to start by "git bisect start"' gp bisect bad
+expect_status "and that is not a success" 1 gp bisect bad
+
+startout=$(gp bisect start HEAD HEAD~7 2>&1)
+expect "start says how much of the range is left to test" \
+	"Bisecting: 3 revisions left to test after this (roughly 2 steps)" \
+	printf '%s\n' "$startout"
+expect "and names the commit it moved to" "] commit 4" printf '%s\n' "$startout"
+expect_status "which leaves HEAD detached, as a probe must" 1 gp symbolic-ref HEAD
+expect_file "and a session is marked by the file the reset reads" \
+	.gitprompt/BISECT_START
+
+# The whole walk goes into one file, so what it looked at can be read back out
+# of it afterwards rather than counted by hand.
+walk=$work/bisect/walk.txt
+printf '%s\n' "$startout" > "$walk"
+n=0
+while [ $n -lt 12 ]; do
+	n=$((n + 1))
+	if grep -q BROKEN f.txt; then step=bad; else step=good; fi
+	stepout=$(gp bisect "$step" 2>&1)
+	printf '%s\n' "$stepout" >> "$walk"
+	case "$stepout" in
+	*"is the first bad commit"*) break ;;
+	esac
+done
+expect "the walk comes to rest on one commit" \
+	"$fifth is the first bad commit" cat "$walk"
+probes=$(grep -oE '^\[[0-9a-f]+\] commit [0-9]+' "$walk" | cut -d' ' -f 2,3)
+expect_out "and it halves in the order git halves it" \
+	"$(printf 'commit 4\ncommit 6\ncommit 5')" printf '%s' "$probes"
+
+log=$work/bisect/log.txt
+gp bisect log > "$log" 2>&1
+expect "the log remembers the command that opened the range" \
+	"git bisect start" cat "$log"
+expect "and every commit judged along the way" "# bad: " cat "$log"
+expect "on the good side too" "# good: " cat "$log"
+expect "and names all three of the commits it stopped on" "commit 6" cat "$log"
+
+# ------------------------------------------------------------------
+say "skipping a probe"
+
+expect "reset returns to the branch it started from" \
+	"Switched to branch 'main'" gp bisect reset
+expect_out "so HEAD names that branch again" "refs/heads/main" gp symbolic-ref HEAD
+expect_out "and the work tree is the branch tip once more" "BROKEN 8" head -1 f.txt
+expect_absent "the ref holding the bad end is gone" .gitprompt/refs/bisect/bad
+expect_absent "as are the good ones" .gitprompt/refs/bisect/good-$fifth
+expect_absent "the start file goes with them" .gitprompt/BISECT_START
+expect_absent "and so does the log" .gitprompt/BISECT_LOG
+expect_absent "and the expected-rev note" .gitprompt/BISECT_EXPECTED_REV
+expect "with nothing left, reset says so" "We are not bisecting." gp bisect reset
+
+out=$(gp bisect start HEAD HEAD~7 2>&1)
+n=0
+while [ $n -lt 12 ]; do
+	n=$((n + 1))
+	case $(head -1 f.txt) in
+	"BROKEN 6") out=$(gp bisect skip 2>&1) ;;
+	*BROKEN*)   out=$(gp bisect bad 2>&1) ;;
+	*)          out=$(gp bisect good 2>&1) ;;
+	esac
+	case "$out" in
+	*"is the first bad commit"*) break ;;
+	esac
+done
+expect "a probe that cannot be judged does not stop the narrowing" \
+	"$fifth is the first bad commit" printf '%s\n' "$out"
+expect "and the log keeps the skip beside the rest" \
+	"git bisect skip" gp bisect log
+gp bisect reset >/dev/null 2>&1
+
+# ------------------------------------------------------------------
+say "letting a script do the judging"
+
+# The command goes through a shell, so a script named by its path is what git's
+# own users hand to `run`; 0 is good, 125 is skip, anything else is bad until it
+# reaches 128, which stops the bisection instead of judging anything.
+judge=$bs/judge.sh
+cat > "$judge" <<'EOF'
+#!/bin/sh
+grep -q BROKEN f.txt && exit 1
+exit 0
+EOF
+chmod +x "$judge"
+gp bisect start HEAD HEAD~7 >/dev/null 2>&1
+expect "a run hands each probe to the script and stops where it says" \
+	"$fifth is the first bad commit" gp bisect run ./judge.sh
+gp bisect reset >/dev/null 2>&1
+
+cat > "$judge" <<'EOF'
+#!/bin/sh
+exit 125
+EOF
+chmod +x "$judge"
+gp bisect start HEAD HEAD~7 >/dev/null 2>&1
+expect "125 means skip, and a range with nothing left to test ends" \
+	"We cannot bisect more!" gp bisect run ./judge.sh
+gp bisect reset >/dev/null 2>&1
+
+cat > "$judge" <<'EOF'
+#!/bin/sh
+exit 130
+EOF
+chmod +x "$judge"
+gp bisect start HEAD HEAD~7 >/dev/null 2>&1
+expect "a status of 128 or more stops everything" \
+	"is < 0 or >= 128" gp bisect run ./judge.sh
+expect_status "and that is reported as a failure" 1 gp bisect run ./judge.sh
+gp bisect reset >/dev/null 2>&1
+
+# 126 and 127 are the shell's own statuses for a command it could not run, so
+# one of them arriving as the verdict has to be checked before it is believed:
+# read as "this probe is bad" a misspelt path would narrow the range and name
+# the wrong commit with no complaint at all.
+gp bisect start HEAD HEAD~7 >/dev/null 2>&1
+expect "a command that cannot run at all is not read as a bad probe" \
+	"bogus exit code 127 for good revision" gp bisect run ./no-such-script.sh
+expect_status "and that stops the run rather than answering" 1 \
+	gp bisect run ./no-such-script.sh
+gp bisect reset >/dev/null 2>&1
+
+# ------------------------------------------------------------------
+say "refusing to start over local changes"
+
+printf 'dirty\n' > f.txt
+expect "a start over a changed file is refused" \
+	"Your local changes to the following files would be overwritten by checkout:" \
+	gp bisect start HEAD HEAD~7
+expect_status "and nothing is started" 1 gp bisect start HEAD HEAD~7
+expect_status "so there is no half-written range to log to" 1 gp bisect log
+expect_out "with the file left alone" "dirty" head -1 f.txt
+gp checkout -- f.txt >/dev/null 2>&1
+expect_out "and once it is put back the tip is what is on disk" "BROKEN 8" head -1 f.txt
+
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

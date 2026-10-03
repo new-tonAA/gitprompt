@@ -157,6 +157,8 @@ a third for the untracked files when it was asked to take those too.
 | `refs/tags/<name>` | a tag (may point at a tag object or straight at a commit) |
 | `refs/remotes/<remote>/<name>` | the last known position of a remote branch |
 | `refs/stash` | the newest stash entry, and `logs/refs/stash` the rest of them |
+| `refs/bisect/bad` | the bad end of a bisection, present only while one is running |
+| `refs/bisect/good-<id>` | one per good end; `refs/bisect/skip-<id>` per skipped commit |
 | `HEAD` | `ref: refs/heads/main`, or a raw id when detached |
 | `logs/<ref>` | the reflog for that ref |
 | `logs/HEAD` | the reflog of where the work tree has been |
@@ -402,6 +404,12 @@ Inside `.gitprompt/`:
 | `sequencer/` | a replay or a revert stopped part way: `kind`, `orig-head`, `head-name`, `mainline` and `todo` |
 | `COMMIT_EDITMSG` | the buffer an editor was given, left behind afterwards as git leaves it |
 | `RERUN_MSG` | the prompt being handed to an agent during `rerun`, and removed when the run ends |
+| `BISECT_START` | what the work tree was on when the bisection began — a branch name, or a raw id if it was detached |
+| `BISECT_LOG` | every step of the bisection, in the form `bisect log` prints |
+| `BISECT_TERMS` | `bad\ngood\n`; the words the range is described with |
+| `BISECT_NAMES` | the pathspec the bisection was limited to, written empty because a pathspec is refused |
+| `BISECT_EXPECTED_REV` | the commit the last probe left the work tree on |
+| `BISECT_ANCESTORS_OK` | git's mark that a probe's ancestors have all been accounted for |
 
 `RERUN_MSG` exists only while `rerun` is running and is not part of the history:
 it is how a prompt reaches an agent's standard input without being put on a
@@ -438,6 +446,16 @@ same parent number — and because a conflict left part way has no other place t
 keep it: the resolution and the `--continue` that finishes it both need to know
 which side the undo goes back to. A replay writes `mainline` as `1` and ignores
 it; the number only has a meaning for `kind = revert`.
+
+The `BISECT_*` files are a bisection, and they are all written and removed
+together: a start writes them once its range is known, and `reset` takes them
+away again. The range itself is not in any of them — that is `refs/bisect/bad`
+and its good and skip companions (§2), one ref per commit, which is what lets
+the answer be read back without parsing the log. `BISECT_START` is written last
+and removed last, so a run interrupted in the middle is still recognisably
+unfinished. `BISECT_ANCESTORS_OK` and `BISECT_EXPECTED_REV` are written because
+git's format has them and because a repository that has been through both
+readers should look the same either way; the range is never taken from them.
 
 ## 8. What a gitprompt repository looks like to git
 

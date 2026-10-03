@@ -274,6 +274,70 @@ else
 	skip "the grep comparison with git (git is not on PATH)"
 fi
 
+# -------------------------------------------------------------------------- halving
+say "halving a range to find the first bad commit"
+
+# bisect answers with a commit, but it earns that answer by looking at a
+# sequence of them, and two implementations that settle on the same commit can
+# still have asked about different ones on the way.  So the walk itself is put
+# beside git's, over the same eight commits: the ids and the commit dump after
+# the answer come out, and what is left is how the range was halved.
+if [ "$have_git" = 1 ]; then
+	bsg=$work/bs-git
+	bsr=$work/bs-gp
+
+	build_bs() {
+		mkdir -p "$2" || exit 2
+		cd "$2" || exit 2
+		"$1" init . >/dev/null 2>&1
+		"$1" config user.name "Surface" >/dev/null 2>&1
+		"$1" config user.email s@example.com >/dev/null 2>&1
+		i=1
+		while [ $i -le 8 ]; do
+			if [ $i -lt 5 ]; then printf 'fine %d\n' "$i" > f.txt
+			else printf 'broken %d\n' "$i" > f.txt; fi
+			"$1" add f.txt >/dev/null 2>&1
+			"$1" commit -m "step $i" >/dev/null 2>&1
+			i=$((i + 1))
+		done
+	}
+
+	# one probe at a time until it says which commit it settled on
+	walk() {
+		o=$("$1" bisect start HEAD HEAD~7 2>&1)
+		printf '%s\n' "$o"
+		n=0
+		while [ $n -lt 12 ]; do
+			n=$((n + 1))
+			if grep -q '^broken' f.txt; then step=bad; else step=good; fi
+			o=$("$1" bisect "$step" 2>&1)
+			printf '%s\n' "$o"
+			case "$o" in
+			*"is the first bad commit"*) break ;;
+			esac
+		done
+	}
+
+	# two repositories built at different times have different ids, and the
+	# dump of the commit it names carries a date, so both are taken out
+	strip_ids() {
+		sed -n '1,/is the first bad commit/p' |
+		sed 's/^\[[^]]*\]/[<id>]/' |
+		sed 's/^[0-9a-f][0-9a-f]* is the first bad commit/<id> is the first bad commit/' |
+		tr -d '\r'
+	}
+
+	build_bs git "$bsg"
+	walk git | strip_ids > "$work/bs-git.txt"
+	build_bs "$GP" "$bsr"
+	walk "$GP" | strip_ids > "$work/bs-gp.txt"
+	cd "$repo" || exit 2
+	chk "git and gitprompt halve the same history the same way" \
+		"$(cat "$work/bs-git.txt")" "$(cat "$work/bs-gp.txt")"
+else
+	skip "the bisect comparison with git (git is not on PATH)"
+fi
+
 # ---------------------------------------------------------------- integrity
 say "integrity and maintenance"
 rc_is "verify-objects passes" 0 "$GP" verify-objects
