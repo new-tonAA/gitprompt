@@ -305,6 +305,87 @@ fi
 "$GP" clean -fdx >/dev/null 2>&1
 cd "$repo" || exit 2
 
+# -------------------------------------------------------------------------- the ignore file
+say "what the ignore file means"
+
+# The rules gitprompt reads are git's, so the test is git's as well: one tree,
+# and each tool asked what it makes of it.  Only .gitignore is written here --
+# which is part of what is being checked, because gitprompt reads git's file as
+# well as its own and a repository that came from git arrives with nothing else.
+# As above, each tool runs on its own copy of the tree.
+ig=$work/ig
+rm -rf "$ig"
+mkdir -p "$ig" || exit 2
+cd "$ig" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.email i@example.com
+"$GP" config user.name "Ignore"
+
+printf '*.log\n!keep.log\n?.txt\n[qr]s.txt\nbuild/\n**/deep.txt\nmid/**/end.txt\ndir/\n!dir/keep.txt\nout/\n!out/\n/root.txt\nanch/inner.txt\nprompt-wins.txt\n' > .gitignore
+mkdir -p build buildmore nest mid/a/b dir anch x/anch out sub
+for f in a.log keep.log q.txt qs.txt xy.txt deep.txt root.txt \
+	 prompt-wins.txt plain.txt sub/here.txt build/new.txt build/kept.txt \
+	 buildmore/near.txt nest/deep.txt mid/end.txt mid/a/end.txt \
+	 mid/a/b/end.txt mid/other.txt dir/keep.txt dir/other.txt \
+	 anch/inner.txt x/anch/inner.txt out/skip.txt; do
+	printf 'x\n' > "$f"
+done
+"$GP" add .gitignore >/dev/null
+"$GP" add -f build/kept.txt >/dev/null
+has "an ignored file goes in when it is forced" "build/kept.txt" \
+	"$("$GP" ls-files)"
+"$GP" commit -m "a tracked file inside an ignored directory" >/dev/null
+
+if [ "$have_git" = 1 ]; then
+	rm -rf "$work/cg" "$work/cp"
+	cp -r . "$work/cg"
+	mv "$work/cg/.gitprompt" "$work/cg/.git"
+	cp -r . "$work/cp"
+	gs() { ( cd "$work/cg" && git status --short --untracked-files=all 2>&1 ) \
+		| tr -d '\r'; }
+	ps() { ( cd "$work/cp" && "$GP" status --short 2>&1 ) | tr -d '\r'; }
+	chk "the two make the same work tree of it" "$(gs)" "$(ps)"
+
+	# The refusal is git's down to the line break, with two knowing
+	# differences normalised away: the file it names is this project's, and
+	# there is no advice setting here to turn the message off, so git's last
+	# line would be a lie.
+	gres() { ( cd "$work/cg" && git add "$@" 2>&1; echo "rc=$?" ) \
+		| grep -v CRLF | tr -d '\r' \
+		| sed -e 's/your \.gitignore files/your .gitpromptignore files/' \
+		      -e '/addIgnoredFile/d'; }
+	pres() { ( cd "$work/cp" && "$GP" add "$@" 2>&1; echo "rc=$?" ) \
+		| tr -d '\r'; }
+	chk "the refusal over a named ignored file is git's" "$(gres a.log)" \
+		"$(pres a.log)"
+	chk "and the same over a named ignored directory" "$(gres build)" \
+		"$(pres build)"
+	chk "named with or without its slash" "$(gres build/)" "$(pres build/)"
+	chk "and several named at once, in the same order" \
+		"$(gres qs.txt a.log)" "$(pres qs.txt a.log)"
+	chk "a directory that is not ignored is added quietly" "$(gres sub)" \
+		"$(pres sub)"
+
+	chk "add -f takes what was refused" "$(gres -f build)" "$(pres -f build)"
+	( cd "$work/cg" && git add . >/dev/null 2>&1 )
+	( cd "$work/cp" && "$GP" add . >/dev/null 2>&1 )
+	chk "and adding everything stages the same paths" \
+		"$(cd "$work/cg" && git ls-files | sort)" \
+		"$(cd "$work/cp" && "$GP" ls-files | sort)"
+
+	# clean reads the same rules, so it has to reach the same conclusions --
+	# including about the ignored directory the index knows a path in.
+	gc() { ( cd "$work/cg" && git clean "$@" 2>&1 ) | tr -d '\r'; }
+	pc() { ( cd "$work/cp" && "$GP" clean "$@" 2>&1 ) | tr -d '\r'; }
+	for f in -nX -ndX -nx -ndx -nd; do
+		chk "git and gitprompt agree on clean $f here too" "$(gc $f)" \
+			"$(pc $f)"
+	done
+else
+	skip "the ignore comparison with git (git is not on PATH)"
+fi
+cd "$repo" || exit 2
+
 # -------------------------------------------------------------------------- searching
 say "searching"
 # A pattern language is the one part of grep the user has already learned

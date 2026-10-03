@@ -1,7 +1,8 @@
 /*
  * clean.c - take out of the work tree what the index does not know about.
  *
- * Two things decide what may go: the index, and .gitpromptignore.  A path the
+ * Two things decide what may go: the index, and the ignore rules -- the ones
+ * src/ignore.c reads out of .gitignore and .gitpromptignore.  A path the
  * index holds is never touched -- this is the one command here whose whole job
  * is deletion, and the thing it must never delete is somebody's work -- while
  * a path it does not hold is a candidate, and which candidates are taken is
@@ -56,10 +57,11 @@ struct clean_ctx {
 /* what a pattern means                                                */
 
 /*
- * One .gitpromptignore-shaped pattern against one path: a trailing slash says
- * the pattern is about a directory, and a pattern with no slash in it matches
- * a basename at any depth.  The same rule -e is documented with, which is why
- * it is one function and not two.
+ * One -e pattern against one path: a trailing slash says the pattern is about a
+ * directory, and a pattern with no slash in it matches a basename at any depth.
+ * Narrower than a pattern in an ignore file -- no globs -- which is a
+ * divergence from git, and it lives here rather than in src/ignore.c because
+ * that file's matcher answers a different, wider question.
  */
 static int pat_match(const char *pat, const char *rel, int is_dir)
 {
@@ -192,12 +194,10 @@ static int is_nested_repo(const char *abs)
 
 /*
  * How many files are under the directory, and how many of them this run
- * wants.  The two numbers are what the collapse is decided on.  A directory
- * under one that is ignored is ignored itself, so that state is carried down
- * rather than re-derived.
+ * wants.  The two numbers are what the collapse is decided on.
  */
 static void count_dir(struct clean_ctx *c, const char *rel, const char *abs,
-		      int inh_ign, long *total, long *want)
+		      long *total, long *want)
 {
 	DIR *d = opendir(abs);
 	struct dirent *de;
@@ -213,11 +213,10 @@ static void count_dir(struct clean_ctx *c, const char *rel, const char *abs,
 		sa = xstrfmt("%s/%s", abs, de->d_name);
 		if (is_directory(sa)) {
 			if (!is_nested_repo(sa) && !excluded(c, sr, 1))
-				count_dir(c, sr, sa,
-					  inh_ign || path_is_ignored_dir(c->r, sr),
-					  total, want);
+				count_dir(c, sr, sa, total, want);
 		} else {
-			int ign = inh_ign || path_is_ignored(c->r, sr);
+			int ign = path_is_ignored(c->r, sr);
+
 			(*total)++;
 			if (wanted(c, sr, ign) && slist_matches(&c->specs, sr))
 				(*want)++;
@@ -228,19 +227,15 @@ static void count_dir(struct clean_ctx *c, const char *rel, const char *abs,
 	closedir(d);
 }
 
-static void clean_dir(struct clean_ctx *c, const char *rel, const char *abs,
-		      int inh_ign);
+static void clean_dir(struct clean_ctx *c, const char *rel, const char *abs);
 
-static void clean_file(struct clean_ctx *c, const char *rel, int inh_ign)
+static void clean_file(struct clean_ctx *c, const char *rel)
 {
-	int ign;
-
 	if (index_get(c->ist, rel))
 		return;
 	if (!slist_matches(&c->specs, rel))
 		return;
-	ign = inh_ign || path_is_ignored(c->r, rel);
-	if (!wanted(c, rel, ign))
+	if (!wanted(c, rel, path_is_ignored(c->r, rel)))
 		return;
 	victim_new(c, rel, 0);
 }
@@ -266,13 +261,10 @@ static int spec_selected(const struct clean_ctx *c, const char *rel)
 	return 0;
 }
 
-static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs,
-			 int inh_ign)
+static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs)
 {
-	int ign, selected, may_take;
+	int selected, may_take;
 	long total = 0, want = 0;
-
-	ign = inh_ign || path_is_ignored_dir(c->r, rel);
 
 	/*
 	 * An -e pattern on the directory takes the whole directory out of the
@@ -288,7 +280,7 @@ static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs,
 
 	/* the index knows something in here: only its untracked side is ours */
 	if (holds_tracked(c, rel)) {
-		clean_dir(c, rel, abs, ign);
+		clean_dir(c, rel, abs);
 		return;
 	}
 	if (is_nested_repo(abs))
@@ -306,7 +298,7 @@ static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs,
 	 */
 	may_take = c->specs.nr ? slist_matches(&c->specs, rel) : c->dirs;
 
-	count_dir(c, rel, abs, ign, &total, &want);
+	count_dir(c, rel, abs, &total, &want);
 
 	if (may_take) {
 		if (!total) {
@@ -321,7 +313,7 @@ static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs,
 		}
 		if (!want)
 			return;
-		clean_dir(c, rel, abs, ign);
+		clean_dir(c, rel, abs);
 		return;
 	}
 
@@ -333,11 +325,10 @@ static void clean_subdir(struct clean_ctx *c, const char *rel, const char *abs,
 	 * that are reachable no other way.
 	 */
 	if (c->specs.nr || c->dirs || (c->only_ignored && want && want < total))
-		clean_dir(c, rel, abs, ign);
+		clean_dir(c, rel, abs);
 }
 
-static void clean_dir(struct clean_ctx *c, const char *rel, const char *abs,
-		      int inh_ign)
+static void clean_dir(struct clean_ctx *c, const char *rel, const char *abs)
 {
 	DIR *d = opendir(abs);
 	struct dirent *de;
@@ -357,9 +348,9 @@ static void clean_dir(struct clean_ctx *c, const char *rel, const char *abs,
 			    : xstrdup(de->d_name);
 		sa = xstrfmt("%s/%s", abs, de->d_name);
 		if (is_directory(sa))
-			clean_subdir(c, sr, sa, inh_ign);
+			clean_subdir(c, sr, sa);
 		else
-			clean_file(c, sr, inh_ign);
+			clean_file(c, sr);
 		free(sr);
 		free(sa);
 	}
@@ -431,7 +422,7 @@ int cmd_clean(struct repo *r, int argc, char **argv)
 	}
 
 	index_read(&ist, repo_index_path(r));
-	clean_dir(&c, "", r->root, 0);
+	clean_dir(&c, "", r->root);
 
 	qsort(c.v, c.nv, sizeof(*c.v), victim_cmp);
 	for (i = 0; i < c.nv; i++) {

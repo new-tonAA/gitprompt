@@ -399,6 +399,14 @@ void index_write(const struct index_state *istate, const char *path)
 		gp_error("cannot write index %s", path);
 	buf_release(&b);
 	free(sorted);
+
+	/*
+	 * Which paths are tracked is half of what the ignore rules answer, and
+	 * the ignore layer keeps a copy of it.  A command that writes the index
+	 * and then walks the work tree in the same run would otherwise be told
+	 * about the index as it was before.
+	 */
+	ignore_forget();
 }
 
 /* ------------------------------------------------------------------ */

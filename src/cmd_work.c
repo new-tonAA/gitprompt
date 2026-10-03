@@ -8,6 +8,7 @@
 #include "gp.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 /* ------------------------------------------------------------------ */
@@ -228,21 +229,75 @@ static void add_pathspecs(int argc, char **argv, const char *const *allows,
 /* ------------------------------------------------------------------ */
 /* add                                                                 */
 
+/*
+ * A named path the ignore rules match is not staged in silence: git names it
+ * and stops, because a build output file that got committed once is otherwise
+ * the kind of mistake nobody notices for a year.  The wording is git's, save
+ * its last line -- there is no advice.addIgnoredFile here to turn this off, so
+ * offering the setting would be a lie.
+ */
+static int refuse_ignored(const struct slist *ign)
+{
+	size_t i;
+
+	fputs("The following paths are ignored by one of your "
+	      ".gitpromptignore files:\n", stderr);
+	for (i = 0; i < ign->nr; i++)
+		fprintf(stderr, "%s\n", ign->v[i]);
+	fputs("hint: Use -f if you really want to add them.\n", stderr);
+	return 1;
+}
+
+/*
+ * -f on a named ignored path.  The walk that filled `paths` left it out, so
+ * the spec is followed here instead: a file is staged, a directory is walked
+ * and everything under it is staged, its own ignore rules included.
+ */
+static void stage_forced(struct repo *r, struct index_state *ist,
+			 const char *rel)
+{
+	char *abs = xstrfmt("%s/%s", r->root, rel);
+
+	if (is_directory(abs)) {
+		DIR *d = opendir(abs);
+		struct dirent *de;
+
+		if (d) {
+			while ((de = readdir(d))) {
+				char *sr;
+
+				if (!strcmp(de->d_name, ".") ||
+				    !strcmp(de->d_name, ".."))
+					continue;
+				sr = xstrfmt("%s/%s", rel, de->d_name);
+				stage_forced(r, ist, sr);
+				free(sr);
+			}
+			closedir(d);
+		}
+	} else if (is_file(abs)) {
+		stage_into(r, ist, rel);
+	}
+	free(abs);
+}
+
 int cmd_add(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	struct slist specs = { NULL, 0, 0 };
 	struct index_state ist;
 	struct slist paths = { NULL, 0, 0 };
+	struct slist ign = { NULL, 0, 0 };
 	size_t i;
-	int dry_run, update_only, all;
+	int dry_run, update_only, all, force;
 
 	add_pathspecs(argc, argv, (const char *const[]){
 		"-A", "--all", "-u", "--update", "-n", "--dry-run",
-		"--pathspec-from-file=", NULL }, &o, &specs);
+		"-f", "--force", "--pathspec-from-file=", NULL }, &o, &specs);
 	dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
 	update_only = opts_flag(&o, "-u") || opts_flag(&o, "--update");
 	all = opts_flag(&o, "-A") || opts_flag(&o, "--all");
+	force = opts_flag(&o, "-f") || opts_flag(&o, "--force");
 
 	if (!o.nargs && !all && !update_only) {
 		gp_error("Nothing specified, nothing added.\nhint: Maybe you "
@@ -254,6 +309,39 @@ int cmd_add(struct repo *r, int argc, char **argv)
 	memset(&ist, 0, sizeof ist);
 	index_read(&ist, repo_index_path(r));
 	worktree_paths(r, &paths);
+
+	/*
+	 * Only a path named outright is refused.  `add sub` walks a directory
+	 * that is not itself ignored and quietly leaves its ignored files be,
+	 * and `add .` and `add -A` say nothing at all -- which is git's
+	 * behaviour, and the reason a build directory does not turn every
+	 * `add .` into a refusal.
+	 */
+	if (specs.nr && !all && !update_only) {
+		for (i = 0; i < specs.nr; i++) {
+			char *abs = xstrfmt("%s/%s", r->root, specs.v[i]);
+			int is_dir = is_directory(abs);
+			int exists = is_dir || is_file(abs);
+
+			free(abs);
+			if (!exists)
+				continue;
+			if (is_dir ? path_is_ignored_dir(r, specs.v[i])
+				   : path_is_ignored(r, specs.v[i]))
+				slist_push(&ign, specs.v[i]);
+		}
+		if (ign.nr && !force) {
+			int rc;
+
+			slist_sort_unique(&ign);
+			rc = refuse_ignored(&ign);
+			index_release(&ist);
+			slist_release(&paths);
+			slist_release(&specs);
+			slist_release(&ign);
+			return rc;
+		}
+	}
 
 	if (update_only) {
 		/* only paths already tracked are of interest */
@@ -299,6 +387,14 @@ int cmd_add(struct repo *r, int argc, char **argv)
 	}
 
 	/*
+	 * -f is the only way a path the rules match is ever staged, and the walk
+	 * that filled `paths` left it out, so it is followed from the spec.
+	 */
+	if (force && !dry_run)
+		for (i = 0; i < ign.nr; i++)
+			stage_forced(r, &ist, ign.v[i]);
+
+	/*
 	 * Staging a path is how a merge conflict is declared resolved, exactly
 	 * as in git: writing the path's stage-0 entry drops the stages it had.
 	 * A path this command did not touch keeps its conflict, so
@@ -310,6 +406,7 @@ int cmd_add(struct repo *r, int argc, char **argv)
 	index_release(&ist);
 	slist_release(&paths);
 	slist_release(&specs);
+	slist_release(&ign);
 	return 0;
 }
 

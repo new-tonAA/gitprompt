@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1039 checks, 0 failures** — 909 in
-`test/smoke.sh`, 94 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1103 checks, 0 failures** — 959 in
+`test/smoke.sh`, 108 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -29,7 +29,14 @@ by line with `blame`, hunk by hunk with `--prompt-hunks`, and the commit-level
 fallback for a prompt recorded without a snapshot -- `status` and `diff` on a
 move, `clean` in each of its three modes together with the collapse of a
 directory it reports whole, the pathspec that decides where that collapse lands,
-and the store it will not touch however many `-f` it is given -- the commit
+and the store it will not touch however many `-f` it is given -- what the ignore
+file means, rule by rule: a glob matching a name at any depth, the anchoring a
+slash gives a pattern, `**` standing for zero directories as happily as for
+three, `!` putting a path back and failing to put back a file whose directory is
+already out, a deeper file overriding a shallower one, a trailing space not
+being part of the pattern, and a tracked path never being ignored however well
+its name fits -- the paths `add` refuses for being named while ignored, in the
+wording git uses, and `-f` staging them instead -- the commit
 editor, finding lines with `grep` in the work tree, in the
 index and in a revision, the pattern syntax under each of the default, `-E` and
 `-F`, and the three exit statuses, halving a range with `bisect` — the order it
@@ -53,7 +60,12 @@ same eight commits are halved by both, and the probes have to come back in the
 same order with the same widths. `clean` is compared on one fixture built to
 give each branch of its decision something to decide, in each mode and under
 each shape of pathspec and `-e`, with each tool run on its own copy so that the
-store each one skips is its own. What needs git itself is skipped rather than
+store each one skips is its own. The ignore rules are compared the same way, on
+a work tree holding a `.gitignore` and no `.gitpromptignore` at all, so that the
+file both tools read is the same file: the untracked list, the words and the
+exit status `add` gives back for a path named while ignored, the set `-f` stages
+instead, and `clean` agreeing in each of its three modes and under `-d`. What
+needs git itself is skipped rather than
 faked when git is not on PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

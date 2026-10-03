@@ -319,7 +319,10 @@ which candidates this run was asked for, and that is what the three modes choose
 between — the untracked-but-not-ignored ones, all of them, or the ignored alone.
 `-e` is a third attitude to the same question: an exclude rule that takes a path
 out of the plain and `-x` modes and puts it into `-X`, which is why
-`clean -nX -e plain.txt` names a file nothing had called ignored.
+`clean -nX -e plain.txt` names a file nothing had called ignored. Its pattern is
+narrower than one in an ignore file — a whole basename or a whole path, with a
+trailing slash meaning a directory and no globs at all — which is a divergence
+from git and is listed in the README.
 
 A directory is reported whole when everything under it is going, so `-ndx` says
 `Would remove allign/` rather than naming its files one at a time; the removal is
@@ -338,13 +341,72 @@ are given. What makes it one is not the name — a stray directory called `.git`
 holding nothing but a config file is removed like any other — but the three
 things a store has: a `HEAD`, an `objects/` and a `refs/`.
 
-Which names count as ignored is `.gitpromptignore`, the file `status` and `add`
-already read, rather than `.gitignore`: whole basenames at any depth and whole
-paths, a trailing slash meaning directories only, and no globs at all. `-i` is
+Which names count as ignored is decided where `status` and `add` decide it too;
+see [What the ignore file means](#what-the-ignore-file-means). `-i` is
 refused as an unknown option, and a pathspec is the path of the directory it
 names rather than a wildmatch pattern, so `clean -nd -- a/b` collapses at `a/b/`
 even though the only thing under `a/` is `b/` and everything under `b/` is going
 too.
+
+## What the ignore file means
+
+A prompt repository collects what nobody meant to keep — editor droppings, build
+output, a virtual environment — and the rules for that are git's, because a
+repository that is an ordinary git repository will have arrived with a
+`.gitignore` and because the rules people know are the ones git taught them.
+Both files are read: `.gitignore` first, then `.gitpromptignore`, so inside one
+directory the name this project uses has the last word. A file in a
+subdirectory is read after the ones above it, so it has the last word over
+them.
+
+What the rules mean is mostly what they look like, but the parts that are not
+obvious are the parts that get implemented wrong:
+
+- A pattern with a slash in it, leading or in the middle, is anchored to the
+  directory its file is in; `anch/q.txt` is not `x/anch/q.txt`, and `/root.txt`
+  is not `sub/root.txt`. A pattern with no slash matches a name at any depth.
+- A trailing slash means a directory, and a pattern naming a directory — with
+  the slash or without it — takes everything under it along.
+- `*`, `?` and `[...]` are globs within one path segment, so a star never steps
+  over a directory. A double star that is a whole segment stands for any number
+  of segments, zero included: `**/deep.txt` matches `deep.txt`, and
+  `mid/**/end.txt` matches `mid/end.txt`.
+- A leading `!` puts a path back, but only if nothing above it is already out:
+  `out/` followed by `!out/` brings the directory back, while `dir/` followed by
+  `!dir/keep.txt` cannot, because a file under an excluded directory is excluded
+  by that directory and not by its own name.
+- The last line in a file that mentions a path wins, and a deeper file wins over
+  a shallower one. `\ `, `\#` and `\!` escape; unescaped spaces at the end of a
+  line are not part of the pattern.
+
+A path the index knows is never ignored, whatever the rules say about its name.
+That is what git does — `git check-ignore` will not name a tracked path either —
+and it is why the check lives inside the ignore layer rather than at each call
+site: a file can be committed and only afterwards matched by a rule, a `.o` file
+tracked before anyone thought to ignore build output, and a caller that asked
+the rules alone would stop seeing it. The cost is that the layer needs the
+index, which `index_get` answers by walking every entry; so the paths are read
+once, sorted, and searched. Writing the index drops that copy, or a command that
+wrote it and then walked the work tree would be told about the index as it was.
+
+One more thing follows from the tracked-file rule, and it is why the walk does
+not prune: a directory with a rule against it is still walked into when the
+index holds something inside it, because `status` has to report the changes to
+that file. `clean` descends into one for the same reason — it names
+`build/new.txt` rather than folding the directory into a line, which is what git
+does and what the suite compares it against.
+
+`add` names the paths it refuses: `add build` on an ignored directory stops with
+git's two lines — the paths, and the hint about `-f` — and `-f` stages what the
+walk left out, following the spec itself since the walk never offered it. A
+directory that is not itself ignored is not a refusal, and neither is `add .`:
+only a path named outright is refused, so an ignored file never turns every
+`add .` into an error. Git prints a third line offering
+`advice.addIgnoredFile`; there is no such setting here, so it is not printed.
+
+The edges are not implemented and are listed in the README: `[[:alpha:]]`
+character classes, `core.excludesFile`, `.gitprompt/info/exclude`,
+`status --ignored` and `clean -i`.
 
 ## The store
 

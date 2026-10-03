@@ -168,14 +168,20 @@ one that says no:
   merging including conflicts, replaying a commit elsewhere, undoing one,
   setting work aside, tags,
   reset, the ref plumbing, remotes and the prompt layer are all here.
-- **`clean`, and what it reads.** Which files may go is decided by
-  `.gitpromptignore`, the same file `status` and `add` read: whole basenames and
-  whole paths, a trailing slash for directories, no globs. It is not
-  `.gitignore`, so `*.log` is a pattern matching one file that would have to be
-  called that. `-i`/`--interactive` is refused as an unknown option, a directory
-  that is a repository in its own right is left alone however many `-f` are
-  given, and a pathspec is the path of the directory it names rather than a
-  wildmatch pattern.
+- **The ignore file, at its edges.** What `status`, `add` and `clean` read is
+  git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
+  in the index is never ignored -- and both `.gitignore` and
+  `.gitpromptignore` are read, the latter with the last word inside a
+  directory. What is missing is the edges: `[[:alpha:]]` character classes,
+  `core.excludesFile`, `.gitprompt/info/exclude`, `status --ignored` and
+  `clean -i`. `git add`'s third hint line is not printed either, since there is
+  no `advice.addIgnoredFile` here to turn the message off.
+- **`clean`, at its edges.** `-i`/`--interactive` is refused as an unknown
+  option, a directory that is a repository in its own right is left alone
+  however many `-f` are given, a pathspec is the path of the directory it
+  names rather than a wildmatch pattern, and an `-e` pattern is a whole
+  basename or a whole path rather than a wildmatch pattern, so
+  `-e '*.log'` names a file by that literal name and nothing else.
 - **`stash` with `--index`, and with a pathspec.** Everything else is here:
   `push` (with `-m`, `-u` and `-k`), `list`, `show` (with `-p`),
   `apply`/`pop`, `drop`, `clear` and `branch`, with a conflict stopping in the
@@ -184,7 +190,7 @@ one that says no:
 
 ## Status
 
-**1039 checks, 0 failures** — 909 in `test/smoke.sh`, 94 in `test/surface.sh`
+**1103 checks, 0 failures** — 959 in `test/smoke.sh`, 108 in `test/surface.sh`
 and 36 in `test/restore.sh`.
 
 ```console

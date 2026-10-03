@@ -4379,6 +4379,171 @@ expect_absent "so it goes like any other directory" sub
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "what the ignore file means"
+
+# The rules are git's, and the ones that are easy to get wrong are the ones
+# worth pinning down: a pattern with a slash is anchored to the directory its
+# file is in, one without a slash matches a name at any depth, a trailing slash
+# means a directory and takes everything under it with it, a double star spans
+# whole directories, and a ! puts a path back only when nothing above it is
+# already out.  Every rule below is asked through status, which is where a
+# reader meets it.
+ig=$work/ignore
+rm -rf "$ig"
+mkdir -p "$ig" || exit 2
+cd "$ig" || exit 2
+gp init . >/dev/null 2>&1
+gp config user.name "Ignore Tester" >/dev/null 2>&1
+gp config user.email ignore@example.com >/dev/null 2>&1
+
+mkdir -p sub build buildmore nest mid/a/b lead/p/q out dir anch x/anch \
+	sub2 sub3/deep
+
+# The spaces after vis.txt are the point: a run of them at the end of a line is
+# not part of the pattern.  And both files are written, because both are read:
+# git's, and this project's, the second with the last word inside a directory.
+printf '*.log\n!keep.log\n?.txt\n[qr]s.txt\nbuild/\n**/deep.txt\nmid/**/end.txt\nlead/**/\nout/\n!out/\ndir/\n!dir/keep.txt\n/root.txt\nanch/inner.txt\n\\#lit.txt\n\\!bang.txt\nvis.txt   \nprompt-wins.txt\npromptonly.txt\n' > .gitpromptignore
+printf 'gitonly.txt\n!prompt-wins.txt\n' > .gitignore
+printf '!*.log\n' > sub2/.gitpromptignore
+printf '/only.txt\n' > sub3/.gitpromptignore
+
+for f in a.log keep.log q.txt qs.txt rs.txt zs.txt xy.txt plain.txt deep.txt \
+	 leadly.txt root.txt '#lit.txt' '!bang.txt' vis.txt gitonly.txt \
+	 prompt-wins.txt promptonly.txt tracked.log; do
+	printf 'x\n' > "$f"
+done
+printf 'x\n' > sub/a.log
+printf 'x\n' > sub/root.txt
+printf 'x\n' > build/x.txt
+printf 'x\n' > build/kept.txt
+printf 'x\n' > buildmore/near.txt
+printf 'x\n' > nest/deep.txt
+printf 'x\n' > mid/end.txt
+printf 'x\n' > mid/a/end.txt
+printf 'x\n' > mid/a/b/end.txt
+printf 'x\n' > mid/other.txt
+printf 'x\n' > lead/p/q/y.txt
+printf 'x\n' > out/skip.txt
+printf 'x\n' > dir/keep.txt
+printf 'x\n' > anch/inner.txt
+printf 'x\n' > x/anch/inner.txt
+printf 'x\n' > sub2/x.log
+printf 'x\n' > sub3/only.txt
+printf 'x\n' > sub3/deep/only.txt
+
+# ignore_check <description> <seen|hidden> <path> -- a path is seen when status
+# names it as untracked, and hidden when the walk never offered it.  The whole
+# line is compared, so a rule about root.txt is not satisfied by sub/root.txt.
+ignore_check() {
+	desc=$1
+	want=$2
+	path=$3
+	got=$(gp status --short 2>&1 | tr -d '\r')
+	if printf '%s\n' "$got" | awk -v p="?? $path" '$0 == p { f = 1 } END { exit !f }'
+	then
+		[ "$want" = seen ] && ok "$desc" || bad "$desc" "$path was not ignored"
+	else
+		[ "$want" = hidden ] && ok "$desc" || bad "$desc" "no [$path] in [$got]"
+	fi
+}
+
+ignore_check "a pattern with no slash matches a name at any depth" hidden a.log
+ignore_check "even several directories down" hidden sub/a.log
+ignore_check "a later line puts a path back" seen keep.log
+ignore_check "? stands for one character" hidden q.txt
+ignore_check "and the pattern has to be the whole name" seen xy.txt
+ignore_check "a set is the characters in it" hidden qs.txt
+ignore_check "whichever of them matched" hidden rs.txt
+ignore_check "and a name outside it is left alone" seen zs.txt
+ignore_check "a trailing slash takes the directory and all of it" hidden build/x.txt
+ignore_check "but only that name, not a longer one" seen buildmore/near.txt
+ignore_check "a double star is no directory at all" hidden deep.txt
+ignore_check "or more than one" hidden nest/deep.txt
+ignore_check "a double star in the middle spans what lies between" hidden mid/end.txt
+ignore_check "however many directories that is" hidden mid/a/b/end.txt
+ignore_check "and the names beside it are not touched" seen mid/other.txt
+ignore_check "a double star at the end takes everything below" hidden lead/p/q/y.txt
+ignore_check "and is not a prefix of an ordinary name" seen leadly.txt
+ignore_check "a directory can be put back whole" seen out/skip.txt
+ignore_check "a file cannot be put back under a directory that is out" hidden dir/keep.txt
+ignore_check "a leading slash anchors to the root" hidden root.txt
+ignore_check "so the same name below is another file" seen sub/root.txt
+ignore_check "a slash in the middle anchors it too" hidden anch/inner.txt
+ignore_check "and that name inside another directory is not it" seen x/anch/inner.txt
+ignore_check "an escaped hash is a literal hash" hidden '#lit.txt'
+ignore_check "an escaped bang is a literal bang" hidden '!bang.txt'
+ignore_check "spaces nobody escaped are not part of it" hidden vis.txt
+ignore_check "git's own file is read" hidden gitonly.txt
+ignore_check "and this project's file has the last word" hidden prompt-wins.txt
+ignore_check "a rule of this project's own is read as well" hidden promptonly.txt
+ignore_check "a deeper file can put back what a shallower one took" seen sub2/x.log
+ignore_check "a deeper file can anchor within its directory" hidden sub3/only.txt
+ignore_check "and then not below it" seen sub3/deep/only.txt
+ignore_check "a file no rule mentions is the work tree's own" seen plain.txt
+
+# A path the index knows is never ignored, whatever a rule says about its name:
+# ignoring is about what has not been recorded, and a file that was committed
+# before anyone wrote the rule must not disappear from status because of it.
+gp add -f .gitignore .gitpromptignore tracked.log build/kept.txt >/dev/null 2>&1
+gp commit -m "a tracked file inside an ignored directory" >/dev/null 2>&1
+printf 'changed\n' > tracked.log
+expect "a tracked file a rule matches is still reported" " M tracked.log" \
+	gp status --short
+expect_status "and add takes it with no -f at all" 0 gp add tracked.log
+expect "so the change is staged" "M  tracked.log" gp status --short
+printf 'changed\n' > build/kept.txt
+expect "and the same holds inside an ignored directory" " M build/kept.txt" \
+	gp status --short
+
+# add refuses a path the rules take out, names it, and says what to do.  The
+# wording is git's, down to the line break, with one difference: there is no
+# advice setting here to turn the message off, so git's last line would be a
+# lie and is not printed.
+expect_status "add on a named ignored file is refused" 1 gp add a.log
+expect_out "with git's wording, naming the path" \
+"The following paths are ignored by one of your .gitpromptignore files:
+a.log
+hint: Use -f if you really want to add them." gp add a.log
+expect_out "a directory is named the way a pathspec spells it" \
+"The following paths are ignored by one of your .gitpromptignore files:
+build
+hint: Use -f if you really want to add them." gp add build/
+expect_out "and several named at once are one list, in order" \
+"The following paths are ignored by one of your .gitpromptignore files:
+a.log
+q.txt
+hint: Use -f if you really want to add them." gp add q.txt a.log
+expect_status "a directory that is not itself ignored is not refused" 0 \
+	gp add sub
+expect_status "nor is anything add . walks past" 0 gp add .
+expect_status "clean does not fold a directory the index knows" 0 gp clean -nX
+# clean_line compares a whole line, not a substring: "Would remove build/" is a
+# prefix of "Would remove build/x.txt", and the difference between the two is
+# exactly what this is asking about.
+clean_line() {
+	desc=$1
+	want=$2
+	line=$3
+	got=$(gp clean -nX 2>&1 | tr -d '\r')
+	if printf '%s\n' "$got" | awk -v p="$line" '$0 == p { f = 1 } END { exit !f }'
+	then
+		[ "$want" = seen ] && ok "$desc" || bad "$desc" "the line [$line] is there"
+	else
+		[ "$want" = absent ] && ok "$desc" || bad "$desc" "no line [$line] in [$got]"
+	fi
+}
+clean_line "an ignored directory holding a tracked file is descended into" \
+	seen "Would remove build/x.txt"
+clean_line "and the directory is not folded into one line" absent \
+	"Would remove build/"
+expect_status "add -f stages what was refused" 0 gp add -f build
+expect "so the ignored file is in the index now" "A  build/x.txt" gp status --short
+expect_status "and -f takes a named file too" 0 gp add -f '!bang.txt'
+expect "with the file in the index" "A  !bang.txt" gp status --short
+
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 say "halving a range to find the first bad commit"
 
 # bisect is a loop over a shrinking range, and nearly everything it can get
