@@ -617,6 +617,61 @@ is refused rather than half-read, along with the options that would change what
 the text means (`-p<n>`, `-R`, `--3way`) — a patch that means something other
 than what this can carry is better rejected than applied approximately.
 
+## Two versions of the same series
+
+A series that was rebased, or reworked after review, is the same work written
+twice: the commits line up one for one, most of them still carrying the change
+they carried, a few carrying something else. `range-diff` is the command that
+shows the lining up, and the whole of it is two questions — how do you decide
+two commits are the same change, and how do you decide which of one side's
+commits answers to which of the other's.
+
+The first is answered by a patch id, and the one here is built rather than
+borrowed. It hashes the paths, the modes, the lines taken out and the lines put
+in, and leaves out the position of each hunk and the blob names on either side,
+because those are the parts that move when a commit is replayed onto a new base
+while the change itself stays put. Git's `patch-id` is a different number over
+the same idea, and the two are never compared: the ids are only ever weighed
+against other ids from the same run, which is why using our own costs nothing.
+What is deliberately *not* left out is the commit message. Two commits that
+carry the same change into the same files are still different commits if they
+say different things, and calling them a pair is right; calling them the same
+pair, with the message difference invisible, is not.
+
+The second question is a heuristic in either tool, and this one is stated
+plainly: a commit is paired with the next one whose patch has at least half its
+changed lines in common. Git weighs a cost against a creation factor instead,
+and the two rules draw the line in slightly different places — a pair that is
+near the line can come out `!` here and `<`/`>` there, which is the one place
+the two tools visibly disagree. That is why the surface suite compares the two
+only on a series whose pairs both rules agree about, and says so where it does
+it. Both tools do agree on the ends of the scale: the same patch with the same
+message is a pair, and a commit the other side does not have at all is not.
+
+Both pairing passes run forward only, so the pairs never cross — a commit's
+partner always sits further along the series than the commit before it did.
+That is what a series *is*, an order, and it is also what lets the report
+interleave the two sides in a single column: the next left, the next right the
+pairing left alone, then the next pair, each taken in turn. A left is never
+answered by a right that sits before its neighbour's.
+
+The body printed under a `!` is a diff of the two commits as this command holds
+them — the message first, then the patch — so that a pair whose change is the
+same one told twice still shows what actually differs, which is then the
+wording. Git prints its own rendering of the two commits in that place, with a
+metadata block and the message quoted as markdown headings, and reproducing
+that would be imitating a text this tool does not otherwise produce. The two
+bodies answer the same question and are not the same text, and the surface
+suite compares the marks and not the bodies for exactly that reason.
+
+The `...` form is read here rather than through the revision parser. `A...B`
+means the symmetric difference to the rest of git — both sides at once — and a
+range-diff wants something else from the same spelling: the merge base of the
+two tips as the base, and a range from there to each tip. So the two ends are
+resolved and the base is worked out with the merge-base machinery, which is a
+few lines, rather than borrowing a reading of the same characters that answers
+a different question.
+
 ## Transports
 
 | URL form | how it works |

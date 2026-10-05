@@ -755,6 +755,69 @@ else
 fi
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- range-diff
+say "two versions of a series, lined up by both tools"
+# What both tools agree on is the marks: `=` for a pair that is the same change
+# with the same message, `!` for a pair that differs, `<` and `>` for a commit
+# only one side has.  The body printed under a `!` is not compared -- git diffs
+# its own rendering of the two commits there and this prints a different one.
+# The pairing rule here is this command's own and is looser than git's creation
+# factor, so the series below is one the two agree on; a pair further from the
+# line is where they part, and the difference is in docs/limitations.md.
+rdir="$work/rangediff"
+rm -rf "$rdir"
+mkdir -p "$rdir" || exit 2
+cd "$rdir" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.name "Surface" >/dev/null
+"$GP" config user.email s@example.com >/dev/null
+printf 'a\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m base >/dev/null 2>&1
+"$GP" checkout -b left >/dev/null 2>&1
+printf 'b\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "tweak the letter" >/dev/null 2>&1
+printf 'g\n' > g.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "and a file" >/dev/null 2>&1
+printf 'c\n' > c.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "only here" >/dev/null 2>&1
+"$GP" checkout main >/dev/null 2>&1
+"$GP" checkout -b right >/dev/null 2>&1
+printf 'b\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "tweak the letter, reworded" >/dev/null 2>&1
+printf 'g\n' > g.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "and a file" >/dev/null 2>&1
+
+if [ "$have_git" = 1 ]; then
+	# the object ids are the same in both stores, so nothing has to be
+	# normalised: the lines that name a pair are taken, and the body is left
+	rdpairs() { grep -e '^[0-9]' -e '^-:'; }
+	rdcmp() {
+		label=$1; shift
+		"$GP" range-diff "$@" | rdpairs > "$work/rd-gp"
+		git --git-dir=.gitprompt range-diff "$@" | rdpairs > "$work/rd-git"
+		if diff "$work/rd-git" "$work/rd-gp" >/dev/null 2>&1; then
+			ok "the two tools line up $label the same way"
+		else
+			bad "the two tools line up $label the same way" \
+				"$(diff "$work/rd-git" "$work/rd-gp" | head -6)"
+		fi
+	}
+	rdcmp "two ranges" main..left main..right
+	rdcmp "a base and two tips" main left right
+	rdcmp "a ... range" left...right
+else
+	skip "the two tools line up two ranges the same way (no git)"
+	skip "the two tools line up a base and two tips the same way (no git)"
+	skip "the two tools line up a ... range the same way (no git)"
+fi
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

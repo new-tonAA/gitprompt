@@ -2246,6 +2246,132 @@ else
 fi
 
 # ------------------------------------------------------------------
+say "two versions of the same series"
+
+# range-diff lines one series of commits up against another version of it.  The
+# comparison is by a patch id of the command's own making -- the paths, the
+# modes and the changed lines, with hunk positions and blob names left out --
+# so a commit whose base moved up is still the same change.  Two steps: the
+# commits whose patch and whose message are both equal pair as `=`, then what is
+# left of each side is walked in order and a left pairs with the next right
+# whose patch has at least half its changed lines in common, as `!`; whatever is
+# left over is `<` or `>`.
+rgdir=$work/rangediff
+mergecase "$rgdir"
+gp config user.name "Range Tester" >/dev/null 2>&1
+gp config user.email range@example.com >/dev/null 2>&1
+printf 'base\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m base >/dev/null 2>&1
+
+# the first series: three changes, and a fourth only it carries
+gp checkout -b left >/dev/null 2>&1
+printf 'one\n' > p.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch P" >/dev/null 2>&1
+printf 'two\n' > q.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch Q" >/dev/null 2>&1
+printf 'x\n' > extra.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch S" >/dev/null 2>&1
+printf 't\n' > t.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch T" >/dev/null 2>&1
+
+# main moves on, so the second series starts from somewhere else
+gp checkout main >/dev/null 2>&1
+printf 'u\n' > u.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "unrelated advance" >/dev/null 2>&1
+
+# the second series: the same two changes, a third written differently, and one
+# whose message alone was reworded, which is a pair that differs by that alone
+gp checkout -b right >/dev/null 2>&1
+printf 'one\n' > p.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch P" >/dev/null 2>&1
+printf 'two\n' > q.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch Q, reworded" >/dev/null 2>&1
+printf 'x\ny\n' > extra.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "patch S" >/dev/null 2>&1
+
+# object ids change with the clock, so they are matched by shape, and only the
+# lines that name a pair are read -- the body under a `!` is this command's own
+# rendering, which is not what the checks here are about
+rgnorm() { sed 's/[0-9a-f]\{7\}/HASH/g'; }
+rgpairs() { gp range-diff "$@" 2>&1 | grep -e '^[0-9]' -e '^-:' | rgnorm; }
+
+expect_out "the two series line up one for one" "1:  HASH = 1:  HASH patch P
+2:  HASH ! 2:  HASH patch Q
+3:  HASH ! 3:  HASH patch S
+4:  HASH < -:  ------- patch T" \
+	rgpairs main..left main..right
+
+# the same two ranges said the other two ways
+expect_out "the three-argument form reads the same" "1:  HASH = 1:  HASH patch P
+2:  HASH ! 2:  HASH patch Q
+3:  HASH ! 3:  HASH patch S
+4:  HASH < -:  ------- patch T" \
+	rgpairs main left right
+expect_out "... takes the merge base of the two tips" "-:  ------- > 1:  HASH unrelated advance
+1:  HASH = 2:  HASH patch P
+2:  HASH ! 3:  HASH patch Q
+3:  HASH ! 4:  HASH patch S
+4:  HASH < -:  ------- patch T" \
+	rgpairs left...right
+
+# --left-only drops what only the second series has, --right-only what only the
+# first has
+expect_out "--right-only drops the commit only the first series has" "1:  HASH = 1:  HASH patch P
+2:  HASH ! 2:  HASH patch Q
+3:  HASH ! 3:  HASH patch S" \
+	rgpairs --right-only main..left main..right
+expect_out "--left-only drops the one only the second series has" "1:  HASH = 2:  HASH patch P
+2:  HASH ! 3:  HASH patch Q
+3:  HASH ! 4:  HASH patch S
+4:  HASH < -:  ------- patch T" \
+	rgpairs --left-only left...right
+
+# under a `!` the difference is printed: the change for a patch that differs,
+# and the wording for a pair whose patch is the same one told twice
+expect "a pair that differs shows the change" "    ++y" \
+	gp range-diff main..left main..right
+expect "and a rewording shows as the rewording" "    +patch Q, reworded" \
+	gp range-diff main..left main..right
+expect_status "--no-dual-color is accepted" 0 \
+	gp range-diff --no-dual-color main..left main..right
+
+# a series against itself is all pairs, and no body at all
+expect_out "a series against itself pairs every commit" "1:  HASH = 1:  HASH patch P
+2:  HASH = 2:  HASH patch Q
+3:  HASH = 3:  HASH patch S
+4:  HASH = 4:  HASH patch T" \
+	rgpairs main..left main..left
+
+# what it refuses: the options it does not read, ranges that are no series, and
+# a revision that is not there
+expect "an option it does not read is refused" "unknown option '--stat'" \
+	gp range-diff --stat main..left main..right
+expect_status "and the refusal is an exit 1" 1 \
+	gp range-diff --creation-factor=50 main..left main..right
+expect_status "so is --notes" 1 gp range-diff --notes main..left main..right
+expect "no ranges at all is refused" "need two commit ranges" gp range-diff
+expect "so is a single revision" "need two commit ranges" gp range-diff main
+expect "an empty range is refused too" "need two commit ranges" \
+	gp range-diff main..main main..right
+expect "a range that names no base" "bad range '..left'" \
+	gp range-diff ..left main..right
+expect "an argument that is not a range" "is not a range" gp range-diff main left
+expect "a revision that is not there stops it" "bad revision 'nope'" \
+	gp range-diff nope..left main..right
+expect_status "with a fatal exit" 128 gp range-diff nope..left main..right
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "git interoperability"
 
 if command -v git >/dev/null 2>&1; then

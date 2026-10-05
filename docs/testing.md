@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1271 checks, 0 failures** — 1110 in
-`test/smoke.sh`, 125 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1293 checks, 0 failures** — 1129 in
+`test/smoke.sh`, 128 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test

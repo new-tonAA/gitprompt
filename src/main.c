@@ -277,6 +277,12 @@ const struct command commands[] = {
 	  "show [--stat] <rev|prompt-id>" },
 	{ "diff",       cmd_diff,       "Show changes between commits, index and work tree",
 	  "diff [--cached] [--stat] [<rev>] [<rev>]" },
+	{ "range-diff", cmd_range_diff, "Compare two versions of the same series",
+	  "range-diff [--left-only|--right-only] <range1> <range2>\n"
+	  "   Two series of commits, lined up: `=` marks the pairs that are the\n"
+	  "   same change, `!` the pairs that differ, and `<`/`>` a commit only\n"
+	  "   one side has.  Also written as <tip1>...<tip2>, or as\n"
+	  "   <base> <tip1> <tip2>." },
 	{ "reflog",     cmd_reflog,     "Show where HEAD has been, or a ref has pointed",
 	  "reflog [<ref>]" },
 	{ "blame",      cmd_blame,      "Show which prompt asked for each line of a file",

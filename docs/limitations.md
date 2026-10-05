@@ -39,14 +39,13 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 68. Missing are
-  `worktree`, `submodule` and `range-diff`, along
-  with the layers under them -- credential helpers, sparse checkout, `replace`
-  and `rerere`. The object model, the index, committing, history, branches,
-  merging including conflicts, replaying a commit elsewhere, undoing one,
-  setting work aside, tags,
-  reset, the ref plumbing, remotes, the prompt layer and the object-store
-  maintenance `archive`, `notes`, `gc`, `repack` and `prune` are all here.
+  gitprompt built from this tree lists 69. Missing are `worktree` and
+  `submodule`, along with the layers under them -- credential helpers, sparse
+  checkout, `replace` and `rerere`. The object model, the index, committing,
+  history, branches, merging including conflicts, replaying a commit elsewhere,
+  undoing one, setting work aside, tags, reset, the ref plumbing, remotes, the
+  prompt layer and the object-store maintenance `archive`, `notes`, `gc`,
+  `repack` and `prune` are all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -82,6 +81,19 @@ counterpart here, is in [The commands](commands.md).
   `--unsafe-paths` does not let it out -- the path is normalised against the
   root, so this never writes above the work tree, where git would. The
   reasoning is in [Notes](notes.md#applying-a-patch).
+- **`range-diff`, at its edges.** The comparison is by a patch id of this
+  command's own making -- the paths, the modes and the changed lines, with the
+  hunk positions and the blob names left out -- and not by git's, so the two are
+  never compared against each other, and the body printed under a `!` is this
+  command's diff of the pair rather than git's rendering of the two commits.
+  The pairing is a rule of its own as well: a left pairs with the next right
+  whose patch has at least half its changed lines in common, where git weighs a
+  cost against a creation factor, so a pair near that line can be marked `!`
+  here and `<`/`>` there. `--creation-factor`, `--notes`, `--diff-merges`,
+  `--remerge-diff` and the diff options are refused as unknown options, and
+  `--no-dual-color` is accepted and does nothing, there being no colour here to
+  turn off. The reasoning is in
+  [Notes](notes.md#two-versions-of-the-same-series).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and
