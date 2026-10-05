@@ -2,7 +2,7 @@
 
 `gitprompt help` lists them all; `gitprompt help <command>` describes one. The
 names are git's, and the behaviour is meant to match. A gitprompt built from
-this tree lists 74; what git has and this does not is in
+this tree lists 75; what git has and this does not is in
 [What is not implemented](limitations.md).
 
 - **start** — `init`, `clone`, `config`
@@ -18,7 +18,7 @@ this tree lists 74; what git has and this does not is in
 - **plumbing** — `hash-object`, `cat-file`, `ls-tree`, `write-tree`,
   `commit-tree`, `rev-parse`, `rev-list`, `merge-base`, `update-ref`,
   `symbolic-ref`, `for-each-ref`, `ls-files`, `count-objects`,
-  `verify-objects`, `check-ref-format`
+  `verify-objects`, `check-ref-format`, `credential`
 - **maintenance** — `archive`, `notes`, `replace`, `gc`, `repack`, `prune`,
   `fsck`, `stats`, `help`, `version`
 

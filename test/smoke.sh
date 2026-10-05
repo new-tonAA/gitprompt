@@ -6193,6 +6193,169 @@ expect_status "an unknown subcommand is refused" 1 gp sparse-checkout frobnicate
 expect "naming the ones there are" "sparse-checkout init" \
 	gp sparse-checkout frobnicate
 
+# ------------------------------------------------------------------
+say "the credential helper protocol"
+
+# A credential arrives on stdin as key=value lines and is answered the same
+# way on stdout; `fill` asks for it and `approve` and `reject` report what
+# happened to it.  What makes it useful is the helpers: each
+# `credential.helper` is a program run with the operation as its argument, and
+# what it writes back is read exactly as the request was.
+#
+# The global file is given a directory of this section's own, because a helper
+# configured on whatever machine happened to run the suite would otherwise take
+# part in every check below.
+cred=$work/cred
+credhome=$cred/home
+rm -rf "$cred"
+mkdir -p "$credhome" || exit 2
+
+cat > "$cred/helper.sh" <<EOF
+#!/bin/sh
+echo "\$1" >> "$cred/log"
+case "\$1" in
+get)
+	echo "username=alice"
+	echo "password=secret"
+	;;
+store)
+	cat > "$cred/store"
+	;;
+esac
+EOF
+
+cat > "$cred/user-only.sh" <<'EOF'
+#!/bin/sh
+if [ "$1" = get ]; then echo "username=bob"; fi
+exit 0
+EOF
+
+cat > "$cred/pass-only.sh" <<'EOF'
+#!/bin/sh
+if [ "$1" = get ]; then echo "password=from-second"; fi
+exit 0
+EOF
+
+cat > "$cred/both.sh" <<'EOF'
+#!/bin/sh
+if [ "$1" = get ]; then
+	echo "username=carol"
+	echo "password=pw4"
+fi
+exit 0
+EOF
+
+chmod +x "$cred/helper.sh" "$cred/user-only.sh" "$cred/pass-only.sh" \
+	"$cred/both.sh"
+
+# the helper lines land in the global file, so no repository is involved
+cred_config() {
+	rm -f "$cred/log" "$cred/store"
+	printf '[credential]\n%b\n' "$1" > "$credhome/.gitpromptconfig"
+}
+
+cred_fill() {
+	printf 'protocol=https\nhost=example.com\n\n' |
+		HOME=$credhome "$GP" credential fill 2>&1
+}
+
+cred_whole() {
+	printf 'protocol=https\nhost=example.com\nusername=x\npassword=y\n' |
+		HOME=$credhome "$GP" credential fill 2>&1
+}
+
+cred_approve() {
+	printf 'protocol=https\nhost=example.com\nusername=alice\npassword=secret\n' |
+		HOME=$credhome "$GP" credential approve 2>&1
+}
+
+cred_reject() {
+	printf 'protocol=https\nhost=example.com\nusername=alice\npassword=secret\n' |
+		HOME=$credhome "$GP" credential reject 2>&1
+}
+
+cred_config "\thelper = !$cred/helper.sh"
+expect_out "a helper's answer comes back as the credential" \
+	"protocol=https
+host=example.com
+username=alice
+password=secret" cred_fill
+expect_out "and the helper was asked to fill it" "get" cat "$cred/log"
+
+cred_config "\thelper = !$cred/helper.sh"
+expect_status "approve says the answer worked" 0 cred_approve
+expect_out "which the helper hears as store" "store" cat "$cred/log"
+expect_out "with the credential it was given" \
+	"protocol=https
+host=example.com
+username=alice
+password=secret" cat "$cred/store"
+
+cred_config "\thelper = !$cred/helper.sh"
+expect_status "reject says it did not" 0 cred_reject
+expect_out "which the helper hears as erase" "erase" cat "$cred/log"
+
+# a list is consulted in order, each one the later word on a field, and the
+# search stops as soon as there is both a username and a password
+cred_config "\thelper = !$cred/user-only.sh\n\thelper = !$cred/pass-only.sh"
+expect_out "two helpers each fill in what the one before left" \
+	"protocol=https
+host=example.com
+username=bob
+password=from-second" cred_fill
+
+# an empty value puts the list back to nothing, which is how a repository takes
+# back a helper some other file configured
+cred_config "\thelper = !$cred/helper.sh\n\thelper =\n\thelper = !$cred/both.sh"
+expect_out "an empty value empties the list the ones before it built" \
+	"protocol=https
+host=example.com
+username=carol
+password=pw4" cred_fill
+
+cred_config "\thelper = $cred/helper.sh"
+expect_out "a helper that is a path is a path" \
+	"protocol=https
+host=example.com
+username=alice
+password=secret" cred_fill
+
+cred_config "\thelper = !$cred/helper.sh"
+expect_out "a credential that already has both halves is passed through" \
+	"protocol=https
+host=example.com
+username=x
+password=y" cred_whole
+expect_absent "and no helper is asked about it" "$cred/log"
+
+cred_config "\thelper = !$cred/user-only.sh"
+expect "a fill no helper can answer says so" \
+	"no credential helper supplied a password" cred_fill
+expect_status "and fails rather than waiting for one to be typed" 1 cred_fill
+
+cred_config ""
+expect_status "approving with nothing configured is not an error" 0 cred_approve
+
+expect_status "an operation that is not one is refused" 129 gp credential frobnicate
+expect "naming the ones there are" "credential fill" gp credential frobnicate
+expect_status "and some operation is required" 129 gp credential
+
+# the repository's own file is read after the global one, so a helper there is
+# consulted later -- not sooner -- and a global helper that answers fully is
+# still the first word
+crdrepo=$cred/repo
+mkdir -p "$crdrepo" || exit 2
+cd "$crdrepo" || exit 2
+gp init . >/dev/null
+gp config credential.helper "!$cred/both.sh"
+cred_config "\thelper = !$cred/helper.sh"
+expect_out "the global file's helper is consulted before the repository's" \
+	"protocol=https
+host=example.com
+username=alice
+password=secret" cred_fill
+cd "$back" || exit 2
+
 unset MSYS_NO_PATHCONV
 cd "$back" || exit 2
 

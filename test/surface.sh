@@ -1172,17 +1172,6 @@ S src/b.h" "$(git --git-dir=.gitprompt --work-tree=. ls-files -t)"
 	"$GP" commit -m "one of each" >/dev/null
 	git --git-dir=.gitprompt --work-tree=. sparse-checkout set --no-cone \
 		'/src/*.c' > "$work/sp-set.out" 2>&1
-	echo "DIAG rc=$? gitver=$(git --version)"
-	echo "DIAG setout=[$(cat "$work/sp-set.out")]"
-	echo "DIAG config.worktree=[$(cat .gitprompt/config.worktree 2>/dev/null)]"
-	echo "DIAG patterns=[$(cat .gitprompt/info/sparse-checkout 2>/dev/null)]"
-	echo "DIAG indexhead=[$(od -An -c .gitprompt/index | head -6 | tr '\n' '|')]"
-	echo "DIAG lsdebug-before=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug | tr '\n' '|')]"
-	echo "DIAG filestat=[$(stat -c '%n ct=%Z mt=%Y sz=%s ino=%i dev=%D uid=%u gid=%g' README.md docs/d.md src/a.c src/b.h 2>&1 | tr '\n' '|')]"
-	echo "DIAG builtin-stat=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug 2>&1 | head -1)]"
-	echo "DIAG corecfg=[$(git config --list --show-origin 2>&1 | grep -i 'core\.' | tr '\n' '|')]"
-	git --git-dir=.gitprompt --work-tree=. update-index --refresh -q >/dev/null 2>&1
-	echo "DIAG lsdebug-after=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug | tr '\n' '|')]"
 
 	chk "gitprompt reads the bits git set" \
 		"S README.md
@@ -1200,6 +1189,81 @@ else
 	skip "gitprompt reads the bits git set (no git)"
 	skip "and the pattern list git wrote (no git)"
 	skip "and takes no exception to the work tree git left (no git)"
+fi
+
+# ------------------------------------------------- the credential helper protocol
+say "a credential helper, answered the same way by both"
+
+# A credential is not a file format but a conversation: a block of key=value
+# lines goes to a program named by `credential.helper`, and the answer comes
+# back the same way.  Both ends of that can be put beside git's -- the same
+# helper answering the same question, and a helper git itself ships being
+# driven from gitprompt.
+#
+# The global files are given a directory of this section's own, because the
+# machine's own `credential.helper` would otherwise take part in every
+# comparison; the empty value first in git's file takes back whatever the
+# system file configured.
+cdir=$work/cred
+chome=$cdir/home
+
+credreq() { printf 'protocol=https\nhost=example.com\n\n'; }
+credwhole() {
+	printf 'protocol=https\nhost=example.com\nusername=x\npassword=y\n'
+}
+
+if [ "$have_git" = 1 ]; then
+	rm -rf "$cdir"
+	mkdir -p "$chome" || exit 2
+
+	cat > "$cdir/helper.sh" <<'EOF'
+#!/bin/sh
+if [ "$1" = get ]; then
+	echo "username=alice"
+	echo "password=secret"
+fi
+exit 0
+EOF
+	chmod +x "$cdir/helper.sh"
+
+	printf '[credential]\n\thelper = !%s/helper.sh\n' "$cdir" \
+		> "$chome/.gitpromptconfig"
+	printf '[credential]\n\thelper =\n\thelper = !%s/helper.sh\n' "$cdir" \
+		> "$chome/.gitconfig"
+
+	chk "a credential helper answers git and gitprompt alike" \
+		"$(credreq | GIT_TERMINAL_PROMPT=0 HOME=$chome git credential fill 2>&1)" \
+		"$(credreq | HOME=$chome "$GP" credential fill 2>&1)"
+	chk "and a whole credential is passed through the same way" \
+		"$(credwhole | GIT_TERMINAL_PROMPT=0 HOME=$chome git credential fill 2>&1)" \
+		"$(credwhole | HOME=$chome "$GP" credential fill 2>&1)"
+
+	# a bare name means `git credential-<name>`, which is how the helpers git
+	# itself ships are addressed.  `store` really is `git credential-store`, so
+	# this is gitprompt driving a helper of git's own -- and git reading the
+	# result back out of the file that helper keeps.
+	printf '[credential]\n\thelper = store\n' > "$chome/.gitpromptconfig"
+	printf '[credential]\n\thelper =\n\thelper = store\n' > "$chome/.gitconfig"
+
+	printf 'protocol=https\nhost=example.com\nusername=alice\npassword=secret\n' |
+		HOME=$chome "$GP" credential approve
+	chk "a helper git ships is driven by gitprompt" \
+		"https://alice:secret@example.com" \
+		"$(cat "$chome/.git-credentials" 2>/dev/null)"
+	chk "and git reads back what gitprompt stored" \
+		"$(credreq | GIT_TERMINAL_PROMPT=0 HOME=$chome git credential fill 2>&1)" \
+		"$(credreq | HOME=$chome "$GP" credential fill 2>&1)"
+
+	printf 'protocol=https\nhost=example.com\nusername=alice\npassword=secret\n' |
+		HOME=$chome "$GP" credential reject
+	chk "and rejecting it takes it out of git's store" "" \
+		"$(cat "$chome/.git-credentials" 2>/dev/null)"
+else
+	skip "a credential helper answers git and gitprompt alike (no git)"
+	skip "and a whole credential is passed through the same way (no git)"
+	skip "a helper git ships is driven by gitprompt (no git)"
+	skip "and git reads back what gitprompt stored (no git)"
+	skip "and rejecting it takes it out of git's store (no git)"
 fi
 
 unset MSYS_NO_PATHCONV

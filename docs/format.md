@@ -397,7 +397,7 @@ Inside `.gitprompt/`:
 
 | file | meaning |
 | --- | --- |
-| `config` | git's INI syntax; `[core] repositoryformatversion = 0`, `[gitprompt] promptDir = prompts`, and `[remote "<name>"] url = ...` |
+| `config` | git's INI syntax; `[core] repositoryformatversion = 0` with `filemode`, `checkStat = minimal` and `bare` alongside it, `[gitprompt] promptDir = prompts`, and `[remote "<name>"] url = ...` |
 | `SESSION` | the id of the current prompting session, or absent when none is open |
 | `gitprompt-seq` | the last prompt sequence number handed out |
 | `MERGE_HEAD` | the id of the revision being merged in; present only during an unfinished merge |

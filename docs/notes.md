@@ -885,6 +885,48 @@ branch switch. The rest of git's sparse machinery -- a sparse index, `add
 here, so a marked path is one nothing writes to, not one that has a second class
 of behavior everywhere.
 
+## The credential helper protocol
+
+A credential helper is a program named in `credential.helper`, and the protocol
+between git and it is small enough to state completely. Git runs the program
+with the operation as its one argument — `get` for a `fill`, `store` for an
+`approve`, `erase` for a `reject` — hands it `key=value` lines on its standard
+input, and reads the answer off its standard output in the same form. The
+request ends at the first blank line, and what the helper is handed does not
+carry one: a helper that reads to end of file and a helper that reads to the
+blank line both work, and git itself sends the second. The name has three
+shapes, and no others: `!` and then a shell line, run as it stands; a path with
+a slash in it, run as it stands; and a bare word, run as `git credential-<word>`,
+which is how `store` and `cache` are named.
+
+There are three rules that are easy to get wrong, and the suite holds them. The
+answer is read whatever the helper's exit status was -- a helper that fails
+loudly and prints nothing is the same as one that succeeds and prints nothing.
+A later helper is the later word on a field, so two helpers each supplying half
+a credential compose. And an empty value resets the list to nothing, which is
+how a repository turns off a helper its global file turned on; a `helper` key
+with no value at all is not the same thing, and is a parse error.
+
+Why have this at all, when `https` and `ssh` are handed to real git and it
+brings its own helpers? Because the protocol is the interface, and this tree can
+speak it. A helper written for git is driven by gitprompt the same way, byte for
+byte, and a helper gitprompt's output feeds is one git can read back -- the
+surface suite runs both directions against a real store. It also means a helper
+is not a thing this tool has, but a thing it can run: `credential-cache` and
+`credential-store` are git's own programs, and what is here is the piece that
+knows how to call them.
+
+On Windows the calling is the hard part, and it is worth writing down. The
+helper needs its operation as an argument *and* the credential on its standard
+input, so the line to run has a space in it and a redirect in it -- and the C
+runtime's `_spawnlp` cannot pass that. It splits the line on its own terms, so
+`sh -c "helper get < file"` arrives as `sh -c helper` with everything after the
+first word quietly gone. The way around it is to write the command into a small
+script file and ask `sh` to run the file, which is what the code does; bytes
+travel through files because there is no other way to be at both ends of a
+program. The same trap is in `bisect run`'s use of `_spawnlp`, which comes
+through only while the command it is handed is a single word.
+
 ## Transports
 
 | URL form | how it works |

@@ -124,6 +124,17 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 			 "true"
 #endif
 			);
+		/*
+		 * The index records the times the C runtime reports for a path, and
+		 * on Windows those are whole seconds with no device or inode behind
+		 * them at all.  `minimal` asks git to weigh only the modification
+		 * time and the size when it decides whether a file changed, which
+		 * are the two gitprompt can answer for.  Left at git's default a
+		 * git built to compare the rest -- and one on the same filesystem
+		 * that reads it through a different runtime does -- calls every
+		 * path modified and refuses to touch the work tree.
+		 */
+		buf_addstr(&b, "\tcheckStat = minimal\n");
 		buf_addf(&b, "\tbare = %s\n", bare ? "true" : "false");
 		buf_addstr(&b, "[gitprompt]\n");
 		buf_addstr(&b, "\tpromptDir = prompts\n");

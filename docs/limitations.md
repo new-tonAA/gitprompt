@@ -37,16 +37,27 @@ counterpart here, is in [The commands](commands.md).
   return before it, and the sockets in `net.c`, which winsock provides on
   Windows and libc on Unix. CI builds and runs the suite on Linux and macOS as
   well as Windows, which is the only place the Unix builds are exercised: the
-  development machine has one compiler for one of the three.
+  development machine has one compiler for one of the three. One more thing is
+  Windows-specific and does not look it: the index records a path's modification
+  time, size, device, inode and ownership, and on Windows the C runtime can
+  answer for the first two and not the rest, while a git built against MSYS2
+  reads all five. Such a git calls every path modified and refuses to touch the
+  work tree, so `init` writes `core.checkStat = minimal`, which asks git to
+  weigh only the two the index can answer for. Every repository this makes is a
+  git repository in which that setting is part of why it works.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 74. Missing is the credential helper
-  protocol. The object model, the index, committing, history, branches,
-  merging including conflicts, replaying a commit elsewhere, undoing one,
-  reusing a conflict's resolution, setting work aside, tags, reset, the ref
-  plumbing, remotes, the prompt layer, a second working directory with
-  `worktree`, a repository nested in another with `submodule`, a work tree that
-  holds only part of the index with `sparse-checkout`, and the object-store
-  maintenance `archive`, `notes`, `gc`, `repack` and `prune` are all here.
+  gitprompt built from this tree lists 75. Everything this tree set out to carry
+  is here: the object model, the index, committing, history, branches, merging
+  including conflicts, replaying a commit elsewhere, undoing one, reusing a
+  conflict's resolution, setting work aside, tags, reset, the ref plumbing,
+  remotes, the prompt layer, a second working directory with `worktree`, a
+  repository nested in another with `submodule`, a work tree that holds only part
+  of the index with `sparse-checkout`, the credential helper protocol with
+  `credential`, and the object-store maintenance `archive`, `notes`, `gc`,
+  `repack` and `prune`. What is left of git's list is the tail this tool was
+  never for: `send-email`, `daemon`, `instaweb`, `difftool`, `mergetool`,
+  `filter-branch` and the rest of the drivers of a network service or a
+  graphical or interactive front end.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -169,6 +180,23 @@ counterpart here, is in [The commands](commands.md).
   index, `add --sparse` and the `--sparse` option on commands that take a
   pathspec are not implemented. The reasoning is in
   [Notes](notes.md#only-part-of-the-index-in-the-work-tree).
+- **`credential`, at its edges.** What is here is git's helper protocol itself:
+  `fill`, `approve` and `reject` read the `protocol`/`host`/`path`/`username`/
+  `password` block on stdin and run the `credential.helper` list over it, in all
+  three shapes git accepts (`!command`, an absolute path, and a bare name, which
+  is run as `git credential-<name>`), the global file ahead of the repository's,
+  a later helper overriding an earlier one field by field, an empty value
+  emptying the list the ones before it built, and the search stopping once both
+  halves are known. The helper is handed the operation as its argument and its
+  output is read whatever its exit status, both as git does. What is not here is
+  anything past that: gitprompt does not speak git's smart-HTTP or ssh
+  protocols, so nothing in it asks for a credential of its own and a `gp://`
+  remote carries none -- an `https` or `ssh` remote is handed whole to real git,
+  and that is where a helper is consulted. A helper is therefore something this
+  can run *for* git, not something it uses on its own behalf, and
+  `credential-cache` and `credential-store` are git's own programs, driven
+  rather than reimplemented. The reasoning is in
+  [Notes](notes.md#the-credential-helper-protocol).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

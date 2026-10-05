@@ -444,6 +444,13 @@ const struct command commands[] = {
 	  "   sparse-checkout disable\n"
 	  "   Every path stays tracked; the work tree is the part the patterns\n"
 	  "   name, and the rest is marked skip-worktree so nothing misses it." },
+	{ "credential", cmd_credential,
+	  "Store and retrieve credentials the way git does",
+	  "credential fill\n"
+	  "   credential approve\n"
+	  "   credential reject\n"
+	  "   Reads a protocol/host/username/password block on stdin and runs the\n"
+	  "   `credential.helper` list over it, the way git's helpers expect." },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",
@@ -492,12 +499,15 @@ static int needs_no_repo(const char *name)
  * --dir, which is the only way to serve a bare store or one that is not the
  * current directory; inside a repository it serves that one, and outside one
  * with no --dir it says so itself rather than letting the dispatcher refuse
- * before it has had a chance to look.
+ * before it has had a chance to look.  `credential` is here because a helper
+ * is a global thing: `git credential fill` works in an empty directory, and a
+ * repository's own config is read in addition to the global one when there is
+ * a repository, not instead of it.
  */
 static int repo_is_optional(const char *name)
 {
 	return !strcmp(name, "config") || !strcmp(name, "hash-object") ||
-	       !strcmp(name, "serve");
+	       !strcmp(name, "serve") || !strcmp(name, "credential");
 }
 
 /*

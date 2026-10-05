@@ -642,6 +642,13 @@ int config_file_set(const char *path, const char *key, const char *value);
 int config_file_unset(const char *path, const char *key);
 /* the subsection names under `section`, in the order they appear */
 struct slist *config_file_subsections(const char *path, const char *section);
+/*
+ * Every value a key has, in order, and not just one: `credential.helper` is a
+ * list, and an empty value empties the list.  The repository's own file is
+ * read after the global one, so its empty value is the last word.
+ */
+void config_file_get_all(const char *path, const char *key, struct slist *out);
+void repo_config_get_all(struct repo *r, const char *key, struct slist *out);
 void repo_config_list(struct repo *r, int global,
 		      void (*fn)(const char *k, const char *v, void *),
 		      void *data);
@@ -1090,6 +1097,12 @@ int cmd_rerere(struct repo *, int, char **);
 int cmd_worktree(struct repo *, int, char **);
 int cmd_submodule(struct repo *, int, char **);
 int cmd_sparse_checkout(struct repo *, int, char **);
+/*
+ * The credential helper protocol: what `credential.helper` names is run with
+ * the operation as its argument, and the credential travels on files because
+ * there is no way to be on both ends of a program otherwise (cmd_credential.c).
+ */
+int cmd_credential(struct repo *, int, char **);
 /*
  * Whether a sparse-checkout pattern list leaves this path out of the work tree.
  * No is the answer whenever sparse checkout is off, which is the usual case, and

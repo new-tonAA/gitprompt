@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1549 checks, 0 failures** — 1361 in
-`test/smoke.sh`, 152 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1573 checks, 0 failures** — 1380 in
+`test/smoke.sh`, 157 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -101,7 +101,14 @@ path kept is `H`, `status` is clean and `commit -a` leaves their entries alone
 rather than reading their absence as a deletion, a branch switch carries the
 same sparse state across, a later line takes an earlier pattern back, `init`
 writes the pattern list git's own `init` writes, and `disable` puts every path
-back and removes the switch from the configuration.
+back and removes the switch from the configuration. A credential helper is run
+the way git runs one: a helper script answers `get` with a credential and is
+asked to `store` and then `erase` as `approve` and `reject` go through, the
+answer comes back as the credential, two helpers each fill in what the one
+before left alone, an empty value empties the list the ones before it built, a
+credential that already holds both halves is handed on rather than asked about,
+a fill no helper can answer fails rather than waiting for one to be typed, and
+the global file's helper is consulted before the repository's.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -149,7 +156,12 @@ and `gitprompt ls-files -t`, `gitprompt sparse-checkout list` and a `status`
 read what `git sparse-checkout set` wrote — which is the check that means
 something, since the skip-worktree bit lives in a second flags word that only
 version 3 of the index has room for, and a reader that assumed version 2 would
-take those two bytes for the first two letters of the path. Two
+take those two bytes for the first two letters of the path. `credential` is
+compared through a helper, in both directions: one helper script is answered by
+`git credential fill` and by `gitprompt credential fill` and the two have to say
+the same thing, and a credential gitprompt hands `store` is read back by git —
+which is what makes a helper an ordinary one rather than a gitprompt protocol
+that happens to look like git's. Two
 things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

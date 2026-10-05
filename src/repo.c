@@ -772,6 +772,90 @@ int config_file_get(const char *path, const char *key, char **out)
 	return config_lookup_file(path, key, out);
 }
 
+/*
+ * Every value a key is given, in the order the file gives them.
+ *
+ * A key that appears more than once is not an error and the last one does not
+ * simply win: `credential.helper` is a list, consulted in the order it was
+ * built, and a value that is empty puts the list back to nothing -- which is
+ * how a repository takes back the helpers a system or the global file
+ * configured.  That is git's rule, and it is why this cannot be a lookup of
+ * one value.
+ */
+void config_file_get_all(const char *path, const char *key, struct slist *out)
+{
+	struct lines l;
+	char *want_section, *want_sub, *want_name;
+	char *cur_section = NULL, *cur_sub = NULL;
+	size_t i;
+
+	split_key(key, &want_section, &want_sub, &want_name);
+	lines_load(&l, path);
+
+	for (i = 0; i < l.nr; i++) {
+		char *section, *subsection;
+		char *k, *v;
+
+		if (parse_header(l.v[i], &section, &subsection) == 0) {
+			free(cur_section);
+			free(cur_sub);
+			cur_section = section;
+			cur_sub = subsection;
+			continue;
+		}
+		if (!cur_section)
+			continue;
+		if (parse_key_value(l.v[i], &k, &v) != 0)
+			continue;
+		if (stricmp_ascii(cur_section, want_section) ||
+		    stricmp_ascii(k, want_name) ||
+		    (want_sub ? (!cur_sub || stricmp_ascii(cur_sub, want_sub))
+			      : cur_sub != NULL)) {
+			free(k);
+			free(v);
+			continue;
+		}
+		free(k);
+		if (*v) {
+			slist_push(out, v);
+		} else {
+			size_t j;
+
+			for (j = 0; j < out->nr; j++)
+				free(out->v[j]);
+			out->nr = 0;
+		}
+		free(v);
+	}
+	free(cur_section);
+	free(cur_sub);
+	free(want_section);
+	free(want_sub);
+	free(want_name);
+	lines_free(&l);
+}
+
+/*
+ * The same, across the files that make up a repository's configuration.  The
+ * global file is read first and the repository's own second, so that a value
+ * in the repository is the later word -- which is the order git reads them in,
+ * and what makes an empty value in a repository take back a global list.
+ */
+void repo_config_get_all(struct repo *r, const char *key, struct slist *out)
+{
+	char *path = global_config_path();
+
+	if (path) {
+		config_file_get_all(path, key, out);
+		free(path);
+	}
+	path = local_config_path(r);
+	if (path) {
+		config_file_get_all(path, key, out);
+		free(path);
+	}
+}
+
 int config_file_set(const char *path, const char *key, const char *value)
 {
 	struct lines l;
