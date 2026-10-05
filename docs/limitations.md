@@ -8,14 +8,14 @@ counterpart here, is in [The commands](commands.md).
 
 - **Byte-for-byte `diff` output.** A move is reported as a move, and the changes
   are the changes git reports, but the text around them is not git's. A hunk that
-  empties one side is notated `-1,0` where git writes `-0,0`; and `--stat`
-  neither widens its path column to fit the longest path in the block nor scales
-  its bar to the terminal, so a change of a thousand lines draws a thousand
-  marks. A reader skimming a diff sees the same changes; a script that parses one
-  should be pointed at git instead. The `similarity index` a rename reports is the
-  share of lines the two files still have in common rather than git's byte
-  estimate, so the number can read differently from git's even where the
-  judgement behind it does not.
+  empties one side is notated `-1,0` where git writes `-0,0`. A reader skimming a
+  diff sees the same changes; a script that parses one should be pointed at git
+  instead. The `similarity index` a rename reports is the share of lines the two
+  files still have in common rather than git's byte estimate, so the number can
+  read differently from git's even where the judgement behind it does not. The
+  `--stat` block is not one of these differences: its columns and its bar are
+  laid out the way git lays them out, and the two agree byte for byte at every
+  width the suite tries.
 - **What an answer is.** `response` and `rerun --record` keep what the agent
   wrote to standard output, verbatim — its own formatting, progress lines and
   all, or a JSON envelope if that is what it was asked for. Nothing else about

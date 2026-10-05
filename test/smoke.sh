@@ -1191,6 +1191,24 @@ expect "a file whose contents are not lines is measured in bytes" \
 expect "a change too large for a bar leaves the counts to say it" \
 	"| 200 ++++" gp diff --cached --stat
 
+# How wide the terminal is belongs to the terminal, so the same tree laid out
+# twice is laid out differently: the bar gives way first and the path is cut
+# only after it, which is why a narrow one gets a short bar and a short path
+# where a wide one gets longer of both.  The block above is pinned to the width
+# this suite happens to run at; these are what say the width was read at all.
+narrow=$(COLUMNS=40 "$GP" diff --cached --stat 2>&1 | tr -d '\r')
+wide=$(COLUMNS=120 "$GP" diff --cached --stat 2>&1 | tr -d '\r')
+expect "a bar is drawn to the width the terminal has" \
+	"| 200 ++++++" printf '%s\n' "$narrow"
+expect "and the wider terminal is given a longer one" \
+	"| 200 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" \
+	printf '%s\n' "$wide"
+expect "a path too long for the narrow width loses its front" \
+	".../on/and/on/on/deep.txt" printf '%s\n' "$narrow"
+expect "and is shown entire where there is room for it" \
+	"deep/directory/that/goes/on/and/on/and/on/on/deep.txt" \
+	printf '%s\n' "$wide"
+
 # A last line with no newline is a different line from the same text with one --
 # which is why the hunk above counts `no newline here` as changed -- and a diff
 # has to say which of the two it is showing, since the text alone cannot.
