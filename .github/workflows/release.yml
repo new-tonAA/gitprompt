@@ -1,0 +1,128 @@
+# One release, one binary per platform it was built for.
+#
+# ci.yml is what proves the tree builds and passes on all three; this is what
+# puts the results somewhere a reader can download.  It exists because the
+# release that was cut by hand had one binary on it, and that binary was the
+# Windows one -- so a reader on Linux or macOS was left to build from source,
+# which is not what a releases page is for.
+#
+# Pushing a `v*` tag is the usual way in.  A dispatch naming a tag is the other,
+# for a release made before this workflow was here -- v0.1.0 is one -- and it
+# works because the checkout is of the tag that was named rather than of the
+# branch the dispatch was started from.  That is also why the workflow has to
+# be on the default branch: a tag pushed before it existed cannot run it.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'the tag to build and attach the binaries to'
+        required: true
+        type: string
+
+# The release job writes; nothing else here needs to.
+permissions:
+  contents: write
+
+env:
+  # On a tag push `inputs` is empty and the tag is what HEAD is, so the two
+  # cases need one name between them.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  unix:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: gitprompt-linux-x86_64
+          - os: macos-latest
+            artifact: gitprompt-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: build
+        run: make
+
+      # The binary is asked what it is before it is published, so that a
+      # release cannot carry something that does not run.
+      - name: the binary answers
+        run: ./gitprompt version
+
+      - name: name the binary for the platform it was built on
+        run: mv gitprompt ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  windows:
+    name: gitprompt.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      # MINGW64 rather than UCRT64 for the reason ci.yml gives: the vendored
+      # libz.a is a msvcrt build of the library.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            git
+            mingw-w64-x86_64-gcc
+
+      - name: build
+        shell: msys2 {0}
+        run: make
+
+      - name: the binary answers
+        shell: msys2 {0}
+        run: ./gitprompt.exe version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitprompt.exe
+          path: gitprompt.exe
+
+  # One job attaches everything, rather than each build job attaching its own:
+  # three jobs writing to one release at once is a race, and the loser is a
+  # file that silently is not there.
+  release:
+    needs: [unix, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Said before it is done, so that a run is readable in the log whether or
+      # not it gets as far as publishing.
+      - name: what is about to be attached
+        run: ls -l dist
+
+      # A tag pushed for the first time has no release yet, so one is made; a
+      # tag that already has one -- which is every dispatch at a released tag
+      # -- is only given the files.  --clobber so that a second run replaces
+      # what it wrote rather than stopping on it.
+      - name: attach the binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "gitprompt ${TAG#v}" --generate-notes
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/* --clobber
