@@ -1174,12 +1174,15 @@ S src/b.h" "$(git --git-dir=.gitprompt --work-tree=. ls-files -t)"
 		'/src/*.c' > "$work/sp-set.out" 2>&1
 	echo "DIAG rc=$? gitver=$(git --version)"
 	echo "DIAG setout=[$(cat "$work/sp-set.out")]"
-	echo "DIAG config=[$(cat .gitprompt/config)]"
 	echo "DIAG config.worktree=[$(cat .gitprompt/config.worktree 2>/dev/null)]"
 	echo "DIAG patterns=[$(cat .gitprompt/info/sparse-checkout 2>/dev/null)]"
-	echo "DIAG git-t=[$(git --git-dir=.gitprompt --work-tree=. ls-files -t | tr '\n' ' ')]"
-	echo "DIAG disk=[$(find . -type f | sort | tr '\n' ' ')]"
-	echo "DIAG indexhead=[$(od -An -c .gitprompt/index | head -3 | tr '\n' '|')]"
+	echo "DIAG indexhead=[$(od -An -c .gitprompt/index | head -6 | tr '\n' '|')]"
+	echo "DIAG lsdebug-before=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug | tr '\n' '|')]"
+	echo "DIAG filestat=[$(stat -c '%n ct=%Z mt=%Y sz=%s ino=%i dev=%D uid=%u gid=%g' README.md docs/d.md src/a.c src/b.h 2>&1 | tr '\n' '|')]"
+	echo "DIAG builtin-stat=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug 2>&1 | head -1)]"
+	echo "DIAG corecfg=[$(git config --list --show-origin 2>&1 | grep -i 'core\.' | tr '\n' '|')]"
+	git --git-dir=.gitprompt --work-tree=. update-index --refresh -q >/dev/null 2>&1
+	echo "DIAG lsdebug-after=[$(git --git-dir=.gitprompt --work-tree=. ls-files --debug | tr '\n' '|')]"
 
 	chk "gitprompt reads the bits git set" \
 		"S README.md
