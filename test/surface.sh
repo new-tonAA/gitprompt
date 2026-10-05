@@ -1005,8 +1005,8 @@ if [ "$have_git" = 1 ]; then
 	"$GP" worktree lock ../wt-gp-side >/dev/null
 
 	chk "git lists the worktrees gitprompt registered" \
-		"$("$GP" worktree list | sed 's/^.*  //' | sort | tr '\n' '|')" \
-		"$(git --git-dir="$wtgp/.gitprompt" worktree list | sed 's/^.*  //' | sort | tr '\n' '|')"
+		"$("$GP" worktree list | sed -e 's/^[^ ]*//' -e 's/^  *//' | sort | tr '\n' '|')" \
+		"$(git --git-dir="$wtgp/.gitprompt" worktree list | sed -e 's/^[^ ]*//' -e 's/^  *//' | sort | tr '\n' '|')"
 else
 	skip "git lists the worktrees gitprompt registered (no git)"
 fi
