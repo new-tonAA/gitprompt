@@ -924,8 +924,14 @@ runtime's `_spawnlp` cannot pass that. It splits the line on its own terms, so
 first word quietly gone. The way around it is to write the command into a small
 script file and ask `sh` to run the file, which is what the code does; bytes
 travel through files because there is no other way to be at both ends of a
-program. The same trap is in `bisect run`'s use of `_spawnlp`, which comes
-through only while the command it is handed is a single word.
+program. `bisect run` reaches the shell the same way and for the same reason:
+its command line is written into a file too, and the one argument left on the
+command line is that file's name, quoted where the runtime would not quote it.
+That last part matters twice over -- the chain is `_spawnlp` and not `system`
+so that a spawn that never happened is still distinguishable from a status,
+since 126 and 127 are exactly what the shell says when it cannot run a command
+and `verify_good` is the thing that decides whether such an answer is
+believed.
 
 ## Transports
 

@@ -1399,11 +1399,40 @@ static int bisect_visualize(struct repo *r)
  * program of its own and would pass the quotes through as part of the words.
  * So the line goes to the `sh` git for Windows ships instead, with cmd.exe
  * left as the fallback for a machine that has the program but no shell.
+ *
+ * The line cannot be handed to `sh -c`, though.  The C runtime joins a spawn's
+ * arguments into a command line without quoting any of them, so a line holding
+ * a space arrives as its first word with the rest quietly gone -- and a space
+ * is not a corner case, since the directory a work tree is checked out under
+ * usually has one.  The line therefore goes into a file, and the one argument
+ * left on the command line is that file's name, quoted here rather than by the
+ * runtime.
+ *
+ * What comes back is the script's own status, 126 and 127 included.  The shell
+ * says those when it cannot run a command, and `verify_good` is what decides
+ * whether such an answer is believed -- so they must reach it intact and must
+ * not be read here as anything else.  Only a spawn that never happened at all,
+ * `sh` not being on the machine, falls through to cmd.exe: that is the one
+ * outcome a status cannot carry, and the reason `_spawnlp` is used rather than
+ * `system`.
  */
-static int run_status(const char *cmdline)
+static int run_status(struct repo *r, const char *cmdline)
 {
 #ifdef _WIN32
-	intptr_t rc = _spawnlp(_P_WAIT, "sh", "sh", "-c", cmdline, (char *)NULL);
+	char *script = state_path(r, "BISECT_RUN.sh");
+	char *quoted;
+	intptr_t rc;
+
+	if (write_file(script, cmdline, strlen(cmdline)) < 0) {
+		gp_error("cannot write %s", script);
+		free(script);
+		return -1;
+	}
+	quoted = xstrfmt("\"%s\"", script);
+	rc = _spawnlp(_P_WAIT, "sh", "sh", quoted, (char *)NULL);
+	free(quoted);
+	remove_file(script);
+	free(script);
 
 	if (rc != -1)
 		return (int)rc;
@@ -1466,7 +1495,7 @@ static int verify_good(struct repo *r, const char *cmd, const oid_t *good, int r
 		return -1;
 	printf("running %s\n", cmd);
 	fflush(stdout);
-	again = run_status(cmd);
+	again = run_status(r, cmd);
 	if (check_out(r, &head) < 0)
 		return -1;
 
@@ -1527,7 +1556,7 @@ static int bisect_run(struct repo *r, int argc, char **argv)
 
 		printf("running %s\n", cmd);
 		fflush(stdout);
-		rc = run_status(cmd);
+		rc = run_status(r, cmd);
 		if (is_first_run && (rc == 126 || rc == 127)) {
 			is_first_run = 0;
 			read_state(r, &s);

@@ -5702,6 +5702,22 @@ expect "a run hands each probe to the script and stops where it says" \
 	"$fifth is the first bad commit" gp bisect run ./judge.sh
 gp bisect reset >/dev/null 2>&1
 
+# What `run` is given is a command line and not a word, so the words after the
+# first have to reach the script -- a line that lost them would judge every
+# commit by the same answer and still name a commit, which is the kind of
+# wrong that reads as right.  The pattern is an argument here, so the run has
+# to arrive at the same commit the script reached alone.
+cat > "$judge" <<'EOF'
+#!/bin/sh
+grep -q "$1" f.txt && exit 1
+exit 0
+EOF
+chmod +x "$judge"
+gp bisect start HEAD HEAD~7 >/dev/null 2>&1
+expect "a command line keeps the arguments it was given" \
+	"$fifth is the first bad commit" gp bisect run ./judge.sh BROKEN
+gp bisect reset >/dev/null 2>&1
+
 cat > "$judge" <<'EOF'
 #!/bin/sh
 exit 125
