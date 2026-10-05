@@ -489,7 +489,9 @@ struct gc_ctx {
 	size_t pruned;
 	size_t kept;
 	size_t recent;
+	long grace;      /* how young an unreachable object may be and stay */
 	int dry_run;
+	int verbose;     /* name each object, not only count them */
 };
 
 static int gc_one(const oid_t *oid, void *ud)
@@ -509,8 +511,7 @@ static int gc_one(const oid_t *oid, void *ud)
 	{
 		struct stat st;
 		if (stat(path, &st) == 0 &&
-		    (long long)(time(NULL) - (time_t)st.st_mtime) <
-			    GC_GRACE_SECONDS) {
+		    (long long)(time(NULL) - (time_t)st.st_mtime) < c->grace) {
 			c->recent++;
 			free(path);
 			return 0;
@@ -518,9 +519,7 @@ static int gc_one(const oid_t *oid, void *ud)
 	}
 
 	if (c->dry_run) {
-		char *h = oid_hex_dup(oid);
-		printf("would prune %s\n", h);
-		free(h);
+		printf("would prune %s\n", hex);
 		c->pruned++;
 		free(path);
 		return 0;
@@ -528,6 +527,8 @@ static int gc_one(const oid_t *oid, void *ud)
 
 	if (remove(path) == 0) {
 		c->pruned++;
+		if (c->verbose)
+			printf("pruned %s\n", hex);
 		dir = xstrdup(path);
 		slash = strrchr(dir, '/');
 		if (slash) {
@@ -541,42 +542,45 @@ static int gc_one(const oid_t *oid, void *ud)
 }
 
 /*
- * Put the reachable objects into one pack, drop the loose copies that pack
- * duplicates, and delete the older packs it supersedes.
+ * Put `objs` into one pack and drop the loose copies that the pack duplicates;
+ * with `drop`, also delete the packs it supersedes.  This is the half `gc` and
+ * `repack` share -- gc packs everything reachable, and repack packs either
+ * that set or only the loose part of it.
  *
  * Reachable, not everything: an unreachable object is one gc is supposed to
  * be able to leave alone for its grace period, and packing it would mean
  * keeping it forever.
  *
- * The whole reachable set is written every time, not only the objects that are
- * not in a pack yet.  Writing only the new ones would leave a pack per gc, and
- * a store packed daily would end up with as many packs as it had days.  One
- * pack holding everything is what git settles to, and it is what makes the
- * second gc of an unchanged store rewrite the same file under the same name
- * rather than add to a pile.
+ * The whole set is written every time, not only the objects that are not in a
+ * pack yet.  Writing only the new ones would leave a pack per run, and a store
+ * packed daily would end up with as many packs as it had days.  One pack
+ * holding everything is what git settles to, and it is what makes the second
+ * run over an unchanged store rewrite the same file under the same name rather
+ * than add to a pile.
  *
  * Returns how many objects went into the pack; *freed gets the loose files
  * that became duplicates, *dropped the packs that were superseded.
  */
-static size_t pack_reachable(struct repo *r, const struct oid_set *seen,
-			     int dry_run, size_t *freed, size_t *dropped)
+static size_t pack_objects(struct repo *r, const oid_t *objs, size_t nr,
+			   int drop, int dry_run, size_t *freed, size_t *dropped)
 {
 	char *packdir, *keep = NULL;
 	u8 sha[GP_SHA1_RAWSZ];
-	size_t i, nr = seen->nr;
+	size_t i;
 
 	*freed = *dropped = 0;
 	if (!nr)
 		return 0;
 	if (dry_run) {
-		*dropped = pack_drop_redundant(&r->odb, seen->e, nr, NULL, 1);
+		if (drop)
+			*dropped = pack_drop_redundant(&r->odb, objs, nr, NULL, 1);
 		return nr;
 	}
 
 	packdir = xstrfmt("%s/pack", r->odb.dir);
-	if (pack_write(&r->odb, seen->e, nr, packdir, sha) < 0) {
+	if (pack_write(&r->odb, objs, nr, packdir, sha) < 0) {
 		/* the loose objects are all still there, so this is not fatal */
-		gp_error("gc: nothing was packed; the objects are untouched");
+		gp_error("repack: nothing was packed; the objects are untouched");
 		free(packdir);
 		return 0;
 	}
@@ -592,7 +596,8 @@ static size_t pack_reachable(struct repo *r, const struct oid_set *seen,
 
 	/* the pack just written is not in the cached list yet, so nothing that
 	 * is looked at here is the one that must survive */
-	*dropped = pack_drop_redundant(&r->odb, seen->e, nr, keep, 0);
+	if (drop)
+		*dropped = pack_drop_redundant(&r->odb, objs, nr, keep, 0);
 	free(keep);
 
 	/*
@@ -602,7 +607,7 @@ static size_t pack_reachable(struct repo *r, const struct oid_set *seen,
 	pack_release_all(&r->odb);
 	pack_load_all(&r->odb);
 	for (i = 0; i < nr; i++)
-		if (odb_forget_loose(&r->odb, &seen->e[i]) == 0)
+		if (odb_forget_loose(&r->odb, &objs[i]) == 0)
 			(*freed)++;
 	return nr;
 }
@@ -624,12 +629,15 @@ int cmd_gc(struct repo *r, int argc, char **argv)
 	g.r = r;
 	g.seen = &f.seen;
 	g.pruned = g.kept = g.recent = 0;
+	g.grace = GC_GRACE_SECONDS;
+	g.verbose = 0;
 	g.dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
 
 	total = odb_count(&r->odb);
 	odb_foreach_loose(&r->odb, gc_one, &g);
 
-	nr_pack = pack_reachable(r, &f.seen, g.dry_run, &freed, &dropped);
+	nr_pack = pack_objects(r, f.seen.e, f.seen.nr, 1, g.dry_run, &freed,
+			       &dropped);
 
 	/* gc must not report fsck's findings; it only wanted the reach set */
 	f.errors = 0;
@@ -650,6 +658,189 @@ int cmd_gc(struct repo *r, int argc, char **argv)
 		printf("%s %lu superseded pack(s)\n",
 		       g.dry_run ? "Would remove" : "Removed",
 		       (unsigned long)dropped);
+
+	oid_set_release(&f.seen);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* repack and prune                                                    */
+
+/* the loose objects that are reachable, which is what a plain repack adds */
+struct loose_ctx {
+	const struct oid_set *seen;
+	struct oid_set *out;
+};
+
+static int loose_reachable_one(const oid_t *oid, void *ud)
+{
+	struct loose_ctx *c = ud;
+
+	if (oid_set_has(c->seen, oid))
+		oid_set_add(c->out, oid);
+	return 0;
+}
+
+int cmd_repack(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	struct fsck f;
+	struct oid_set loose;
+	const oid_t *objs;
+	size_t nr, nr_pack, freed, dropped;
+	int all, drop, dry_run, quiet;
+
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-a", "-A", "-d", "-n", "--dry-run", "-q", "--quiet", NULL });
+
+	all = opts_flag(&o, "-a") || opts_flag(&o, "-A");
+	drop = opts_flag(&o, "-d");
+	dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
+	quiet = opts_flag(&o, "-q") || opts_flag(&o, "--quiet");
+
+	memset(&f, 0, sizeof f);
+	f.r = r;
+	mark_reachable(r, &f);
+
+	memset(&loose, 0, sizeof loose);
+	if (all) {
+		objs = f.seen.e;
+		nr = f.seen.nr;
+	} else {
+		struct loose_ctx lc;
+
+		lc.seen = &f.seen;
+		lc.out = &loose;
+		odb_foreach_loose(&r->odb, loose_reachable_one, &lc);
+		oid_set_sort(&loose);
+		objs = loose.e;
+		nr = loose.nr;
+	}
+
+	if (!nr) {
+		if (!quiet)
+			printf("Nothing new to pack.\n");
+		oid_set_release(&loose);
+		oid_set_release(&f.seen);
+		return 0;
+	}
+
+	nr_pack = pack_objects(r, objs, nr, drop, dry_run, &freed, &dropped);
+
+	if (!quiet) {
+		printf("%s %lu object(s) into a pack\n",
+		       dry_run ? "Would pack" : "Packed", (unsigned long)nr_pack);
+		if (freed)
+			printf("Removed %lu loose duplicate(s)\n",
+			       (unsigned long)freed);
+		if (dropped)
+			printf("%s %lu superseded pack(s)\n",
+			       dry_run ? "Would remove" : "Removed",
+			       (unsigned long)dropped);
+	}
+
+	oid_set_release(&loose);
+	oid_set_release(&f.seen);
+	return 0;
+}
+
+/*
+ * `--expire` takes what git's does for the common cases: `now` for no grace
+ * at all, and `<n>.<unit>.ago`.  A calendar expression (`2.weeks.ago` counts
+ * back from *now*, not from a date) is the whole of it here; anything else is
+ * refused rather than guessed at.
+ */
+static long expire_seconds(const char *s)
+{
+	static const struct { const char *name; long secs; } units[] = {
+		{ "seconds", 1L },      { "minutes", 60L },
+		{ "hours", 3600L },     { "days", 86400L },
+		{ "weeks", 604800L },   { "months", 2592000L },
+		{ "years", 31536000L },
+	};
+	const char *dot;
+	char *end;
+	size_t i, ulen;
+	long n, mult = 0;
+
+	if (!strcmp(s, "now"))
+		return 0;
+
+	dot = strchr(s, '.');
+	if (!dot || dot == s)
+		gp_die("prune: cannot parse --expire=%s", s);
+	n = strtol(s, &end, 10);
+	if (end != dot || n < 0)
+		gp_die("prune: cannot parse --expire=%s", s);
+	ulen = strlen(dot + 1);
+	if (ulen < 5 || strcmp(dot + 1 + ulen - 4, ".ago"))
+		gp_die("prune: cannot parse --expire=%s", s);
+	for (i = 0; i < sizeof units / sizeof units[0]; i++) {
+		size_t l = strlen(units[i].name);
+
+		if (ulen == l + 4 && !strncmp(dot + 1, units[i].name, l)) {
+			mult = units[i].secs;
+			break;
+		}
+	}
+	if (!mult)
+		gp_die("prune: cannot parse --expire=%s", s);
+	return n * mult;
+}
+
+static char *grace_text(long g)
+{
+	if (g % 86400 == 0)
+		return xstrfmt("%ld days", g / 86400);
+	return xstrfmt("%ld seconds", g);
+}
+
+/*
+ * Prune drops unreachable *loose* objects.  Unreachable objects inside a pack
+ * are left alone: the pack is a unit git keeps intact, and the way to reclaim
+ * what is in one is `repack -A -d`, which explodes the unreachable objects
+ * back out where this can then see them.
+ */
+int cmd_prune(struct repo *r, int argc, char **argv)
+{
+	struct opts o;
+	struct fsck f;
+	struct gc_ctx g;
+	const char *exp;
+	size_t total;
+
+	opts_init(&o, argc, argv, (const char *const[]){
+		"-n", "--dry-run", "-v", "--verbose", "--expire=", NULL });
+
+	memset(&f, 0, sizeof f);
+	f.r = r;
+	mark_reachable(r, &f);
+
+	g.r = r;
+	g.seen = &f.seen;
+	g.pruned = g.kept = g.recent = 0;
+	g.grace = GC_GRACE_SECONDS;
+	g.dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
+	g.verbose = opts_flag(&o, "-v") || opts_flag(&o, "--verbose");
+
+	exp = opts_value(&o, "--expire");
+	if (exp)
+		g.grace = expire_seconds(exp);
+
+	total = odb_count(&r->odb);
+	odb_foreach_loose(&r->odb, gc_one, &g);
+
+	printf("%s %lu unreachable loose object(s) of %lu\n",
+	       g.dry_run ? "Would prune" : "Pruned",
+	       (unsigned long)g.pruned, (unsigned long)total);
+	if (g.recent) {
+		char *when = grace_text(g.grace);
+
+		printf("Kept %lu unreachable object(s) younger than %s\n",
+		       (unsigned long)g.recent, when);
+		free(when);
+	}
+	printf("Kept %lu reachable object(s)\n", (unsigned long)g.kept);
 
 	oid_set_release(&f.seen);
 	return 0;

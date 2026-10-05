@@ -388,8 +388,12 @@ const struct command commands[] = {
 	/* other */
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
-	{ "gc",         cmd_gc,         "Prune unreachable objects",
+	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",
 	  "gc [-n] [--dry-run]" },
+	{ "repack",     cmd_repack,     "Pack the repository's objects",
+	  "repack [-a | -A] [-d] [-n] [-q]" },
+	{ "prune",      cmd_prune,      "Drop unreachable loose objects",
+	  "prune [-n] [-v] [--expire=<when>]" },
 	{ "fsck",       cmd_fsck,       "Check the repository for corruption",
 	  "fsck [-v] [--verbose]" },
 	{ "help",       cmd_help,       "Show help for a command or topic",

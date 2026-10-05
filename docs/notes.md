@@ -412,10 +412,10 @@ The edges are not implemented and are listed in
 ## The store
 
 The pack reader is exercised against packs git wrote, not only against the ones
-`gc` writes itself: `gc` writes whole objects, so a pack it made has no deltas
-in it. Packs written by `git repack` and by `git pack-objects`, with offset
-deltas and reference deltas, chains several deep, have been read back object by
-object and re-hashed.
+`gc` writes itself: `gc` and `repack` write whole objects, so a pack they made
+has no deltas in it. Packs written by `git repack` and by `git pack-objects`,
+with offset deltas and reference deltas, chains several deep, have been read
+back object by object and re-hashed.
 
 The packed-store section also pins down when a pack may be dropped. A second
 `gc` of an unchanged store rewrites the same pack under the same name, and
@@ -425,6 +425,29 @@ loose copy to fall back on; and every reader — `replay`, `timeline`,
 `log-prompt`, `stats` — is run against a packed store, since wanting an object's
 contents without its type is a different path through the store from wanting
 both.
+
+## `repack` and `prune`, which are the two halves of `gc`
+
+`gc` was one command doing two things: pack what the refs reach, and delete the
+unreachable loose objects. Splitting it into `repack`, which only packs, and
+`prune`, which only deletes, is what git's own two commands are, and each half is
+now usable on its own — `repack` to pack without pruning the objects a run of
+experiments just made, `prune` to drop them without rewriting the pack.
+
+The halves keep `gc`'s two rules. `repack` never deletes an object: it packs the
+reachable set (or, without `-a`, only the loose part of it, which is what a plain
+`git repack` adds), and the loose copies it does remove are the ones the pack it
+just wrote already holds. `prune` never touches a pack: an unreachable object
+inside one is left where it is, and the way to reclaim it is `repack -A -d`,
+which wrote the pack, followed by this. `repack -d` is the piece that removes the
+pack a later repack supersedes, since that needs the list of what everything in
+the old pack is now also in.
+
+`--expire` takes `now` and `<n>.<unit>.ago`, and nothing else. That is what git
+takes for the common cases and it is deliberately not a date parser: an
+expression this cannot read is refused rather than guessed at, so `gc`'s
+fourteen-day grace period (`repack`'s job to preserve, `prune`'s to apply) is
+never quietly replaced by a number nobody asked for.
 
 ## Transports
 

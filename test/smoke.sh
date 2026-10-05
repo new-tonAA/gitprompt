@@ -1568,6 +1568,98 @@ expect_status "the store is still readable after a superseding gc" 0 gp fsck
 expect "the commit made after the gc is in the log" \
 	"a commit after the first gc" gp log --oneline
 
+# ------------------------------------------------------------------
+say "repack and prune"
+
+# gc is repack and prune fused into one command, so each half has to stand on
+# its own: repack packs and must not delete anything, prune deletes and must
+# not pack.
+rp=$work/repack
+mergecase "$rp"
+printf 'one\n' > a.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp prompt -m "a prompt so there is more than one object" >/dev/null 2>&1
+gp add -A >/dev/null 2>&1
+gp commit -m "record the prompt" >/dev/null 2>&1
+
+loose_before=$(gp count-objects | sed -n 's/ objects$//p')
+if [ "${loose_before:-0}" -gt 0 ]; then
+	ok "the store starts loose"
+else
+	bad "the store starts loose" "loose=$loose_before"
+fi
+
+rp_out=$(gp repack -a)
+case "$rp_out" in
+*"into a pack"*) ok "repack -a packs the objects" ;;
+*) bad "repack -a packs the objects" "$rp_out" ;;
+esac
+expect_out "repack -a leaves no loose objects" "0 objects" gp count-objects
+expect_status "the store is readable after repack" 0 gp fsck
+expect "the log survives repack" "the base" gp log --oneline
+
+# the pack repack wrote is a pack git can check object by object, the same as
+# the one gc writes -- it is the same writer
+if command -v git >/dev/null 2>&1; then
+	rp_bad=
+	for idx in "$rp"/.gitprompt/objects/pack/*.idx; do
+		[ -e "$idx" ] || continue
+		git verify-pack -v "$idx" >/dev/null 2>&1 || rp_bad="$rp_bad $idx"
+	done
+	if [ -n "$rp_bad" ]; then
+		bad "git verifies the pack repack wrote" "unverifiable:$rp_bad"
+	else
+		ok "git verifies the pack repack wrote"
+	fi
+else
+	skip "git verifies the pack repack wrote (no git)"
+fi
+
+# an incremental repack only adds the loose objects, and with nothing loose it
+# says so rather than rewriting the pack
+expect "an incremental repack finds nothing to add" "Nothing new to pack" \
+	gp repack
+rp_quiet=$(gp repack -a -q)
+if [ -z "$rp_quiet" ]; then
+	ok "repack -q says nothing"
+else
+	bad "repack -q says nothing" "$rp_quiet"
+fi
+expect "repack --dry-run reports without packing" "Would pack" \
+	gp repack -a --dry-run
+expect_status "repack -a -d still leaves a readable store" 0 gp repack -a -d
+expect_status "the store is readable after repack -d" 0 gp fsck
+
+# prune is about what nothing reaches.  A blob written straight into the store
+# is unreachable by construction, and fresh, so it is inside the grace period
+# and prune names it as kept rather than deleting it.
+dangling=$(printf 'orphan\n' | gp hash-object -w --stdin)
+pr_out=$(gp prune)
+case "$pr_out" in
+*"Kept 1 unreachable object(s) younger"*)
+	ok "prune protects an object inside the grace period" ;;
+*) bad "prune protects an object inside the grace period" "$pr_out" ;;
+esac
+expect_out "prune leaves the young unreachable object" "orphan" \
+	gp cat-file -p "$dangling"
+
+# and --expire=now closes the grace period, so the same object goes
+expect "prune --expire=now removes it" "Pruned 1 unreachable loose object(s)" \
+	gp prune --expire=now
+expect_status "the pruned object is gone" 128 gp cat-file -t "$dangling"
+expect_status "the store is readable after prune" 0 gp fsck
+expect "prune spared the reachable objects" "the base" gp log --oneline
+
+# -n must report the same work without doing it
+dangling2=$(printf 'orphan two\n' | gp hash-object -w --stdin)
+expect "prune -n reports the object it would drop" "Would prune 1" \
+	gp prune -n --expire=now
+expect_out "prune -n did not drop it" "orphan two" gp cat-file -p "$dangling2"
+expect "prune --expire cannot be guessed at" "cannot parse" \
+	gp prune --expire=whenever
+expect_status "a bad --expire fails" 128 gp prune --expire=whenever
+
 # the local transport reads objects rather than copying loose files, so a
 # packed repository clones like any other
 cd "$work" || exit 2

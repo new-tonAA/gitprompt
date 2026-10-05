@@ -5,7 +5,7 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1117 checks, 0 failures** — 973 in
+The end-to-end suite passes: **1138 checks, 0 failures** — 994 in
 `test/smoke.sh`, 108 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
@@ -49,9 +49,9 @@ replay plan and
 a recorded date read the same from any clock, local remotes, serving
 over `gp://`, packed object stores, and git interoperability — the last being
 the section that matters most, since a gitprompt repository is meant to be an
-ordinary git repository. As part of it, `git verify-pack` checks the pack `gc`
-writes against git's own index, and `git ls-files` checks the index gitprompt
-wrote against git's own reader.
+ordinary git repository. As part of it, `git verify-pack` checks the packs `gc`
+and `repack` write against git's own index, and `git ls-files` checks the index
+gitprompt wrote against git's own reader.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the

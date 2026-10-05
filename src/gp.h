@@ -1022,6 +1022,8 @@ int cmd_serve(struct repo *, int, char **);
 
 int cmd_fsck(struct repo *, int, char **);
 int cmd_gc(struct repo *, int, char **);
+int cmd_repack(struct repo *, int, char **);
+int cmd_prune(struct repo *, int, char **);
 
 /* shared plumbing helpers used across command files */
 int load_tree_flat(struct repo *r, const oid_t *tree, const char *prefix,
