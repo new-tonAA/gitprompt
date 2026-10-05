@@ -83,7 +83,7 @@ $ gitprompt replay -o PROMPTS.md
 
 ## Status
 
-**1573 checks, 0 failures** — 1380 in `test/smoke.sh`, 157 in `test/surface.sh`
+**1578 checks, 0 failures** — 1385 in `test/smoke.sh`, 157 in `test/surface.sh`
 and 36 in `test/restore.sh`.
 
 ```console
@@ -104,9 +104,20 @@ $ make test
 - [How it is tested](docs/testing.md) — the three suites, what each is for, and
   what they have caught.
 
+## License
+
+GPL-2.0 — the same licence, and the same version of it, that git is under:
+version 2 exactly, not "or later". [COPYING](COPYING) is the text, with what
+that choice means for this tree written at the top of it.
+
+One piece of the tree is not under the GPL: the vendored zlib in
+`third_party/zlib` keeps its own licence, which is permissive and compatible
+with this one.
+
 ## Layout
 
 ```
+COPYING              the licence, GPL-2.0
 src/                 the implementation
 test/smoke.sh        the end-to-end suite
 test/surface.sh      the command surface, as a user meets it
