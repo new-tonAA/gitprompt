@@ -147,9 +147,19 @@ void index_add(struct index_state *istate, const struct index_entry *e)
 		struct index_entry *old = index_get_stage(istate, e->path,
 							  e->stage);
 		if (old) {
+			/*
+			 * The name is copied before the slot's own is freed, because
+			 * the entry being added may be *in* this index: the caller
+			 * looping over it passes a path out of it, and that path is
+			 * then the very string about to be freed.  Reading it after
+			 * is reading released memory, and what a freed block holds is
+			 * the allocator's bookkeeping rather than the name.
+			 */
+			char *path = xstrdup(e->path);
+
 			free(old->path);
 			*old = *e;
-			old->path = xstrdup(e->path);
+			old->path = path;
 			return;
 		}
 		index_push(istate, e);
@@ -167,10 +177,12 @@ void index_add(struct index_state *istate, const struct index_entry *e)
 		if (strcmp(istate->e[i].path, e->path))
 			continue;
 		if (!slot) {
+			char *path = xstrdup(e->path);
+
 			slot = &istate->e[i];
 			free(slot->path);
 			*slot = *e;
-			slot->path = xstrdup(e->path);
+			slot->path = path;
 			continue;
 		}
 		free(istate->e[i].path);
@@ -187,9 +199,16 @@ void index_add(struct index_state *istate, const struct index_entry *e)
 void index_remove(struct index_state *istate, const char *path)
 {
 	size_t i = 0;
+	/*
+	 * The same borrowing the other way round: a caller walking this index
+	 * passes a path out of it, so the name being matched on is one of the
+	 * names this is about to free and the next comparison would be against
+	 * released memory.  The name is held apart for the length of the walk.
+	 */
+	char *want = xstrdup(path);
 
 	while (i < istate->nr) {
-		if (strcmp(istate->e[i].path, path)) {
+		if (strcmp(istate->e[i].path, want)) {
 			i++;
 			continue;
 		}
@@ -198,6 +217,7 @@ void index_remove(struct index_state *istate, const char *path)
 			(istate->nr - i - 1) * sizeof(*istate->e));
 		istate->nr--;
 	}
+	free(want);
 }
 
 int index_has_unmerged(const struct index_state *istate)
