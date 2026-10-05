@@ -75,7 +75,10 @@ counterpart here, is in [The commands](commands.md).
   patch that would need one fails with git's two error lines. There is no
   `-p<n>`, `-R`, `--3way`, `--reject`, `--whitespace`, `--directory`,
   `--include`/`--exclude`, `--stat` or `--binary`; each is refused as an
-  unknown option. A path that would leave the work tree is refused, and
+  unknown option. Paths are read against the root of the work tree rather than
+  against the directory it is run from, so a patch naming `f.txt` reaches
+  `<root>/f.txt` from anywhere, where git under a subdirectory would refuse it
+  as outside the prefix. A path that would leave the work tree is refused, and
   `--unsafe-paths` does not let it out -- the path is normalised against the
   root, so this never writes above the work tree, where git would. The
   reasoning is in [Notes](notes.md#applying-a-patch).

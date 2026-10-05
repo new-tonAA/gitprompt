@@ -601,6 +601,16 @@ option, would write the file above the work tree. That is the one place this
 deliberately disagrees: a version control tool that manages prompts should not
 be talked into writing outside the project by a string in a patch.
 
+Where those paths are read from is the other small disagreement. Git reads a
+patch relative to where it was run: from a subdirectory, `f.txt` is understood
+to mean that subdirectory's file, and a patch naming a path outside it is
+skipped. Here the work tree's root is the reference point whichever directory
+the command was run from, so `f.txt` is the same file everywhere, and a patch
+taken at the top and applied from below lands where it says. That is the
+simpler rule to hold onto for a tool whose patches are usually handed between
+trees, though it does mean a patch git would have skipped is applied rather
+than ignored.
+
 The rest is what it declines to guess at. A binary patch, a combined diff
 (`@@@`) and a diff3 conflict body (`|||||||`) each have a real grammar and each
 is refused rather than half-read, along with the options that would change what
