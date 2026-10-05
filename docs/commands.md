@@ -2,12 +2,12 @@
 
 `gitprompt help` lists them all; `gitprompt help <command>` describes one. The
 names are git's, and the behaviour is meant to match. A gitprompt built from
-this tree lists 67; what git has and this does not is in
+this tree lists 68; what git has and this does not is in
 [What is not implemented](limitations.md).
 
 - **start** — `init`, `clone`, `config`
 - **record prompts** — `session`, `prompt`, `capture`, `response`, `outcome`,
-  `add`, `rm`, `mv`, `clean`, `commit`
+  `add`, `rm`, `mv`, `clean`, `apply`, `commit`
 - **reconstruct** — `replay`, `timeline`, `log-prompt`, `attach`, `rerun`
 - **examine** — `status`, `log`, `shortlog`, `show`, `diff`, `reflog`, `blame`,
   `grep`, `bisect`

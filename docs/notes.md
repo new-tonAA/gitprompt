@@ -547,6 +547,66 @@ uses" is one answer and not one per command. It is shared by name —
 `repo_editor_command` and `repo_run_editor` — so that a `notes edit` and a
 `commit` on one machine cannot disagree about it.
 
+## Applying a patch
+
+A patch is a text, and the text is git's unified diff — the one `git diff` and
+`gitprompt diff` both print, and the one `git apply` and `gitprompt apply` both
+read. That is the point of having the command at all: a patch mailed between
+people, or produced by one of the two tools and applied by the other, is the
+same text either way, and the surface suite checks exactly that round trip in
+both directions. Nothing about the format is gitprompt's own.
+
+A hunk names the lines it replaces, and the search for those lines is exact. It
+tries the position the hunk's header gives, then a little further on, then a
+little before; what it does not do is accept a *near* match. Git's `apply` can
+be asked to fuzz a hunk into place by ignoring leading and trailing context
+lines, and this cannot, because a fuzz match is a hunk landing somewhere the
+person who wrote the patch did not look — the failure that follows is quieter
+and worse than the one that refusing produces. Searching around the stated
+position is not fuzz: the lines are still the lines, only the offset moved,
+which is what happens when a file has grown above the change since the patch
+was taken.
+
+Nothing is written until every hunk of every file has matched. A patch is a
+whole idea, and half of one applied to the work tree — the first file changed,
+the second refused — is a state nobody asked for and that nothing in the patch
+describes. So the hunks are matched against content read in memory first, and
+only when the last one has matched does the first byte of any file change. The
+cost is holding the files in memory; the benefit is that a failed `apply` is a
+no-op, and the two error lines it prints name the file and line that did not
+match.
+
+The layer is chosen the way git chooses it. By default the patch is applied to
+the work tree and the index is left alone, so the change shows up as unstaged
+work. `--cached` applies it to the index only, and `--index` to both. When the
+index is one of the layers it is the *preimage* the hunks are matched against,
+not the file on disk — which is why `--cached` can take a patch the work tree
+has already moved past, and why it is the useful form for a patch that came out
+of `diff --cached` in the first place. `--check` runs the same match and stops
+before the write, so that what it says would apply and what a real run does
+apply cannot drift apart; they are one code path with one step left out.
+
+A mode change has nowhere to live but the index. That a file is executable is
+not a fact a work tree can state on every system this runs on — Windows has no
+such bit — so a patch carrying `old mode`/`new mode` is a patch for the index,
+and the work tree simply does not record it.
+
+A path in a patch is a path in a text written by somebody else, so it is checked
+before it is used: an absolute path, a path with `..` in it, a drive letter, or
+an empty component is refused, and `--unsafe-paths` does not turn that off. What
+it does is allow the path on the terms this repository already works in — the
+path is normalised against the root and the leading `..` components are dropped,
+so `../evil.txt` becomes `evil.txt` inside the work tree. Git, given the same
+option, would write the file above the work tree. That is the one place this
+deliberately disagrees: a version control tool that manages prompts should not
+be talked into writing outside the project by a string in a patch.
+
+The rest is what it declines to guess at. A binary patch, a combined diff
+(`@@@`) and a diff3 conflict body (`|||||||`) each have a real grammar and each
+is refused rather than half-read, along with the options that would change what
+the text means (`-p<n>`, `-R`, `--3way`) — a patch that means something other
+than what this can carry is better rejected than applied approximately.
+
 ## Transports
 
 | URL form | how it works |

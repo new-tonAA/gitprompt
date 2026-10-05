@@ -39,8 +39,8 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 67. Missing are
-  `worktree`, `submodule`, `apply` and `range-diff`, along
+  gitprompt built from this tree lists 68. Missing are
+  `worktree`, `submodule` and `range-diff`, along
   with the layers under them -- credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
@@ -67,6 +67,18 @@ counterpart here, is in [The commands](commands.md).
   `-m` or `-F` does not open an editor as git's does -- the message has to be
   given -- while `notes edit` is there for the interactive case. The reasoning
   is in [Notes](notes.md#a-note-is-a-blob-with-the-objects-name).
+- **`apply`, at its edges.** It reads git's unified diff and writes through
+  whichever layer is asked for -- the work tree by default, the index with
+  `--cached`, both with `--index` -- but only that diff: a `GIT binary patch`,
+  an `@@@` combined diff and a `|||||||` diff3 conflict are refused rather than
+  guessed at, and a hunk is matched by its exact preimage with no fuzz, so a
+  patch that would need one fails with git's two error lines. There is no
+  `-p<n>`, `-R`, `--3way`, `--reject`, `--whitespace`, `--directory`,
+  `--include`/`--exclude`, `--stat` or `--binary`; each is refused as an
+  unknown option. A path that would leave the work tree is refused, and
+  `--unsafe-paths` does not let it out -- the path is normalised against the
+  root, so this never writes above the work tree, where git would. The
+  reasoning is in [Notes](notes.md#applying-a-patch).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

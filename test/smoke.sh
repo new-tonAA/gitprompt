@@ -1891,7 +1891,208 @@ expect "an unknown subcommand is refused" "not a notes subcommand" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
-say "serving over gp://"
+say "applying a patch to the work tree"
+
+# A patch is git's unified diff -- the thing `diff` prints -- and the layers
+# are git's: the work tree by default, the index with --cached, both with
+# --index.  A hunk is found by its exact preimage, looked for where it says it
+# is and then around there, which is git's search without fuzz, and nothing is
+# written until every hunk of every file has matched.
+applydir=$work/apply
+mergecase "$applydir"
+gp config user.name "Apply Tester" >/dev/null 2>&1
+gp config user.email apply@example.com >/dev/null 2>&1
+printf 'one\ntwo\nthree\nfour\nfive\n' > f.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the file to patch" >/dev/null 2>&1
+
+printf 'one\nTWO\nthree\nfour\nFIVE\n' > f.txt
+gp diff > "$work/two-lines.patch"
+gp reset --hard >/dev/null 2>&1
+expect_out "the work tree is back as the patch was taken from" "one
+two
+three
+four
+five" cat f.txt
+
+expect_status "a patch named on the command line applies" 0 \
+	gp apply "$work/two-lines.patch"
+expect_out "and the work tree has the change" "one
+TWO
+three
+four
+FIVE" cat f.txt
+
+gp reset --hard >/dev/null 2>&1
+apply_stdin() { gp apply < "$work/two-lines.patch"; }
+expect_status "a patch given on stdin applies too" 0 apply_stdin
+expect_out "and lands the same change" "one
+TWO
+three
+four
+FIVE" cat f.txt
+
+gp reset --hard >/dev/null 2>&1
+expect_status "--check accepts a patch that would apply" 0 \
+	gp apply --check "$work/two-lines.patch"
+expect_out "and writes nothing" "one
+two
+three
+four
+five" cat f.txt
+
+# the search: a hunk is looked for where it says it is, and a file that has
+# moved on above the change still takes it
+printf 'zero\none\ntwo\nthree\nfour\nfive\n' > f.txt
+expect_status "a hunk shifted down is still found" 0 \
+	gp apply "$work/two-lines.patch"
+expect_out "and applies where its lines are" "zero
+one
+TWO
+three
+four
+FIVE" cat f.txt
+
+# a hunk whose preimage is nowhere is a failure, and a failure writes nothing
+# -- not the file it failed on, and not a file above it in the same patch
+gp reset --hard >/dev/null 2>&1
+{
+	printf 'diff --git a/added.txt b/added.txt\n'
+	printf 'new file mode 100644\n--- /dev/null\n+++ b/added.txt\n'
+	printf '@@ -0,0 +1 @@\n+added\n'
+	printf 'diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n'
+	printf '@@ -1,5 +1,5 @@\n one\n-NOPE\n+two\n three\n four\n five\n'
+} > "$work/wrong.patch"
+expect_status "a hunk whose preimage is not there fails" 1 \
+	gp apply "$work/wrong.patch"
+expect "and says where it failed" "patch failed: f.txt:1" \
+	gp apply "$work/wrong.patch"
+expect "and says the patch does not apply" "f.txt: patch does not apply" \
+	gp apply "$work/wrong.patch"
+expect_absent "and the file above it was never written" added.txt
+expect_out "and the file it failed on is untouched" "one
+two
+three
+four
+five" cat f.txt
+
+expect "the verbose form names the file it applied" \
+	"Applied patch f.txt cleanly." gp apply -v "$work/two-lines.patch"
+gp reset --hard >/dev/null 2>&1
+
+# the index is a layer of its own, and the pair of them is the third choice
+expect_status "--index writes the work tree and the index" 0 \
+	gp apply --index "$work/two-lines.patch"
+expect "the work tree has it" "FIVE" cat f.txt
+expect_out "and the index agrees with the work tree" "" gp diff
+
+gp reset --hard >/dev/null 2>&1
+expect_status "--cached writes only the index" 0 \
+	gp apply --cached "$work/two-lines.patch"
+expect_out "so the work tree is left alone" "one
+two
+three
+four
+five" cat f.txt
+expect "and the change reads back as a difference from it" "-TWO" gp diff
+gp reset --hard >/dev/null 2>&1
+
+# a file the patch creates
+printf 'fresh\n' > new.txt
+gp add new.txt >/dev/null 2>&1
+gp diff --cached > "$work/create.patch"
+gp reset >/dev/null 2>&1
+rm -f new.txt
+expect_absent "the file is not there before the patch" new.txt
+expect_status "a patch that creates a file applies" 0 \
+	gp apply "$work/create.patch"
+expect_out "and the file is there with its content" "fresh" cat new.txt
+expect "and the index is not told, the work tree being the layer" \
+	"?? new.txt" gp status --short
+
+# commit it, then make the patch that takes it away
+gp add new.txt >/dev/null 2>&1
+gp commit -m "a file with a short life" >/dev/null 2>&1
+gp rm new.txt >/dev/null 2>&1
+gp diff --cached > "$work/delete.patch"
+gp reset --hard >/dev/null 2>&1
+expect_file "the file is back for the deletion" new.txt
+expect_status "a patch that deletes a file applies" 0 \
+	gp apply "$work/delete.patch"
+expect_absent "and the file is gone" new.txt
+expect "and the index, untouched, still lists it" "new.txt" gp ls-files
+expect "so the removal is a change waiting to be staged" " D new.txt" \
+	gp status --short
+gp reset --hard >/dev/null 2>&1
+
+# a rename is a pair of diff lines and no hunk
+gp mv new.txt renamed.txt >/dev/null 2>&1
+gp diff --cached > "$work/rename.patch"
+gp reset --hard >/dev/null 2>&1
+expect_file "the old name is there before the patch" new.txt
+expect_status "a patch that renames a file applies" 0 \
+	gp apply "$work/rename.patch"
+expect_absent "and the old name is gone" new.txt
+expect_out "and the new one has the content" "fresh" cat renamed.txt
+
+rm -f renamed.txt
+gp reset --hard >/dev/null 2>&1
+expect_status "the same patch applies through the index" 0 \
+	gp apply --index "$work/rename.patch"
+expect "and the index lists the new name" "renamed.txt" gp ls-files
+expect_status "and no longer the old one" 1 \
+	sh -c "\"$GP\" ls-files | grep -q '^new.txt'"
+
+# a mode change has nowhere to live but the index
+printf 'diff --git a/renamed.txt b/renamed.txt\nold mode 100644\nnew mode 100755\n' \
+	> "$work/mode.patch"
+expect_status "a patch that changes a mode applies through the index" 0 \
+	gp apply --cached "$work/mode.patch"
+expect "and the index holds the executable bit" "100755" \
+	gp ls-files -s renamed.txt
+
+# a path that would leave the work tree is refused, and --unsafe-paths only
+# makes it land inside
+printf 'diff --git a/../evil.txt b/../evil.txt\nnew file mode 100644\n--- /dev/null\n+++ b/../evil.txt\n@@ -0,0 +1 @@\n+evil\n' \
+	> "$work/escape.patch"
+expect_status "a path that climbs out of the work tree is refused" 1 \
+	gp apply "$work/escape.patch"
+expect "and says which path" "invalid path '../evil.txt'" \
+	gp apply "$work/escape.patch"
+expect_absent "and nothing was written above the work tree" ../evil.txt
+expect_status "--unsafe-paths accepts it" 0 \
+	gp apply --unsafe-paths "$work/escape.patch"
+expect_file "and anchors it inside the work tree" evil.txt
+expect_absent "and still writes nothing above it" ../evil.txt
+rm -f evil.txt
+
+# what it will not read, and what it has no option for
+expect "an option it does not have is refused" "unknown option" \
+	gp apply -p1 "$work/two-lines.patch"
+expect "and so is the three-way merge" "unknown option" \
+	gp apply --3way "$work/two-lines.patch"
+expect "and so is running it backwards" "unknown option" \
+	gp apply -R "$work/two-lines.patch"
+
+printf 'diff --git a/bin.dat b/bin.dat\nnew file mode 100644\nindex 0000000..1111111\nGIT binary patch\nliteral 4\nzcmZ\n' \
+	> "$work/binary.patch"
+expect "a binary patch is refused" "binary patches are not supported" \
+	gp apply "$work/binary.patch"
+expect_status "and the refusal is an ordinary failure" 1 \
+	gp apply "$work/binary.patch"
+
+printf 'diff --cc f.txt\nindex 1111111,2222222\n--- a/f.txt\n+++ b/f.txt\n@@@ -1,1 -1,1 +1,1 @@@\n' \
+	> "$work/combined.patch"
+expect "a combined diff is refused" "combined diffs are not supported" \
+	gp apply "$work/combined.patch"
+
+printf 'not a patch at all\n' > "$work/junk.patch"
+expect "input that is not a patch is refused" "unrecognized input" \
+	gp apply "$work/junk.patch"
+apply_empty() { gp apply < /dev/null; }
+expect_status "an empty patch is an ordinary failure" 1 apply_empty
+expect "and is called unrecognized input" "unrecognized input" apply_empty
+
 
 # gitprompt's own transport, and the only one that is not a local path.  It is
 # deliberately not git's wire protocol: the store is already an ordinary git

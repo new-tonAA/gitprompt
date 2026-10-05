@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1211 checks, 0 failures** — 1056 in
-`test/smoke.sh`, 119 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1271 checks, 0 failures** — 1110 in
+`test/smoke.sh`, 125 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -64,7 +64,17 @@ note under the object's own name, an overwrite is refused without `-f`, the note
 on the doomed object survives `gc` and is dropped by `notes prune` once nothing
 is left to hang it on, the ref outlives the last note removed, an editor is
 driven to write and then to empty one, and a message nobody gives and a
-subcommand nobody has are both refused.
+subcommand nobody has are both refused. A patch is applied to each of the
+three layers in turn: a work tree it changes and an index it leaves alone, an
+index `--cached` touches and a work tree it does not, and both together under
+`--index`. A hunk is found after the file has moved on above it; a hunk whose
+preimage is gone fails, and leaves both the file it failed on and an earlier
+file in the same patch untouched, since a patch that cannot be applied whole is
+not applied at all. A patch creates a file, deletes one and renames one, and a
+mode change lands in the index. `--check` says a patch would apply and writes
+nothing. A path that climbs out of the work tree is refused, and `--unsafe-paths`
+anchors it inside rather than letting it above. A binary patch, a combined diff,
+input that is not a patch and input that is empty are each refused.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -90,7 +100,11 @@ a tar. `notes` is compared the way it has to be for a note to be worth writing:
 one tool writes a note and the other reads it, in both directions, against the
 same repository — `git notes show` reading what `gitprompt notes add` wrote, and
 `gitprompt notes show` reading what `git notes add` wrote — with the two tools'
-lists having to name the same pair. Two things `smoke.sh` did not catch were found here — a merge that carried
+lists having to name the same pair. `apply` is compared as the text it is: the
+patch `gitprompt diff` writes is handed to `git apply` and the patch `git diff`
+writes is handed to `gitprompt apply`, over an edit and over a rename, in both
+directions, and the two tools have to leave the same work tree behind. Two
+things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.
 

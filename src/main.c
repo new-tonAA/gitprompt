@@ -237,6 +237,8 @@ const struct command commands[] = {
 	  "mv <source> <destination>" },
 	{ "clean",      cmd_clean,      "Remove untracked files from the work tree",
 	  "clean [-n] [-f] [-d] [-x | -X] [-q] [-e PATTERN] [--] <path>..." },
+	{ "apply",      cmd_apply,      "Apply a patch to the work tree and the index",
+	  "apply [-v] [--check] [--cached|--index] [--unsafe-paths] [<patch>...]" },
 	{ "commit",     cmd_commit,     "Record the staged changes",
 	  "commit [-m MSG] [-F FILE] [-e] [--no-edit] [-a] [--amend]"
 	  " [--allow-empty] [-q]" },

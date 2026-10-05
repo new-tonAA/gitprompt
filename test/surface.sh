@@ -668,6 +668,85 @@ else
 fi
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- apply
+say "a patch, written by one tool and applied by the other"
+# a patch is the unified diff both tools print and both tools read, so this is
+# not two formats that resemble each other: it is one text, written by one tool
+# and applied by the other, in both directions -- over an edit, and over a
+# rename, which is the other shape a patch takes
+adir="$work/apply"
+rm -rf "$adir"
+mkdir -p "$adir" || exit 2
+cd "$adir" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.name "Surface" >/dev/null
+"$GP" config user.email s@example.com >/dev/null
+printf 'one\ntwo\nthree\nfour\nfive\n' > f.txt
+printf 'alpha\nbeta\n' > n.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the files to patch" >/dev/null 2>&1
+
+want_edit='one
+TWO
+three
+four
+FIVE'
+
+# gitprompt writes the edit, git applies it
+printf 'one\nTWO\nthree\nfour\nFIVE\n' > f.txt
+"$GP" diff > "$work/gp-edit.patch"
+"$GP" reset --hard >/dev/null 2>&1
+# and gitprompt writes the rename, git applies it
+"$GP" mv n.txt m.txt >/dev/null 2>&1
+"$GP" diff --cached > "$work/gp-rename.patch"
+"$GP" reset --hard >/dev/null 2>&1
+
+if [ "$have_git" = 1 ]; then
+	git -c core.autocrlf=false apply "$work/gp-edit.patch"
+	chk "git applies the edit gitprompt wrote" "$want_edit" "$(cat f.txt)"
+	"$GP" reset --hard >/dev/null 2>&1
+
+	git apply "$work/gp-rename.patch"
+	if [ -f m.txt ] && [ ! -f n.txt ]; then
+		ok "and the rename gitprompt wrote"
+	else
+		bad "and the rename gitprompt wrote" "$(ls)"
+	fi
+
+	# and back: git writes the edit, gitprompt applies it
+	rm -f m.txt
+	"$GP" reset --hard >/dev/null 2>&1
+	printf 'one\nTWO\nthree\nfour\nFIVE\n' > f.txt
+	git -c core.autocrlf=false --git-dir=.gitprompt --work-tree=. diff \
+		> "$work/git-edit.patch"
+	"$GP" reset --hard >/dev/null 2>&1
+	rc_is "gitprompt takes the edit git wrote" 0 "$GP" apply "$work/git-edit.patch"
+	chk "and the work tree is the change" "$want_edit" "$(cat f.txt)"
+
+	# and git's rename, the same way round
+	"$GP" reset --hard >/dev/null 2>&1
+	git --git-dir=.gitprompt --work-tree=. mv n.txt m.txt >/dev/null 2>&1
+	git -c core.autocrlf=false --git-dir=.gitprompt --work-tree=. diff --cached \
+		> "$work/git-rename.patch"
+	"$GP" reset --hard >/dev/null 2>&1
+	rm -f m.txt
+	rc_is "gitprompt takes the rename git wrote" 0 "$GP" apply \
+		"$work/git-rename.patch"
+	if [ -f m.txt ] && [ ! -f n.txt ]; then
+		ok "and the two files are the one name"
+	else
+		bad "and the two files are the one name" "$(ls)"
+	fi
+else
+	skip "git applies the edit gitprompt wrote (no git)"
+	skip "and the rename gitprompt wrote (no git)"
+	skip "gitprompt takes the edit git wrote (no git)"
+	skip "and the work tree is the change (no git)"
+	skip "gitprompt takes the rename git wrote (no git)"
+	skip "and the two files are the one name (no git)"
+fi
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

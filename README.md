@@ -83,7 +83,7 @@ $ gitprompt replay -o PROMPTS.md
 
 ## Status
 
-**1211 checks, 0 failures** — 1056 in `test/smoke.sh`, 119 in `test/surface.sh`
+**1271 checks, 0 failures** — 1110 in `test/smoke.sh`, 125 in `test/surface.sh`
 and 36 in `test/restore.sh`.
 
 ```console
@@ -96,7 +96,7 @@ $ make test
   commit joins together, and how the files are laid out on disk.
 - [The guide](docs/guide.md) — recording a task, following it across sessions,
   and handing the history back to an agent.
-- [The commands](docs/commands.md) — all 67, grouped by what they are for.
+- [The commands](docs/commands.md) — all 68, grouped by what they are for.
 - [Notes](docs/notes.md) — the decisions behind individual commands, the
   transports, and the places where the agreement with git is not exact.
 - [What is not implemented](docs/limitations.md) — the gaps, stated plainly.

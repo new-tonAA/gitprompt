@@ -975,6 +975,7 @@ int cmd_log(struct repo *, int, char **);
 int cmd_shortlog(struct repo *, int, char **);
 int cmd_archive(struct repo *, int, char **);
 int cmd_notes(struct repo *, int, char **);
+int cmd_apply(struct repo *, int, char **);
 int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);
