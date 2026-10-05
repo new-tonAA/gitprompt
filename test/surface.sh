@@ -701,12 +701,20 @@ printf 'one\nTWO\nthree\nfour\nFIVE\n' > f.txt
 "$GP" diff --cached > "$work/gp-rename.patch"
 "$GP" reset --hard >/dev/null 2>&1
 
+# git is told which repository this is rather than left to discover one: the
+# scratch tree lives under the build directory of this project's own checkout,
+# and a git that discovers *that* repository reads a patch as naming paths from
+# that root, decides a bare `f.txt` is not under the directory it is standing
+# in, and skips it without a word.  Naming the store makes the tree gitprompt's
+# own, which is what the check is about.
+gapply() { git -c core.autocrlf=false --git-dir=.gitprompt --work-tree=. apply "$@"; }
+
 if [ "$have_git" = 1 ]; then
-	git -c core.autocrlf=false apply "$work/gp-edit.patch"
+	gapply "$work/gp-edit.patch"
 	chk "git applies the edit gitprompt wrote" "$want_edit" "$(cat f.txt)"
 	"$GP" reset --hard >/dev/null 2>&1
 
-	git apply "$work/gp-rename.patch"
+	gapply "$work/gp-rename.patch"
 	if [ -f m.txt ] && [ ! -f n.txt ]; then
 		ok "and the rename gitprompt wrote"
 	else
