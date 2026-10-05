@@ -44,6 +44,149 @@ static int path_is_absolute(const char *p)
 }
 
 /*
+ * "." and ".." taken out of a path, with a leading "/" kept.  The common
+ * directory of a linked worktree is named relative to that worktree's own, so
+ * it arrives as something like "<main>/.gitprompt/worktrees/one/../..", and
+ * every later comparison here is a plain string one.
+ *
+ * The separators are made "/" first, and that has to happen before any ".." is
+ * folded rather than as the scan goes: a path from the system may be written
+ * with "\\" throughout, and a component is only a component if the scan can
+ * see where it ends.  Folding as we went would take "C:\\a\\b" for one name and
+ * let the first ".." pop the whole of it.
+ */
+static void collapse_dots(const char *in, struct buf *out)
+{
+	size_t len = strlen(in);
+	char *norm = xmalloc(len + 1);
+	size_t i;
+	int absolute;
+	const char *p;
+
+	for (i = 0; i < len; i++)
+		norm[i] = in[i] == '\\' ? '/' : in[i];
+	norm[len] = '\0';
+	p = norm;
+
+	absolute = p[0] == '/';
+	buf_reset(out);
+	while (*p == '/')
+		p++;
+	while (*p) {
+		const char *slash = strchr(p, '/');
+		size_t n = slash ? (size_t)(slash - p) : strlen(p);
+
+		if (n == 0) {
+			/* a doubled separator */
+		} else if (n == 1 && p[0] == '.') {
+			/* drop */
+		} else if (n == 2 && p[0] == '.' && p[1] == '.') {
+			size_t cut = out->len;
+			while (cut > 0 && out->b[cut - 1] != '/')
+				cut--;
+			if (cut > 0)
+				cut--;
+			out->len = cut;
+			if (out->b)
+				out->b[out->len] = '\0';
+		} else {
+			if (out->len)
+				buf_addch(out, '/');
+			buf_add(out, p, n);
+		}
+		if (!slash)
+			break;
+		p = slash + 1;
+		while (*p == '/')
+			p++;
+	}
+	if (absolute) {
+		struct buf head = BUF_INIT;
+		buf_addch(&head, '/');
+		if (out->len)
+			buf_add(&head, out->b, out->len);
+		buf_reset(out);
+		buf_add(out, head.b, head.len);
+		buf_release(&head);
+	}
+	free(norm);
+}
+
+/*
+ * A linked worktree keeps its own directory somewhere else and names it from a
+ * .git *file* in the worktree: "gitdir: <path>".  Read one, or NULL when this
+ * is not that file.
+ */
+static char *read_gitfile(const char *path)
+{
+	struct buf b = BUF_INIT;
+	char *result = NULL;
+
+	if (read_file(path, &b) >= 0) {
+		char *s = (char *)b.b;
+		size_t n = b.len;
+
+		while (n && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+			s[--n] = '\0';
+		if (n > 8 && !memcmp(s, "gitdir: ", 8))
+			result = xstrdup(s + 8);
+	}
+	buf_release(&b);
+	return result;
+}
+
+/*
+ * Where a worktree's own directory keeps its objects and refs.  A linked
+ * worktree names that directory in `commondir`, relative to itself; one with
+ * no other worktrees has no such file and is its own.  NULL means "the
+ * directory itself".  The caller owns the result.
+ */
+static char *read_commondir(const char *dir)
+{
+	char *file = xstrfmt("%s/commondir", dir);
+	struct buf b = BUF_INIT;
+	struct buf out = BUF_INIT;
+	char *result = NULL;
+
+	if (read_file(file, &b) >= 0) {
+		char *s = (char *)b.b;
+		size_t n = b.len;
+
+		while (n && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+			s[--n] = '\0';
+		if (n) {
+			char *joined = path_is_absolute(s) ? xstrdup(s) :
+				xstrfmt("%s/%s", dir, s);
+
+			collapse_dots(joined, &out);
+			result = out.b ? xstrndup((const char *)out.b, out.len) :
+				xstrdup("");
+			free(joined);
+		}
+	}
+	buf_release(&b);
+	buf_release(&out);
+	free(file);
+	return result;
+}
+
+/* the path a .git file names, made absolute and free of "." and ".." */
+static char *resolve_gitfile(const char *base, const char *named)
+{
+	struct buf out = BUF_INIT;
+	char *joined = path_is_absolute(named) ? xstrdup(named) :
+		xstrfmt("%s/%s", base, named);
+	char *result;
+
+	collapse_dots(joined, &out);
+	result = out.b ? xstrndup((const char *)out.b, out.len) :
+				xstrdup("");
+	buf_release(&out);
+	free(joined);
+	return result;
+}
+
+/*
  * The object store and the refs, which are the same two pieces for a repository
  * however it was reached.  The replace refs are named here rather than inside
  * odb_init because they are a property of the repository and not of the store:
@@ -59,20 +202,97 @@ static void repo_odb_init(struct repo *r)
 	free(objects);
 	free(replace);
 	refs_init(&r->refs, r->gpdir);
+	refs_set_head_dir(&r->refs, r->wt_dir);
 }
 
-static void repo_adopt(struct repo *r, char *gpdir, const char *root)
+/*
+ * `dir` is the directory that holds HEAD and the index -- the worktree's own
+ * when the repository has more than one -- and `common` is where the objects
+ * and the refs are.  Both are taken over by the repository.
+ */
+static void repo_adopt_at(struct repo *r, char *dir, char *common,
+			  const char *root)
 {
 	memset(r, 0, sizeof *r);
-	r->gpdir = gpdir;
-	r->root = xstrdup(root);
+	r->gpdir = common;
+	r->wt_dir = dir;
+	r->root = root ? xstrdup(root) : NULL;
 	repo_odb_init(r);
 }
 
 /*
- * Walk up from `start` until a .gitprompt directory turns up.  The search
- * runs on an absolute path, which makes "reached the filesystem root" the
- * single termination condition -- a relative path would loop forever at ".".
+ * The repository a working directory belongs to.  A `.gitprompt` directory is
+ * one form; a `.git` file naming a git directory elsewhere is the other, which
+ * is how a linked worktree is reached.  Either way the answer is a directory
+ * holding HEAD and an index, and a common directory holding the objects and
+ * the refs -- the same one for both when there are no other worktrees.
+ * Returns 0 and fills `r`, or -1.
+ */
+static int repo_try_dir(struct repo *r, const char *dir, const char *root)
+{
+	char *common;
+
+	if (!looks_like_gpdir(dir))
+		return -1;
+	common = read_commondir(dir);
+	repo_adopt_at(r, xstrdup(dir), common ? common : xstrdup(dir), root);
+	return 0;
+}
+
+/* the repository whose store is `cur/<name>`, if that is what it is */
+static int repo_try_gpdir(struct repo *r, const char *cur, const char *name)
+{
+	char *path = xstrfmt("%s/%s", cur, name);
+
+	if (is_directory(path) && looks_like_gpdir(path)) {
+		int rc = repo_try_dir(r, path, cur);
+
+		free(path);
+		return rc;
+	}
+	free(path);
+	return -1;
+}
+
+/*
+ * The other way in is a .git *file*, which is how a linked worktree names the
+ * directory holding its HEAD and index.  A .git directory is deliberately not
+ * taken: that is a git repository, and a plain `git clone` of a prompt history
+ * leaves one behind -- it is a directory of prompts with no store, which the
+ * commands have to say rather than treat as a repository.
+ */
+static int repo_try_gitfile(struct repo *r, const char *cur)
+{
+	char *path = xstrfmt("%s/.git", cur);
+	int rc = -1;
+
+	if (is_file(path)) {
+		char *named = read_gitfile(path);
+
+		if (named) {
+			char *real = resolve_gitfile(cur, named);
+
+			free(named);
+			if (is_directory(real) && looks_like_gpdir(real)) {
+				char *common = read_commondir(real);
+
+				repo_adopt_at(r, real,
+					      common ? common : xstrdup(real), cur);
+				rc = 0;
+			} else {
+				free(real);
+			}
+		}
+	}
+	free(path);
+	return rc;
+}
+
+/*
+ * Walk up from `start` until a .gitprompt directory or a .git file turns up.
+ * The search runs on an absolute path, which makes "reached the filesystem
+ * root" the single termination condition -- a relative path would loop forever
+ * at ".".
  */
 int repo_find(struct repo *r, const char *start)
 {
@@ -95,14 +315,14 @@ int repo_find(struct repo *r, const char *start)
 		cur[--n] = '\0';
 
 	for (;;) {
-		char *candidate = xstrfmt("%s/%s", cur, GP_DIR);
-
-		if (is_directory(candidate) && looks_like_gpdir(candidate)) {
-			repo_adopt(r, candidate, cur);
+		if (repo_try_gpdir(r, cur, GP_DIR) == 0) {
 			free(cur);
 			return 0;
 		}
-		free(candidate);
+		if (repo_try_gitfile(r, cur) == 0) {
+			free(cur);
+			return 0;
+		}
 		{
 			char *slash = strrchr(cur, '/');
 			if (!slash || slash == cur)
@@ -116,49 +336,80 @@ int repo_find(struct repo *r, const char *start)
 
 int repo_open(struct repo *r, const char *dir)
 {
-	char *gpdir;
-
+	/* the directory itself, or a worktree whose .git names it */
 	if (is_directory(dir) && looks_like_gpdir(dir))
-		gpdir = xstrdup(dir);
-	else {
-		gpdir = xstrfmt("%s/%s", dir, GP_DIR);
-		if (!looks_like_gpdir(gpdir)) {
-			free(gpdir);
-			return -1;
-		}
-	}
-	memset(r, 0, sizeof *r);
-	r->gpdir = gpdir;
-	r->root = is_directory(dir) && looks_like_gpdir(dir) ? NULL : xstrdup(dir);
-	repo_odb_init(r);
-	return 0;
+		return repo_try_dir(r, dir, NULL);
+	if (repo_try_gpdir(r, dir, GP_DIR) == 0)
+		return 0;
+	if (repo_try_gitfile(r, dir) == 0)
+		return 0;
+	return -1;
 }
 
 void repo_release(struct repo *r)
 {
 	free(r->root);
 	free(r->gpdir);
+	free(r->wt_dir);
 	odb_release(&r->odb);
 	refs_release(&r->refs);
-	r->root = r->gpdir = NULL;
+	r->root = r->gpdir = r->wt_dir = NULL;
+}
+
+/*
+ * A path with "." and ".." taken out, separators folded to "/", and nothing
+ * else changed -- no lookup, no symlink resolved, so it works on a directory
+ * that is not there yet.  Discovery needs this for the directories it reads
+ * out of files; a command storing a path of its own wants the same answer, so
+ * it is exported rather than written a second time.
+ */
+char *gp_clean_path(const char *in)
+{
+	struct buf out = BUF_INIT;
+	char *result;
+
+	collapse_dots(in, &out);
+	result = out.b ? xstrndup((const char *)out.b, out.len) : xstrdup("");
+	buf_release(&out);
+	return result;
+}
+
+static char *gp_path_at(const char *base, const char *fmt, va_list ap)
+{
+	va_list ap2;
+	int n;
+	char *rest, *full;
+
+	va_copy(ap2, ap);
+	n = vsnprintf(NULL, 0, fmt, ap2);
+	va_end(ap2);
+	rest = xmalloc((size_t)n + 1);
+	vsnprintf(rest, (size_t)n + 1, fmt, ap);
+
+	full = xstrfmt("%s/%s", base, rest);
+	free(rest);
+	return full;
 }
 
 char *repo_git_path(struct repo *r, const char *fmt, ...)
 {
 	va_list ap;
-	int n;
-	char *rest, *full;
+	char *full;
 
 	va_start(ap, fmt);
-	n = vsnprintf(NULL, 0, fmt, ap);
+	full = gp_path_at(r->gpdir, fmt, ap);
 	va_end(ap);
-	rest = xmalloc((size_t)n + 1);
-	va_start(ap, fmt);
-	vsnprintf(rest, (size_t)n + 1, fmt, ap);
-	va_end(ap);
+	return full;
+}
 
-	full = xstrfmt("%s/%s", r->gpdir, rest);
-	free(rest);
+char *repo_worktree_path(struct repo *r, const char *fmt, ...)
+{
+	va_list ap;
+	char *full;
+
+	va_start(ap, fmt);
+	full = gp_path_at(r->wt_dir, fmt, ap);
+	va_end(ap);
 	return full;
 }
 
@@ -166,7 +417,7 @@ const char *repo_index_path(struct repo *r)
 {
 	static char *cached = NULL;
 	free(cached);
-	cached = repo_git_path(r, "index");
+	cached = repo_worktree_path(r, "index");
 	return cached;
 }
 
@@ -174,7 +425,7 @@ const char *repo_head_path(struct repo *r)
 {
 	static char *cached = NULL;
 	free(cached);
-	cached = repo_git_path(r, "HEAD");
+	cached = repo_worktree_path(r, "HEAD");
 	return cached;
 }
 

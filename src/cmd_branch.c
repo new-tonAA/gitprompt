@@ -483,6 +483,22 @@ static int switch_to(struct repo *r, const char *rev, int force)
 		free(ref);
 	}
 
+	/*
+	 * A branch another working directory already holds is refused here for
+	 * the same reason `worktree add` refuses it: one branch, one HEAD.
+	 * Nothing has been written yet, so the refusal leaves nothing behind.
+	 */
+	if (was_branch) {
+		char *holder = worktree_other_holder(r, branch + 11);
+
+		if (holder) {
+			gp_error("'%s' is already checked out at '%s'", rev, holder);
+			free(holder);
+			free(branch);
+			return 1;
+		}
+	}
+
 	if (was_branch) {
 		refs_set_head(&r->refs, branch);
 		printf(created ? "Switched to a new branch '%s'\n"
@@ -1178,7 +1194,7 @@ void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
 
 int merge_in_progress(struct repo *r, oid_t *other)
 {
-	char *path = repo_git_path(r, "MERGE_HEAD");
+	char *path = repo_worktree_path(r, "MERGE_HEAD");
 	struct buf b;
 	char *hex;
 	int rc = 0;
@@ -1206,7 +1222,7 @@ int merge_in_progress(struct repo *r, oid_t *other)
 
 void merge_state_write(struct repo *r, const oid_t *other, const char *subject)
 {
-	char *path = repo_git_path(r, "MERGE_HEAD");
+	char *path = repo_worktree_path(r, "MERGE_HEAD");
 	char hex[GP_SHA1_HEXSZ + 1];
 	struct buf b;
 
@@ -1218,7 +1234,7 @@ void merge_state_write(struct repo *r, const oid_t *other, const char *subject)
 	free(path);
 
 	if (subject) {
-		path = repo_git_path(r, "MERGE_MSG");
+		path = repo_worktree_path(r, "MERGE_MSG");
 		buf_init(&b);
 		buf_addf(&b, "Merge %s\n", subject);
 		write_file(path, b.b, b.len);
@@ -1229,10 +1245,10 @@ void merge_state_write(struct repo *r, const oid_t *other, const char *subject)
 
 void merge_state_clear(struct repo *r)
 {
-	char *path = repo_git_path(r, "MERGE_HEAD");
+	char *path = repo_worktree_path(r, "MERGE_HEAD");
 	remove(path);
 	free(path);
-	path = repo_git_path(r, "MERGE_MSG");
+	path = repo_worktree_path(r, "MERGE_MSG");
 	remove(path);
 	free(path);
 	/*
@@ -1240,7 +1256,7 @@ void merge_state_clear(struct repo *r)
 	 * part of the merge state: once the merge is over -- committed or
 	 * thrown away -- there is no conflict left for a path to belong to.
 	 */
-	path = repo_git_path(r, "MERGE_RR");
+	path = repo_worktree_path(r, "MERGE_RR");
 	remove(path);
 	free(path);
 }
@@ -1248,7 +1264,7 @@ void merge_state_clear(struct repo *r)
 /* the message a merge left behind, so a bare `commit` can conclude it */
 int merge_message(struct repo *r, struct buf *out)
 {
-	char *path = repo_git_path(r, "MERGE_MSG");
+	char *path = repo_worktree_path(r, "MERGE_MSG");
 	int rc;
 
 	rc = read_file(path, out);

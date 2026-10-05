@@ -39,12 +39,12 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 71. Missing are `worktree` and
-  `submodule`, along with the layers under them -- credential helpers and sparse
-  checkout. The object model, the index, committing,
-  history, branches, merging including conflicts, replaying a commit elsewhere,
-  undoing one, reusing a conflict's resolution, setting work aside, tags, reset,
-  the ref plumbing, remotes, the prompt layer and the object-store maintenance
+  gitprompt built from this tree lists 72. Missing are `submodule` and the
+  layers under it -- credential helpers and sparse checkout. The object model,
+  the index, committing, history, branches, merging including conflicts,
+  replaying a commit elsewhere, undoing one, reusing a conflict's resolution,
+  setting work aside, tags, reset, the ref plumbing, remotes, the prompt layer,
+  a second working directory with `worktree`, and the object-store maintenance
   `archive`, `notes`, `gc`, `repack` and `prune` are all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
@@ -114,6 +114,22 @@ counterpart here, is in [The commands](commands.md).
   `--no-dual-color` is accepted and does nothing, there being no colour here to
   turn off. The reasoning is in
   [Notes](notes.md#two-versions-of-the-same-series).
+- **`worktree`, at its edges.** A linked working directory is a directory
+  holding a `.git` file that names its registration under the main store's
+  `worktrees/`; the objects, the refs and the configuration are the
+  repository's, and the HEAD, the index and whatever merge or rebase is under
+  way belong to the directory. That is why a commit made in one is at once
+  visible from the other, and why an unfinished merge in one is not a merge in
+  the other. One branch still has one HEAD, so a branch another directory holds
+  is refused by `checkout` as well as by `worktree add`. `add` takes `-b`,
+  `--detach` and `-f`, and an option outside that set -- `--track`, `--orphan`,
+  `list --porcelain` -- is refused rather than ignored; `remove` and `move`
+  refuse a locked directory unless `-f` is given; `prune` drops only the
+  registrations whose directory is gone, leaves a locked one alone, and `-n`
+  reports without dropping, with `--expire` refused as an unknown option. A
+  bare repository is not a form this reads, so the questions git answers about
+  one with `core.bare` and `--relative-paths` do not come up. The reasoning is
+  in [Notes](notes.md#a-second-working-directory).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

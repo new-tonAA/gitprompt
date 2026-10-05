@@ -260,7 +260,7 @@ static int replace_edit(struct repo *r, const char *rev)
 			 "hint: set GIT_EDITOR or EDITOR");
 		goto out;
 	}
-	file = repo_git_path(r, "REPLACE_EDIT");
+	file = repo_worktree_path(r, "REPLACE_EDIT");
 	if (write_file(file, before.b ? (const void *)before.b : "",
 		       before.len) < 0) {
 		gp_error("replace edit: cannot write %s", file);

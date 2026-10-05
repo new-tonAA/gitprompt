@@ -80,19 +80,25 @@ static int head_tree(struct repo *r, oid_t *tree)
 	return 0;
 }
 
-/* "main", or "HEAD detached at 1a2b3c4" */
+/* "main", or "HEAD detached at 1a2b3c4", or "(unborn)" before the first one */
 static char *branch_description(struct repo *r)
 {
 	char *t = refs_head_target(&r->refs);
 	oid_t head;
 	char hex[GP_SHA1_HEXSZ + 1];
 
-	if (!t || refs_head(&r->refs, &head) < 0) {
+	/*
+	 * Only a HEAD with nothing behind it is unborn.  A detached HEAD has no
+	 * symbolic target either, so the two are told apart by whether the id
+	 * can be read rather than by the target being absent.
+	 */
+	if (refs_head(&r->refs, &head) < 0) {
 		free(t);
 		return xstrdup("(unborn)");
 	}
-	if (!strncmp(t, "refs/heads/", 11)) {
+	if (t && !strncmp(t, "refs/heads/", 11)) {
 		char *name = xstrdup(t + 11);
+
 		free(t);
 		return name;
 	}
@@ -100,6 +106,27 @@ static char *branch_description(struct repo *r)
 	oid_hex(&head, hex);
 	hex[7] = '\0';
 	return xstrfmt("HEAD detached at %s", hex);
+}
+
+/*
+ * The name a `commit` line puts in brackets: the branch, or "detached HEAD",
+ * which is git's wording there and not the "HEAD detached at 1a2b3c4" a status
+ * line opens with.  The two are asked for separately rather than one string
+ * being bent into the other.
+ */
+static char *commit_label(struct repo *r)
+{
+	char *t = refs_head_target(&r->refs);
+	char *name;
+
+	if (!t)
+		return xstrdup("detached HEAD");
+	if (!strncmp(t, "refs/heads/", 11)) {
+		name = xstrdup(t + 11);
+		free(t);
+		return name;
+	}
+	return t;
 }
 
 /* hash a work-tree file into the object store; returns 0 on success */
@@ -1022,7 +1049,7 @@ static void strip_message(struct buf *b)
 static int edit_message(struct repo *r, struct buf *msg)
 {
 	struct buf file = BUF_INIT;
-	char *path = repo_git_path(r, "COMMIT_EDITMSG");
+	char *path = repo_worktree_path(r, "COMMIT_EDITMSG");
 	char *editor = repo_editor_command(r);
 	char *branch;
 	int rc = -1;
@@ -1492,7 +1519,7 @@ static int do_commit(struct repo *r, const char *message, int amend,
 	/* the merge is concluded; nothing is left to abort */
 	merge_state_clear(r);
 
-	br = branch_description(r);
+	br = commit_label(r);
 	oid_hex(&commit_oid, hex);
 	hex[7] = '\0';
 	if (!quiet) {

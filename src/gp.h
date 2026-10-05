@@ -522,12 +522,19 @@ void index_paths_free(char **v);
 /* refs                                                                */
 
 struct ref_store {
-	char *dir;              /* .gitprompt */
+	char *dir;              /* .gitprompt, where refs/ and packed-refs are */
+	char *head_dir;         /* where HEAD is; the worktree's own when linked */
 	char *ident;            /* cached identity, for reflog lines */
 };
-#define REF_STORE_INIT { NULL, NULL }
+#define REF_STORE_INIT { NULL, NULL, NULL }
 void refs_init(struct ref_store *r, const char *gpdir);
 void refs_release(struct ref_store *r);
+/*
+ * HEAD is the one thing under the directory that belongs to the worktree and
+ * not to the repository: every linked worktree has its own, so the store is
+ * told where to find it.  Left unset it is the directory itself.
+ */
+void refs_set_head_dir(struct ref_store *r, const char *dir);
 
 int refs_read(struct ref_store *r, const char *name, oid_t *out);
 int refs_write(struct ref_store *r, const char *name, const oid_t *oid);
@@ -579,11 +586,12 @@ int refs_check_name(const char *name);
 
 struct repo {
 	char *root;             /* work tree, or NULL for bare */
-	char *gpdir;            /* the .gitprompt directory */
+	char *gpdir;            /* the common .gitprompt: objects, refs, config */
+	char *wt_dir;           /* the worktree's own: HEAD, index, merge state */
 	struct odb odb;
 	struct ref_store refs;
 };
-#define REPO_INIT { NULL, NULL, ODB_INIT, REF_STORE_INIT }
+#define REPO_INIT { NULL, NULL, NULL, ODB_INIT, REF_STORE_INIT }
 
 int repo_find(struct repo *r, const char *start);      /* search upwards */
 int repo_open(struct repo *r, const char *dir);
@@ -591,7 +599,17 @@ void repo_release(struct repo *r);
 
 const char *repo_index_path(struct repo *r);
 const char *repo_head_path(struct repo *r);
+/*
+ * A file in the common directory -- objects, refs, config, reflogs -- which
+ * is where almost everything lives.  What belongs to one worktree rather than
+ * to the repository goes through repo_worktree_path instead: HEAD and the
+ * index, and the state a merge, a replay, a bisect or a replace edit leaves
+ * behind while it is stopped.
+ */
 char *repo_git_path(struct repo *r, const char *fmt, ...);
+char *repo_worktree_path(struct repo *r, const char *fmt, ...);
+/* ".." and "." folded out of a path, separators made "/" (repo.c) */
+char *gp_clean_path(const char *in);
 
 int repo_config_get(struct repo *r, const char *key, char **out);
 /* one piece of how an agent is driven, config first and the shipped table
@@ -1017,6 +1035,14 @@ int cmd_replace(struct repo *, int, char **);
 int cmd_apply(struct repo *, int, char **);
 int cmd_range_diff(struct repo *, int, char **);
 int cmd_rerere(struct repo *, int, char **);
+int cmd_worktree(struct repo *, int, char **);
+
+/*
+ * The working directory other than this one that has `branch` checked out, or
+ * NULL -- what `checkout` refuses on, since one branch has one HEAD (cmd_worktree.c).
+ */
+char *worktree_other_holder(struct repo *, const char *branch);
+
 int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);

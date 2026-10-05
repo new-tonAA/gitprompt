@@ -747,6 +747,50 @@ self-replacement cannot spin. Neither is reachable through the commands here --
 `replace` refuses both -- but a hand-written ref is a file, and the read is what
 has to survive it.
 
+## A second working directory
+
+Everything in the store is one thing for the repository: the objects, the refs,
+the configuration, the reflogs, the session and the `rr-cache`. Only two files
+are about *where you are standing* rather than *what is in the repository* --
+`HEAD`, which says what the next commit will be a child of, and `index`, which
+says what has been staged. git leans on that split to let one repository be
+worked in from several directories at once, and the layout is a small dance of
+pointers: the main store gains `worktrees/<name>/` holding that directory's
+`HEAD` and `index`, a `commondir` file (literally `../..`) naming the store, and
+a `gitdir` file naming the directory's own `.git`; the directory itself gains a
+`.git` **file** reading `gitdir: <main store>/worktrees/<name>`. Nothing is
+copied, so a commit made in one is a branch the other already reads.
+
+That is why `struct repo` grew a second directory. `gpdir` is the common store
+and `wt_dir` is the directory that owns `HEAD` and the index, which are the same
+thing until a worktree exists and different afterwards; `ref_store.head_dir`
+then routes the one name `HEAD` to `wt_dir` while every other ref resolves
+against `gpdir`. The split is not only about those two files. `MERGE_HEAD`,
+`MERGE_MSG`, the message files, the sequencer, the bisect state and
+`REPLACE_EDIT` all say something about work in progress, and two directories
+that shared them would show a merge in one as a merge in the other -- so they
+follow `HEAD` into the directory, and the checks that stop a merge in one
+directory from colouring the other are the tests for it.
+
+Discovery had to change with it, and in a way that is easy to get wrong in the
+other direction. A repository is found by `.gitprompt` -- a directory -- or by a
+`.git` **file**, which is what a linked worktree has. A `.git` directory is
+deliberately not accepted: that is a git repository, and cloning a prompt history
+with plain `git` leaves one behind, which is a directory of prompts with no store
+rather than a repository, and the commands have to say so. Reading the file means
+resolving a name that may be relative and may contain `..`, from a directory that
+is the one being examined, so `collapse_dots` does the folding without touching
+the disk. It also has to fold `\` to `/` before it does: on Windows a whole path
+like `C:\a\b` is otherwise one component, and the first `..` would take the drive
+letter with it.
+
+Two consequences are worth stating. One branch has one HEAD, so two directories
+cannot both have it checked out; that is refused by `worktree add` and by
+`checkout` in a directory that is not the holder, from one question -- which
+directory holds this branch -- asked by both. And a directory's `HEAD` being a
+file of its own is what `worktree list` reads to print the branch beside each
+path, where a detached one has no branch to print.
+
 ## Transports
 
 | URL form | how it works |

@@ -52,12 +52,12 @@ struct seq {
 
 static char *seq_path(struct repo *r, const char *name)
 {
-	return repo_git_path(r, "sequencer/%s", name);
+	return repo_worktree_path(r, "sequencer/%s", name);
 }
 
 static char *seq_dir(struct repo *r)
 {
-	return repo_git_path(r, "sequencer");
+	return repo_worktree_path(r, "sequencer");
 }
 
 static void trim_ws(char *s)

@@ -964,6 +964,55 @@ fi
 
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- worktrees
+say "a second working directory, read back by git"
+
+# The registration a linked worktree leaves -- the directory under
+# `<store>/worktrees/`, its HEAD, its index, the `commondir` and the `gitdir`
+# pointing back -- is a layout, and a layout is right or wrong by whether the
+# other reader agrees.  git reads the one gitprompt wrote, so the two lists say
+# the same thing once the path column, which is padded to different widths and
+# names the store differently, is taken off.
+wtgit=$work/wt-git
+wtgp=$work/wt-gp
+
+if [ "$have_git" = 1 ]; then
+	rm -rf "$wtgit"
+	mkdir -p "$wtgit" || exit 2
+	cd "$wtgit" || exit 2
+	git init -q .
+	git symbolic-ref HEAD refs/heads/main
+	git config user.email s@example.com
+	git config user.name "Surface"
+	printf 'one\n' > a.txt
+	git add a.txt
+	git commit -qm base
+	git worktree add -q ../wt-git-side
+	git worktree add -q --detach ../wt-git-det
+	git worktree lock ../wt-git-side >/dev/null 2>&1
+
+	rm -rf "$wtgp"
+	mkdir -p "$wtgp" || exit 2
+	cd "$wtgp" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name "Surface"
+	printf 'one\n' > a.txt
+	"$GP" add a.txt >/dev/null
+	"$GP" commit -m base >/dev/null
+	"$GP" worktree add ../wt-gp-side >/dev/null
+	"$GP" worktree add --detach ../wt-gp-det >/dev/null
+	"$GP" worktree lock ../wt-gp-side >/dev/null
+
+	chk "git lists the worktrees gitprompt registered" \
+		"$("$GP" worktree list | sed 's/^.*  //' | sort | tr '\n' '|')" \
+		"$(git --git-dir="$wtgp/.gitprompt" worktree list | sed 's/^.*  //' | sort | tr '\n' '|')"
+else
+	skip "git lists the worktrees gitprompt registered (no git)"
+fi
+
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

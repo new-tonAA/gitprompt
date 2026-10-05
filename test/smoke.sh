@@ -5747,6 +5747,168 @@ expect_out "with the file left alone" "dirty" head -1 f.txt
 gp checkout -- f.txt >/dev/null 2>&1
 expect_out "and once it is put back the tip is what is on disk" "BROKEN 8" head -1 f.txt
 
+# ------------------------------------------------------------------
+say "a second working directory"
+
+# The objects and the refs are one set for the repository; a HEAD and an index
+# belong to a working directory.  A second one is therefore a second place to
+# work rather than a copy, and these checks make one, work in it, and take it
+# away again.
+expect_in() {   # expect_in <description> <substring> <text>
+	desc=$1; want=$2; got=$3
+	case "$got" in
+	*"$want"*) ok "$desc" ;;
+	*) bad "$desc" "wanted to find [$want] in [$got]" ;;
+	esac
+}
+
+mergecase "$work/worktree"
+printf 'from main\n' > w.txt
+gp add w.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+
+wtmain=$work/worktree
+wtside=$work/wt-side
+wtreg=$wtmain/.gitprompt/worktrees/wt-side
+
+added=$(gp worktree add ../wt-side 2>&1); added_rc=$?
+if [ "$added_rc" = 0 ]; then
+	ok "adding a second working directory succeeds"
+else
+	bad "adding a second working directory succeeds" "exit $added_rc: $added"
+fi
+expect_in "saying what it is preparing" \
+	"Preparing worktree (new branch 'wt-side')" "$added"
+expect_in "and where its HEAD landed" "HEAD is now at " "$added"
+expect_file "the directory is there" "$wtside/w.txt"
+expect_absent "with no store of its own" "$wtside/.gitprompt"
+if [ -f "$wtside/.git" ] && [ ! -d "$wtside/.git" ]; then
+	ok "and a .git file rather than a .git directory"
+else
+	bad "and a .git file rather than a .git directory" "found something else"
+fi
+expect_in "naming the registration that holds its HEAD" "worktrees/wt-side" \
+	"$(cat "$wtside/.git" 2>/dev/null)"
+expect_in "which points back at the directory" "wt-side/.git" \
+	"$(cat "$wtreg/gitdir" 2>/dev/null)"
+expect_out "the store is reached by a commondir two levels up" "../.." \
+	cat "$wtreg/commondir"
+expect_file "so the registration keeps a HEAD of its own" "$wtreg/HEAD"
+expect_file "and an index of its own" "$wtreg/index"
+expect_file "while the objects stay in the one store" \
+	"$wtmain/.gitprompt/objects"
+
+wtlines=$(gp worktree list | grep -c '^')
+if [ "$wtlines" = 2 ]; then
+	ok "list is one line per working directory"
+else
+	bad "list is one line per working directory" "found $wtlines"
+fi
+expect "naming the branch of the first" "[main]" gp worktree list
+expect "and the branch of the second" "[wt-side]" gp worktree list
+
+cd "$wtside" || exit 2
+printf 'from the side\n' > s.txt
+gp add s.txt >/dev/null 2>&1
+expect "a commit there is labelled with its own branch" "[wt-side " \
+	gp commit -m "from the side"
+expect "and status there names that branch" "On branch wt-side" gp status
+cd "$wtmain" || exit 2
+expect "the first directory sees it, because the refs are shared" \
+	"from the side" gp log --oneline wt-side
+
+# A merge stopped in one working directory is not a merge in the other: the
+# state belongs to the working directory, so the second one stays clean.
+cd "$wtside" || exit 2
+printf 'side\n' > w.txt
+gp add w.txt >/dev/null 2>&1
+gp commit -m "the side edits" >/dev/null 2>&1
+cd "$wtmain" || exit 2
+printf 'main\n' > w.txt
+gp add w.txt >/dev/null 2>&1
+gp commit -m "the main edits" >/dev/null 2>&1
+cd "$wtside" || exit 2
+expect "a conflict inside the second directory is reported there" \
+	"CONFLICT" gp merge main
+expect_file "its merge state is kept with its own registration" \
+	"$wtreg/MERGE_HEAD"
+expect_absent "and not in the shared store" "$wtmain/.gitprompt/MERGE_HEAD"
+cd "$wtmain" || exit 2
+first_status=$(gp status 2>&1 | head -1)
+expect_in "so the first directory is not in a merge" "On branch main" \
+	"$first_status"
+cd "$wtside" || exit 2
+gp merge --abort >/dev/null 2>&1
+expect_absent "aborting in the second clears only its own state" \
+	"$wtreg/MERGE_HEAD"
+expect_out "leaving its file as its branch had it" "side" head -1 w.txt
+
+# One branch has one HEAD, so the second directory cannot take the branch the
+# first one is on -- neither by switching to it nor by being made for it.
+expect "switching to a branch another directory holds is refused" \
+	"is already checked out at" gp checkout main
+expect_status "and that refusal is a failure" 1 gp checkout main
+expect "nor is a working directory made for it" \
+	"is already used by worktree at" gp worktree add "$work/wt-two" main
+expect_absent "which leaves no directory behind" "$work/wt-two"
+
+detached=$(gp worktree add --detach ../wt-det HEAD 2>&1)
+expect_in "a detached directory is made and says so" \
+	"Preparing worktree (detached HEAD " "$detached"
+expect "and list marks it without a branch" "(detached HEAD)" gp worktree list
+expect "a new branch can be named as the directory is made" \
+	"Preparing worktree (new branch 'wt-new')" \
+	gp worktree add -b wt-new ../wt-new
+expect "and list shows that branch" "[wt-new]" gp worktree list
+
+# taking one away refuses while there is uncommitted work in it
+printf 'unsaved\n' >> "$work/wt-det/w.txt"
+expect "removing one with changes in it is refused" \
+	"contains modified or untracked files" gp worktree remove ../wt-det
+expect_file "with the directory left where it is" "$work/wt-det/w.txt"
+expect_status "and the refusal is a failure" 1 gp worktree remove ../wt-det
+expect_status "which --force gets past" 0 gp worktree remove -f ../wt-det
+expect_absent "and then the directory is gone" "$work/wt-det"
+expect "a second removal says there is nothing to take away" \
+	"is not a working tree" gp worktree remove ../wt-det
+
+# a lock keeps one from being taken away by accident, and can say why
+gp worktree add --detach ../wt-run >/dev/null 2>&1
+expect_status "a lock can carry a reason" 0 \
+	gp worktree lock --reason "not now" ../wt-run
+expect_out "which is written down beside its registration" "not now" \
+	cat "$wtmain/.gitprompt/worktrees/wt-run/locked"
+expect "list shows the lock" "locked" gp worktree list
+expect "a locked one is not taken away" "is locked" gp worktree remove ../wt-run
+expect_file "so it is still there" "$work/wt-run/w.txt"
+expect_status "unlocking succeeds" 0 gp worktree unlock ../wt-run
+expect_status "and then it comes away" 0 gp worktree remove ../wt-run
+expect_absent "leaving nothing behind" "$work/wt-run"
+
+# a directory deleted by hand leaves its registration behind, which is what
+# prune is for
+gp worktree add --detach ../wt-gone >/dev/null 2>&1
+rm -rf "$work/wt-gone"
+expect_status "prune --dry-run succeeds" 0 gp worktree prune -n
+expect "reporting the registration it would drop" "worktrees/wt-gone" \
+	gp worktree prune -n
+expect_file "which is still there after a dry run" \
+	"$wtmain/.gitprompt/worktrees/wt-gone"
+expect "and prune -v says what it removed" "worktrees/wt-gone" \
+	gp worktree prune -v
+expect_absent "which is then gone" "$wtmain/.gitprompt/worktrees/wt-gone"
+
+# moving one rewrites both ends of the pointer
+cd "$wtmain" || exit 2
+expect_status "a working directory can be moved" 0 \
+	gp worktree move ../wt-side ../wt-moved
+expect_file "and is at the new place" "$work/wt-moved/w.txt"
+expect_in "with its own .git file unchanged" "worktrees/wt-side" \
+	"$(cat "$work/wt-moved/.git" 2>/dev/null)"
+expect_in "and the registration pointing at the new place" "wt-moved/.git" \
+	"$(cat "$wtreg/gitdir" 2>/dev/null)"
+expect "list shows it at the new place" "wt-moved" gp worktree list
+
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------

@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1386 checks, 0 failures** — 1212 in
-`test/smoke.sh`, 138 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1443 checks, 0 failures** — 1268 in
+`test/smoke.sh`, 139 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -74,7 +74,16 @@ not applied at all. A patch creates a file, deletes one and renames one, and a
 mode change lands in the index. `--check` says a patch would apply and writes
 nothing. A path that climbs out of the work tree is refused, and `--unsafe-paths`
 anchors it inside rather than letting it above. A binary patch, a combined diff,
-input that is not a patch and input that is empty are each refused.
+input that is not a patch and input that is empty are each refused. A second
+working directory is made, listed, worked in, locked, moved and taken away: what
+a linked one is made of is checked piece by piece — the `.git` file and the
+registration it names, the `commondir` back to the store, and a HEAD and an
+index of its own with no second store beside them — a commit made in one is read
+from the other because the objects and the refs are shared, while the conflict a
+merge stops on in one is not a merge in the other because that state is the
+directory's, the branch one directory holds is refused in the second place that
+would check it out, and a directory with uncommitted work in it is not removed
+until `-f` says to.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -103,7 +112,13 @@ same repository — `git notes show` reading what `gitprompt notes add` wrote, a
 lists having to name the same pair. `apply` is compared as the text it is: the
 patch `gitprompt diff` writes is handed to `git apply` and the patch `git diff`
 writes is handed to `gitprompt apply`, over an edit and over a rename, in both
-directions, and the two tools have to leave the same work tree behind. Two
+directions, and the two tools have to leave the same work tree behind. `worktree`
+is compared as the layout it is: the registrations are read back by git's own
+reader with `git --git-dir=<store> worktree list`, and the two listings have to
+hold the same rows once the path column — which is padded to different widths
+and names the store differently — is taken off, a locked registration included,
+which is what makes the registration an ordinary one rather than a gitprompt
+format that happens to look like git's. Two
 things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

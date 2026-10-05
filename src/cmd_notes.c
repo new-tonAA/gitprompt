@@ -467,7 +467,7 @@ static int notes_edit(struct repo *r, const char *rev)
 			 "hint: set GIT_EDITOR or EDITOR");
 		goto out;
 	}
-	file = repo_git_path(r, "NOTES_EDITMSG");
+	file = repo_worktree_path(r, "NOTES_EDITMSG");
 	if (write_file(file, cur.b ? (const void *)cur.b : "", cur.len) < 0) {
 		gp_error("notes edit: cannot write %s", file);
 		goto out;

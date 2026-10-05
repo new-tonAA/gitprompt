@@ -416,6 +416,16 @@ const struct command commands[] = {
 	  "   would have been.  Nothing is rewritten: a clone without the ref sees\n"
 	  "   the history as it was written, which is what makes this a repair and\n"
 	  "   not a rewrite." },
+	{ "worktree",   cmd_worktree,   "Manage several working directories",
+	  "worktree add [-b <branch>] [--detach] [-f] <path> [<commit-ish>]\n"
+	  "   worktree list\n"
+	  "   worktree remove [-f] <path>\n"
+	  "   worktree lock [--reason <why>] [<path>]\n"
+	  "   worktree unlock [<path>]\n"
+	  "   worktree move <from> <to>\n"
+	  "   worktree prune [-n] [-v]\n"
+	  "   Every worktree shares the objects and the refs and keeps its own HEAD\n"
+	  "   and index, so a second one is a second place to work, not a copy." },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",

@@ -65,7 +65,7 @@ static void state_release(struct bisect_state *s)
 
 static char *state_path(struct repo *r, const char *name)
 {
-	return repo_git_path(r, "%s", name);
+	return repo_worktree_path(r, "%s", name);
 }
 
 static void state_unlink(struct repo *r, const char *name)

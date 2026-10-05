@@ -96,7 +96,7 @@ $ make test
   commit joins together, and how the files are laid out on disk.
 - [The guide](docs/guide.md) — recording a task, following it across sessions,
   and handing the history back to an agent.
-- [The commands](docs/commands.md) — all 71, grouped by what they are for.
+- [The commands](docs/commands.md) — all 72, grouped by what they are for.
 - [Notes](docs/notes.md) — the decisions behind individual commands, the
   transports, and the places where the agreement with git is not exact.
 - [What is not implemented](docs/limitations.md) — the gaps, stated plainly.

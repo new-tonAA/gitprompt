@@ -14,19 +14,35 @@
 void refs_init(struct ref_store *r, const char *gpdir)
 {
 	r->dir = xstrdup(gpdir);
+	r->head_dir = NULL;
 	r->ident = NULL;
+}
+
+void refs_set_head_dir(struct ref_store *r, const char *dir)
+{
+	free(r->head_dir);
+	r->head_dir = xstrdup(dir);
 }
 
 void refs_release(struct ref_store *r)
 {
 	free(r->dir);
+	free(r->head_dir);
 	free(r->ident);
-	r->dir = NULL;
+	r->dir = r->head_dir = NULL;
 	r->ident = NULL;
 }
 
+/*
+ * HEAD is a file in the worktree's own directory while every other name is a
+ * path under refs/ in the common one, so it is routed separately here rather
+ * than at each of the readers.  Nothing else is called HEAD.
+ */
 static char *ref_path(struct ref_store *r, const char *name)
 {
+	if (!strcmp(name, "HEAD"))
+		return xstrfmt("%s/%s", r->head_dir ? r->head_dir : r->dir,
+			       name);
 	return xstrfmt("%s/%s", r->dir, name);
 }
 
