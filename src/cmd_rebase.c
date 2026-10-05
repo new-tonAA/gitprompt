@@ -589,7 +589,7 @@ static int replay_one(struct repo *r, const oid_t *src_oid,
 	free(label);
 	index_write(&mindex, repo_index_path(r));
 
-	if (res.conflicts) {
+	if (res.conflicts || res.rerere_staged) {
 		index_release(&mindex);
 		commit_release(&src);
 		commit_release(&hc);

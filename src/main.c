@@ -330,6 +330,13 @@ const struct command commands[] = {
 	  "   The undo is a commit of its own, so it is attributed to whoever ran\n"
 	  "   it and says what it undid.  -m names which parent of a merge commit\n"
 	  "   the undo goes back to, and is required for one." },
+	{ "rerere",     cmd_rerere,     "Reuse a resolution a conflict was given before",
+	  "rerere [--status] [--diff] [--forget <path>...] [--gc] [--clear]\n"
+	  "   A conflict is filed under a hash of its two sides, and resolving\n"
+	  "   it writes down what the file became.  The next time the same two\n"
+	  "   sides are met, that resolution is put back and left unmerged, so\n"
+	  "   it is reviewed before it counts; rerere.autoupdate stages it too.\n"
+	  "   With no option, the files in front of us are recorded or resolved." },
 	{ "stash",      cmd_stash,      "Set the work tree and index aside, and put them back",
 	  "stash [push [-m MSG] [-u] [-k]]\n"
 	  "   stash list\n"

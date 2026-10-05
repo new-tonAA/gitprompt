@@ -666,6 +666,14 @@ int merge3_similarity(const struct buf *a, const struct buf *b);
 
 struct merge_result {
 	int conflicts;
+	/*
+	 * Conflicts that were answered from a remembered resolution and staged
+	 * as the file was written.  They are not unmerged paths, so they are
+	 * counted apart from `conflicts`; but a merge that met one is still a
+	 * merge that stopped, and the caller has to leave it to be concluded
+	 * rather than commit it out of hand.
+	 */
+	int rerere_staged;
 	size_t files_changed;
 };
 
@@ -690,6 +698,23 @@ void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
 			 const oid_t *theirs, struct merge_result *res,
 			 struct index_state *merged, enum merge_favor favor,
 			 const char *ours_label, const char *label);
+
+/*
+ * What came of a conflict the merge machinery wrote out.  A conflict that has
+ * been resolved here before is resolved again as it is put in the file, so the
+ * caller learns which of the four happened and writes accordingly.
+ */
+enum rr_result {
+	RR_NONE,        /* nothing was filed: not a conflict this can key on */
+	RR_RECORDED,    /* written down for the next time it is met */
+	RR_RESOLVED,    /* carried over from the cache, left unmerged to check */
+	RR_STAGED       /* carried over from the cache, and to be staged */
+};
+
+int rerere_enabled(struct repo *r);
+enum rr_result rerere_auto(struct repo *r, const char *path,
+			   const struct buf *conflicted, struct buf *out);
+void rerere_report(const char *path, enum rr_result res);
 
 /* ------------------------------------------------------------------ */
 /* the working tree                                                    */
@@ -991,6 +1016,7 @@ int cmd_notes(struct repo *, int, char **);
 int cmd_replace(struct repo *, int, char **);
 int cmd_apply(struct repo *, int, char **);
 int cmd_range_diff(struct repo *, int, char **);
+int cmd_rerere(struct repo *, int, char **);
 int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);

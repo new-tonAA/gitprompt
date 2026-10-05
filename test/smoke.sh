@@ -2493,6 +2493,221 @@ expect "an option it does not read is refused" "unknown option" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "a conflict resolved the way it was resolved before"
+
+# rerere files a conflict under a hash of its two sides and remembers what the
+# file became once it was resolved, so that the next time the same two sides are
+# met the resolution is put back without being typed again.  The record is keyed
+# by the conflict and not by the path, so two files that met the same conflict
+# share one entry; the replay is left unmerged, so it is read before it counts,
+# which is what keeps this a way of retyping less rather than of deciding for
+# the user.
+rr=$work/rerere
+mergecase "$rr"
+gp config user.name "Rerere Tester" >/dev/null 2>&1
+gp config user.email rr@example.com >/dev/null 2>&1
+
+# one.txt and two.txt meet the same conflict, and many.txt has two conflicts of
+# its own, so the replay has to put back more than one thing in one file
+printf 'head\nA\nB\ntail\n' > one.txt
+printf 'head\nA\nB\ntail\n' > two.txt
+printf 'one\ntwo\nthree\nfour\nfive\n' > many.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+
+printf 'head\nA-ours\nB\ntail\n' > one.txt
+printf 'head\nA-ours\nB\ntail\n' > two.txt
+printf 'ONE\ntwo\nthree\nfour\nFIVE\n' > many.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "ours" >/dev/null 2>&1
+
+gp checkout side >/dev/null 2>&1
+printf 'head\nA-theirs\nB\ntail\n' > one.txt
+printf 'head\nA-theirs\nB\ntail\n' > two.txt
+printf 'oNe\ntwo\nthree\nfour\nfIvE\n' > many.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "theirs" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+
+# nothing is remembered unless it was asked for: the setting is off by default
+# and there is no cache yet, which is the state git leaves a repository in
+expect "a merge that was not asked to remember reports its conflicts" \
+	"CONFLICT (content): Merge conflict in" gp merge side -m once
+expect_absent "and files nothing away" .gitprompt/rr-cache
+gp merge --abort >/dev/null 2>&1
+
+gp config rerere.enabled true >/dev/null 2>&1
+expect "with rerere on, a conflict is written down as it is met" \
+	"Recorded preimage for 'one.txt'" gp merge side -m twice
+count=$(find .gitprompt/rr-cache -name preimage | wc -l | tr -d ' ')
+if [ "$count" = 2 ]; then
+	ok "the two distinct conflicts are filed as two entries"
+else
+	bad "the two distinct conflicts are filed as two entries" "found $count"
+fi
+count=$(wc -l < .gitprompt/MERGE_RR | tr -d ' ')
+if [ "$count" = 3 ]; then
+	ok "every conflicted path is tied to the conflict it came from"
+else
+	bad "every conflicted path is tied to the conflict it came from" \
+		"found $count lines"
+fi
+
+# the conflict as it is kept has the labels gone and the markers kept, which is
+# what makes it independent of which side was called which
+expect "the preimage keeps the markers" "<<<<<<<" \
+	sh -c 'cat .gitprompt/rr-cache/*/preimage'
+if grep -q 'HEAD' .gitprompt/rr-cache/*/preimage; then
+	bad "and keeps it without the labels the markers were named"
+else
+	ok "and keeps it without the labels the markers were named"
+fi
+
+out=$(gp rerere --status | sed -n '2p' | sed 's/^  [0-9a-f]* //')
+expect_out "the status says the conflict has no answer yet" "preimage" \
+	printf '%s\n' "$out"
+
+# resolving one file and running rerere is what writes the answer down.  The
+# answer is neither side's -- it is the line that was typed in place of the
+# second conflict -- so reading it back as a diff is what shows it was kept.
+printf 'ONE\ntwo\nthree\nfour\nFIVE-both\n' > many.txt
+expect "resolving a file and running rerere records what it became" \
+	"Recorded resolution for 'many.txt'" gp rerere
+count=$(find .gitprompt/rr-cache -name postimage | wc -l | tr -d ' ')
+if [ "$count" = 1 ]; then
+	ok "the file the conflict became is kept"
+else
+	bad "the file the conflict became is kept" "found $count"
+fi
+
+expect "the answer can be read back as a diff" "+FIVE" gp rerere --diff
+expect "with the conflict it replaced beside it" "-<<<<<<<" gp rerere --diff
+out=$(gp rerere --status | sed -n '2p' | sed 's/^  [0-9a-f]* //')
+expect_out "and the status says an answer is there" "resolved" \
+	printf '%s\n' "$out"
+
+# a resolution that was put back is still a conflict until it is staged
+gp merge --abort >/dev/null 2>&1
+expect "merging again puts the resolution back" \
+	"Resolved 'many.txt' using previous resolution." gp merge side -m thrice
+if grep -q '<<<<<<<' many.txt; then
+	bad "and the file it was put into has no markers left"
+else
+	ok "and the file it was put into has no markers left"
+fi
+expect "the resolution is what the file holds" "FIVE" cat many.txt
+expect "the lines that were never in conflict are untouched" "two" cat many.txt
+expect "the file is still a conflict to be staged" "UU many.txt" \
+	gp status --short
+
+# the conflict is the same in one.txt, so the answer recorded against many.txt's
+# sibling is not what is used here -- but one.txt and two.txt share an id, and
+# resolving one of them answers the other without another word
+printf 'head\nA-both\nB\ntail\n' > one.txt
+gp rerere >/dev/null 2>&1
+expect "a second file that met the same conflict is answered from it" \
+	"A-both" cat two.txt
+
+gp config rerere.autoupdate true >/dev/null 2>&1
+gp merge --abort >/dev/null 2>&1
+expect "with rerere.autoupdate the resolution is staged too" \
+	"Staged 'many.txt' using previous resolution." gp merge side -m four
+expect_out "and nothing is left unmerged" "" gp rerere --status
+gp config rerere.autoupdate false >/dev/null 2>&1
+gp merge --abort >/dev/null 2>&1
+
+# a path is filed whether the answer was found or typed, so a path that is not
+# a conflict at all is the only one that can be refused
+gp merge side -m five >/dev/null 2>&1
+expect "forgetting a conflict drops the answer it was given" \
+	"Forgot resolution for 'many.txt'." gp rerere --forget many.txt
+count=$(find .gitprompt/rr-cache -name postimage | wc -l | tr -d ' ')
+if [ "$count" = 1 ]; then
+	ok "and leaves the other conflict's answer alone"
+else
+	bad "and leaves the other conflict's answer alone" "found $count"
+fi
+expect_status "a path that is not in conflict is refused" 1 \
+	gp rerere --forget not-a-conflict
+expect "and the refusal says why" "is not a conflict" \
+	gp rerere --forget not-a-conflict
+gp merge --abort >/dev/null 2>&1
+
+# what was never resolved has no answer, and --gc is what drops it
+gp rerere --clear >/dev/null 2>&1
+expect_absent "clearing empties the cache" .gitprompt/rr-cache
+gp merge side -m six >/dev/null 2>&1
+count=$(ls -A .gitprompt/rr-cache | wc -l | tr -d ' ')
+if [ "$count" = 2 ]; then
+	ok "a fresh merge files its conflicts again"
+else
+	bad "a fresh merge files its conflicts again" "found $count"
+fi
+gp rerere --gc >/dev/null 2>&1
+count=$(ls -A .gitprompt/rr-cache | wc -l | tr -d ' ')
+if [ "$count" = 0 ]; then
+	ok "gc drops the entries that hold no resolution"
+else
+	bad "gc drops the entries that hold no resolution" "found $count"
+fi
+gp merge --abort >/dev/null 2>&1
+
+# with the setting unset the cache itself is the answer, both ways round
+gp config --unset rerere.enabled >/dev/null 2>&1
+gp merge side -m seven >/dev/null 2>&1
+count=$(ls -A .gitprompt/rr-cache | wc -l | tr -d ' ')
+if [ "$count" = 2 ]; then
+	ok "with the setting unset a cache that is there turns it on"
+else
+	bad "with the setting unset a cache that is there turns it on" \
+		"found $count"
+fi
+gp merge --abort >/dev/null 2>&1
+gp rerere --clear >/dev/null 2>&1
+gp config rerere.enabled false >/dev/null 2>&1
+gp merge side -m eight >/dev/null 2>&1
+expect_absent "and turned off it keeps a conflict out of the cache" \
+	.gitprompt/rr-cache
+gp merge --abort >/dev/null 2>&1
+
+# arguments it cannot make sense of
+expect "an option it does not read is refused" "unknown option" \
+	gp rerere --nonsense
+expect_status "two modes at once are refused" 1 gp rerere --status --gc
+expect "and the refusal says which" "at most one of" gp rerere --status --gc
+expect_status "status takes no paths" 1 gp rerere --status one.txt
+expect_status "forget with no path has nothing to forget" 1 gp rerere --forget
+expect_status "a stray argument is refused" 1 gp rerere one.txt
+
+# a file deleted on one side and changed on the other is a conflict with no two
+# sides to hash, so nothing is filed for it -- there is no answer to reuse
+rrd=$work/rerere-deleted
+mergecase "$rrd"
+gp config user.name "Rerere Tester" >/dev/null 2>&1
+gp config user.email rr@example.com >/dev/null 2>&1
+gp config rerere.enabled true >/dev/null 2>&1
+printf 'keep\n' > k.txt
+printf 'gone\n' > d.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+gp branch side >/dev/null 2>&1
+printf 'gone-changed\n' > d.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "ours changes it" >/dev/null 2>&1
+gp checkout side >/dev/null 2>&1
+gp rm d.txt >/dev/null 2>&1
+gp commit -m "theirs deletes it" >/dev/null 2>&1
+gp checkout main >/dev/null 2>&1
+expect "a file deleted on one side and changed on the other is reported" \
+	"CONFLICT (modify/delete)" gp merge side -m once
+expect_absent "and files nothing, having no two sides to hash" \
+	.gitprompt/rr-cache
+gp merge --abort >/dev/null 2>&1
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "git interoperability"
 
 if command -v git >/dev/null 2>&1; then

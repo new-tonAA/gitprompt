@@ -561,7 +561,7 @@ static int stash_apply(struct repo *r, const char *rev, int drop)
 	merge_trees_labeled(r, &base_tree, &ours_tree, &sc.tree, &res, &merged,
 			    MERGE_FAVOR_NONE, "Updated upstream", "Stashed changes");
 
-	if (res.conflicts) {
+	if (res.conflicts || res.rerere_staged) {
 		/*
 		 * The conflicted stages are the merge's own record of what is
 		 * left to settle, and the entry stays where it was: a half

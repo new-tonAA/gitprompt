@@ -203,6 +203,47 @@ which commit it undid. It conflicts, continues, skips and aborts through the sam
 `sequencer/` state the other two use, and `commit` refuses while one is in
 flight.
 
+## A conflict answered once is answered from then on
+
+A conflict met twice costs two people the same typing twice, which is what
+`rerere` is for: the first time a conflict is settled, what the file became is
+written down, and the next time the same two sides are met the answer is put
+back. The record is keyed by the conflict and not by the path — by a hash of the
+two sides' bytes — so two files that met the same conflict share one answer, and
+a file that was renamed between the two meetings is still recognised. The labels
+(`<<<<<<< HEAD`, `>>>>>>> side`) are stripped before the hash for the same
+reason: they name where each side came from, which is exactly what differs
+between two meetings of one conflict, while the sides' own text is what is the
+same. What the entry holds is the conflict as it was written (`preimage`), the
+file as it was left once settled (`postimage`), and the text it originally
+carried (`thisimage`).
+
+Putting an answer back is not substituting text into a diff. The recorded answer
+begins with the text that came before the first conflict and ends with the text
+that came after the last, so both are required to be there, byte for byte; the
+stretches between conflicts are then looked up in the answer, and the bytes
+skipped over on the way are that conflict's resolution — a file with two
+conflicts is answered as two. The last one has nothing after it to search for,
+so it is measured from the end instead. If any of that does not line up the tool
+gives up and files the conflict afresh rather than guessing, which is what keeps
+a resolution from being applied to text it was not written for.
+
+The hook is one place, `merge_trees_labeled`, which is the single path every
+merge in this tree goes through — `merge`, `pull`, `rebase`, `cherry-pick`,
+`revert` and `stash pop` all read their three trees there. That is the payoff of
+[A replay is a merge read the other way](#a-replay-is-a-merge-read-the-other-way):
+because there is no second merge implementation to teach, one hook covers all of
+them. The conflict is filed as the file is written, before the index records the
+unmerged stages, so what is recorded is the file the user is looking at.
+
+An answer put back is still a conflict: it is left in the file unmerged, to be
+read before it counts, which is what makes this a way of typing less rather than
+of deciding for anyone. `rerere.autoupdate` stages it as well, so a run that
+finds a remembered answer can be committed without opening the file — but even
+then the merge stops where it stopped, with `MERGE_HEAD` written and a non-zero
+exit, and waits for `commit`. A merge that met a conflict is a merge that has to
+be concluded, whether or not the text of the conflict is still in front of you.
+
 ## Setting work aside
 
 A stash is not a special kind of storage. An entry is three commits written

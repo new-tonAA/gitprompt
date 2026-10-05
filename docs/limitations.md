@@ -39,13 +39,13 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 70. Missing are `worktree` and
-  `submodule`, along with the layers under them -- credential helpers, sparse
-  checkout and `rerere`. The object model, the index, committing,
+  gitprompt built from this tree lists 71. Missing are `worktree` and
+  `submodule`, along with the layers under them -- credential helpers and sparse
+  checkout. The object model, the index, committing,
   history, branches, merging including conflicts, replaying a commit elsewhere,
-  undoing one, setting work aside, tags, reset, the ref plumbing, remotes, the
-  prompt layer and the object-store maintenance `archive`, `notes`, `gc`,
-  `repack` and `prune` are all here.
+  undoing one, reusing a conflict's resolution, setting work aside, tags, reset,
+  the ref plumbing, remotes, the prompt layer and the object-store maintenance
+  `archive`, `notes`, `gc`, `repack` and `prune` are all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -146,6 +146,21 @@ counterpart here, is in [The commands](commands.md).
   way to reclaim it is `repack -A -d` first, which is the round trip git
   describes too. `--expire` reads `now` and `<n>.<unit>.ago` and refuses
   anything else rather than guessing.
+- **`rerere`, at its edges.** A conflict is filed under this tool's own hash of
+  its two sides, so the entries under `rr-cache` are not git's and the two
+  tools do not read each other's -- what they share is the words they say, which
+  `test/surface.sh` holds them to. `--status`, `--diff` and `--forget` are
+  options here where git has subcommands, and a path stays in `MERGE_RR` until
+  the merge it belongs to is concluded, rather than being dropped the moment a
+  resolution is recorded; keeping it is what lets `--status` still describe a
+  conflict that has been answered. `--gc` drops the entries that hold no
+  resolution and nothing else, with no age policy, and a conflict written in the
+  diff3 style (`|||||||`, or a nested or unterminated set of markers) is neither
+  recorded nor replayed, since its two sides cannot be read back out of it. The
+  setting `rerere.enabled` defaults to whether the cache is there, as git's
+  does, and `rerere.autoupdate` stages what was put back -- but the merge is
+  still left for `commit` to conclude, with `MERGE_HEAD` written and exit 1, as
+  git leaves it.
 - **`stash` with `--index`, and with a pathspec.** Everything else is here:
   `push` (with `-m`, `-u` and `-k`), `list`, `show` (with `-p`),
   `apply`/`pop`, `drop`, `clear` and `branch`, with a conflict stopping in the

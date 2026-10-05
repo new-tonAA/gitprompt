@@ -870,6 +870,100 @@ else
 fi
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- rerere
+say "a conflict resolved the way it was resolved before"
+
+# What a conflict is filed under is a hash of this command's own making, so the
+# two tools keep separate caches and do not read each other's entries: a
+# resolution recorded by one is not reused by the other, and that is written
+# down rather than tested here.  What can be compared is what they say, at each
+# of the four moments a resolution goes through, on the same history.
+#
+# run <dir> <command...> runs one in its own repository; words keeps only the
+# lines the two tools are meant to say identically.
+run()  { d=$1; shift; (cd "$d" && "$@"); }
+words() { grep -E 'Recorded preimage|Recorded resolution|using previous resolution'; }
+
+rrgit=$work/rr-git
+rrgp=$work/rr-gp
+rm -rf "$rrgit" "$rrgp"
+mkdir -p "$rrgit" || exit 2
+cd "$rrgit" || exit 2
+git init -q . || exit 2
+rrbranch=$(git symbolic-ref --short HEAD)
+git config user.email s@example.com
+git config user.name "Surface"
+git config rerere.enabled true
+printf 'head\nA\nB\ntail\n' > f.txt
+git add -A >/dev/null 2>&1
+git commit -qm "the base"
+git branch side
+printf 'head\nA-ours\nB\ntail\n' > f.txt
+git add -A >/dev/null 2>&1
+git commit -qm ours
+git checkout -q side
+printf 'head\nA-theirs\nB\ntail\n' > f.txt
+git add -A >/dev/null 2>&1
+git commit -qm theirs
+git checkout -q "$rrbranch"
+
+rm -rf "$rrgp"
+mkdir -p "$rrgp" || exit 2
+cd "$rrgp" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.email s@example.com
+"$GP" config user.name "Surface"
+"$GP" config rerere.enabled true
+printf 'head\nA\nB\ntail\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the base" >/dev/null 2>&1
+"$GP" branch side >/dev/null 2>&1
+printf 'head\nA-ours\nB\ntail\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m ours >/dev/null 2>&1
+"$GP" checkout side >/dev/null 2>&1
+printf 'head\nA-theirs\nB\ntail\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m theirs >/dev/null 2>&1
+"$GP" checkout main >/dev/null 2>&1
+
+cd "$repo" || exit 2
+if [ "$have_git" = 1 ]; then
+	chk "a conflict met is announced in the same words" \
+		"$(run "$rrgit" git merge side -m once 2>&1 | words)" \
+		"$(run "$rrgp" "$GP" merge side -m once 2>&1 | words)"
+	printf 'head\nA-both\nB\ntail\n' > "$rrgit/f.txt"
+	printf 'head\nA-both\nB\ntail\n' > "$rrgp/f.txt"
+	chk "and resolving it is recorded in the same words" \
+		"$(run "$rrgit" git rerere 2>&1 | words)" \
+		"$(run "$rrgp" "$GP" rerere 2>&1 | words)"
+	run "$rrgit" git merge --abort >/dev/null 2>&1
+	run "$rrgp" "$GP" merge --abort >/dev/null 2>&1
+	chk "and met again it is put back in the same words" \
+		"$(run "$rrgit" git merge side -m twice 2>&1 | words)" \
+		"$(run "$rrgp" "$GP" merge side -m twice 2>&1 | words)"
+	run "$rrgit" git config rerere.autoupdate true
+	run "$rrgp" "$GP" config rerere.autoupdate true
+	run "$rrgit" git merge --abort >/dev/null 2>&1
+	run "$rrgp" "$GP" merge --abort >/dev/null 2>&1
+	chk "and with autoupdate both stage it, in the same words" \
+		"$(run "$rrgit" git merge side -m thrice 2>&1 | words)" \
+		"$(run "$rrgp" "$GP" merge side -m thrice 2>&1 | words)"
+	run "$rrgit" git merge --abort >/dev/null 2>&1
+	run "$rrgp" "$GP" merge --abort >/dev/null 2>&1
+	chk "neither leaves anything behind once the merge is over" \
+		"$(run "$rrgp" sh -c 'ls .gitprompt/rr-cache 2>/dev/null | wc -l | tr -d " "')" \
+		"1"
+else
+	skip "a conflict met is announced in the same words (no git)"
+	skip "and resolving it is recorded in the same words (no git)"
+	skip "and met again it is put back in the same words (no git)"
+	skip "and with autoupdate both stage it, in the same words (no git)"
+	skip "neither leaves anything behind once the merge is over (no git)"
+fi
+
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

@@ -1071,25 +1071,62 @@ void merge_trees_labeled(struct repo *r, const oid_t *base, const oid_t *ours,
 			buf_release(&base_text);
 			buf_release(&theirs_text);
 
-			merge_write(r, ti.e[i].path, content.b, content.len);
-			if (!conflicted) {
+			{
 				/*
-				 * The merged text is a new object; the entry that
-				 * records it is ours, so the mode and the stat block
-				 * stay ours and only the id moves.
+				 * A conflict that has been resolved here before
+				 * is resolved the same way as it is written, so
+				 * what goes in the file is decided before it is
+				 * written rather than after.
 				 */
-				struct index_entry e = *o;
+				const void *bytes = content.b;
+				size_t nbytes = content.len;
+				struct buf replay = BUF_INIT;
+				enum rr_result rr = RR_NONE;
+				int staged = 0;
 
-				odb_write(&r->odb, OBJ_BLOB, content.b, content.len,
-					  &e.oid);
-				e.path = ti.e[i].path;
-				e.stage = 0;
-				index_add(merged, &e);
-				res->files_changed++;
-			} else {
-				res->conflicts++;
-				merge_mark_unmerged(merged, ti.e[i].path, b, o,
-						    &ti.e[i]);
+				if (conflicted && rerere_enabled(r)) {
+					rr = rerere_auto(r, ti.e[i].path,
+							 &content, &replay);
+					rerere_report(ti.e[i].path, rr);
+					if (rr == RR_RESOLVED || rr == RR_STAGED) {
+						bytes = replay.b;
+						nbytes = replay.len;
+						staged = rr == RR_STAGED && o;
+					}
+				}
+
+				merge_write(r, ti.e[i].path, bytes, nbytes);
+				if (!conflicted) {
+					/*
+					 * The merged text is a new object; the
+					 * entry that records it is ours, so the
+					 * mode and the stat block stay ours and
+					 * only the id moves.
+					 */
+					struct index_entry e = *o;
+
+					odb_write(&r->odb, OBJ_BLOB, bytes,
+						  nbytes, &e.oid);
+					e.path = ti.e[i].path;
+					e.stage = 0;
+					index_add(merged, &e);
+					res->files_changed++;
+				} else if (staged) {
+					struct index_entry e = *o;
+
+					odb_write(&r->odb, OBJ_BLOB, bytes,
+						  nbytes, &e.oid);
+					e.path = ti.e[i].path;
+					e.stage = 0;
+					index_add(merged, &e);
+					res->rerere_staged++;
+					res->files_changed++;
+				} else {
+					res->conflicts++;
+					merge_mark_unmerged(merged, ti.e[i].path,
+							    b, o, &ti.e[i]);
+				}
+				buf_release(&replay);
 			}
 			buf_release(&content);
 		}
@@ -1196,6 +1233,14 @@ void merge_state_clear(struct repo *r)
 	remove(path);
 	free(path);
 	path = repo_git_path(r, "MERGE_MSG");
+	remove(path);
+	free(path);
+	/*
+	 * MERGE_RR is the list of paths a conflict was filed under, and it is
+	 * part of the merge state: once the merge is over -- committed or
+	 * thrown away -- there is no conflict left for a path to belong to.
+	 */
+	path = repo_git_path(r, "MERGE_RR");
 	remove(path);
 	free(path);
 }
@@ -1414,7 +1459,7 @@ int cmd_merge(struct repo *r, int argc, char **argv)
 		 */
 		index_write(&mindex, repo_index_path(r));
 
-		if (res.conflicts) {
+		if (res.conflicts || res.rerere_staged) {
 			/*
 			 * Leave MERGE_HEAD behind so --abort can undo this, and
 			 * so the concluding commit records both parents.  A
