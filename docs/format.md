@@ -91,9 +91,10 @@ Prompts are blobs.
 
 with `mode` in ASCII octal and no leading zero: `100644` for a regular file,
 `100755` for an executable, `120000` for a symlink, `40000` for a subtree
-(note: `40000`, not `040000`). Entries are sorted by name, with a subtree
-compared as though its name ended in `/`. Subtrees are ordinary trees, not
-commits, and carry no id of their own.
+(note: `40000`, not `040000`), and `160000` for a submodule, whose object id is
+a commit in another repository rather than anything this store holds. Entries
+are sorted by name, with a subtree compared as though its name ended in `/`.
+Subtrees are ordinary trees, not commits, and carry no id of their own.
 
 **commit** — a header block, a blank line, then the message:
 

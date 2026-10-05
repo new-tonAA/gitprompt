@@ -725,41 +725,6 @@ static int wt_list(struct repo *r, struct opts *o)
 /* remove                                                              */
 
 /*
- * A worktree holding files its index does not know about would lose them to a
- * removal, so it is asked first.  A path the index knows is tracked and says
- * nothing about whether it changed -- that is worktree_dirty_paths -- so the
- * two questions are asked separately and either one stops the removal.
- */
-struct wt_ut {
-	struct index_state *ist;
-	int found;
-};
-
-static void wt_ut_cb(const char *relpath, void *ud)
-{
-	struct wt_ut *c = ud;
-
-	if (!c->found && !index_get(c->ist, relpath))
-		c->found = 1;
-}
-
-static int wt_has_untracked(struct repo *r)
-{
-	struct index_state ist;
-	struct wt_ut c;
-	int found;
-
-	memset(&ist, 0, sizeof ist);
-	index_read(&ist, repo_index_path(r));
-	c.ist = &ist;
-	c.found = 0;
-	walk_worktree(r, wt_ut_cb, &c);
-	found = c.found;
-	index_release(&ist);
-	return found;
-}
-
-/*
  * The name the worktree directory of `path` is registered as, when it is one
  * this command may touch: not the main one, and not locked unless the caller
  * is the one undoing the lock.  Returns NULL after saying why not.
@@ -819,15 +784,10 @@ static int wt_remove(struct repo *r, struct opts *o)
 
 	if (!force && is_directory(abs)) {
 		struct repo wt;
-		char **dirty = NULL;
 		int some = 0;
 
 		if (repo_open(&wt, abs) == 0) {
-			if (worktree_dirty_paths(&wt, &dirty) > 0)
-				some = 1;
-			path_list_free(dirty);
-			if (!some && wt_has_untracked(&wt))
-				some = 1;
+			some = !worktree_is_clean(&wt);
 			repo_release(&wt);
 		}
 		if (some) {

@@ -208,6 +208,13 @@ static void fsck_tree(struct fsck *f, const oid_t *oid, const char *prefix)
 
 			fsck_tree(f, &e->oid, dir);
 			free(dir);
+		} else if (e->mode == MODE_GITLINK) {
+			/*
+			 * The commit a gitlink names lives in the submodule's store, not
+			 * in this one, so its absence here is the normal case rather than
+			 * a hole -- and it is not something to follow into either.
+			 */
+			;
 		} else if (e->mode == MODE_BLOB || e->mode == MODE_EXEC ||
 			   e->mode == MODE_LINK) {
 			if (!odb_exists(&f->r->odb, &e->oid)) {

@@ -782,7 +782,17 @@ static void walk_recurse(struct repo *r, const char *rel, const char *abs,
 				: xstrdup(de->d_name);
 		subabs = xstrfmt("%s/%s", abs, de->d_name);
 		if (is_directory(subabs)) {
-			walk_recurse(r, subrel, subabs, c);
+			/*
+			 * A directory holding a `.git` is a repository of its own, which
+			 * is what a checked-out submodule looks like: its files belong to
+			 * that repository and not to this one, so the walk stops at the
+			 * door rather than reporting them as files of this work tree.
+			 */
+			char *door = xstrfmt("%s/.git", subabs);
+
+			if (!is_file(door) && !is_directory(door))
+				walk_recurse(r, subrel, subabs, c);
+			free(door);
 		} else {
 			if (r && path_is_ignored(r, subrel)) {
 				free(subrel);

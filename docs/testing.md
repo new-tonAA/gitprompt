@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1443 checks, 0 failures** — 1268 in
-`test/smoke.sh`, 139 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1499 checks, 0 failures** — 1317 in
+`test/smoke.sh`, 146 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -83,7 +83,18 @@ from the other because the objects and the refs are shared, while the conflict a
 merge stops on in one is not a merge in the other because that state is the
 directory's, the branch one directory holds is refused in the second place that
 would check it out, and a directory with uncommitted work in it is not removed
-until `-f` says to.
+until `-f` says to. A repository nested in another is added, committed, cloned
+and brought back: the gitlink in the tree and the entry in `.gitmodules` are
+checked against the store the path points at, the submodule reads as a
+repository of its own in its own directory, a clone carries the record and not
+the checkout until `update` runs, `--remote` follows the submodule's branch
+where a plain `update` stays on the commit the parent recorded, an update over
+the submodule's own uncommitted work is refused until `-f`, `sync` puts back a
+url that has drifted from `.gitmodules`, `foreach` runs with the submodule's
+directory as its cwd and its name, path and commit in the environment and
+leaves no script behind, and `deinit` refuses a submodule that holds either a
+changed tracked file or one its index never had, clearing it only under `-f`
+while its store stays.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -118,7 +129,13 @@ reader with `git --git-dir=<store> worktree list`, and the two listings have to
 hold the same rows once the path column — which is padded to different widths
 and names the store differently — is taken off, a locked registration included,
 which is what makes the registration an ordinary one rather than a gitprompt
-format that happens to look like git's. Two
+format that happens to look like git's. `submodule` is compared on the two
+artifacts that have to be the other tool's: the gitlink and the `.gitmodules`
+are written by gitprompt and read by git — `git ls-files -s`, `git config -f`
+and `git submodule status` all on gitprompt's output — and, the other way, a
+commit git makes is pushed into a gitprompt store and checked out by
+`gitprompt submodule add`, which is the sharpest form of the claim that a
+gitprompt store is an ordinary git object store. Two
 things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

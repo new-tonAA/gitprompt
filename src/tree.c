@@ -152,6 +152,16 @@ void index_from_worktree(struct repo *r, const struct index_state *idx,
 		struct index_entry e = idx->e[i];
 		u32 mode;
 
+		/*
+		 * A gitlink has no file in the work tree to hash -- the path is a
+		 * directory whose contents belong to another repository.  What the
+		 * index holds is the commit to record, so the entry is carried over
+		 * as it stands, which is the commit a snapshot should remember.
+		 */
+		if ((e.mode & 0170000) == 0160000) {
+			index_add(out, &e);
+			continue;
+		}
 		if (hash_worktree_blob(r, e.path, &e.oid, &mode) < 0)
 			continue;
 		e.mode = mode;
@@ -207,7 +217,13 @@ static void rti_cb(const char *path, u32 mode, const oid_t *oid, void *ud)
 				: xstrdup(path);
 
 	memset(&e, 0, sizeof e);
-	e.mode = (mode & 0170000) == 0120000 ? MODE_LINK
+	/*
+	 * A gitlink keeps its mode rather than being read as a regular file: the
+	 * index is what remembers that this path is a submodule, so losing the mode
+	 * here would turn it into a blob the moment anything wrote the index back.
+	 */
+	e.mode = (mode & 0170000) == 0160000 ? MODE_GITLINK
+	       : (mode & 0170000) == 0120000 ? MODE_LINK
 	       : (mode & 0100) ? MODE_EXEC : MODE_BLOB;
 	e.oid = *oid;
 	e.path = (char *)path;
@@ -249,6 +265,19 @@ static void co_write_file(struct repo *r, const char *relpath, u32 mode,
 		mkdir_p(dir);
 	}
 	free(dir);
+
+	/*
+	 * A gitlink names a commit in another repository, so there are no bytes
+	 * here to write: the path is a directory, and what goes in it is whatever
+	 * the submodule is checked out to -- a question for `submodule update`, not
+	 * for checking a tree out.  The directory is made so the path exists, and
+	 * left alone after that.
+	 */
+	if ((mode & 0170000) == 0160000) {
+		mkdir_p(full);
+		free(full);
+		return;
+	}
 
 	if ((mode & 0170000) == 0120000) {
 		/* a symlink entry: write the target as the file's content,

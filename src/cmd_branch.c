@@ -162,6 +162,50 @@ void path_list_free(char **paths)
 	free(paths);
 }
 
+struct clean_ctx {
+	const struct index_state *ist;
+	int found;
+};
+
+static void clean_cb(const char *relpath, void *ud)
+{
+	struct clean_ctx *c = ud;
+
+	if (!c->found && !index_get(c->ist, relpath))
+		c->found = 1;
+}
+
+/*
+ * Whether a working directory would lose anything if it were taken away: a
+ * tracked file that differs from the index, or a file the index does not know
+ * about at all.  Removing a linked worktree and clearing a submodule both ask
+ * this question before they do it, and both refuse on the answer, so it is
+ * asked here once.  A plain `checkout` asks only the first half -- it does not
+ * touch a file it has never heard of -- and that half is worktree_dirty_paths.
+ */
+int worktree_is_clean(struct repo *r)
+{
+	struct index_state ist;
+	struct strlist l = { NULL, 0, 0 };
+	struct clean_ctx c;
+	int clean;
+
+	dirty_paths(r, &l);
+	clean = l.nr == 0;
+	strlist_release(&l);
+	if (!clean)
+		return 0;
+
+	memset(&ist, 0, sizeof ist);
+	index_read(&ist, repo_index_path(r));
+	c.ist = &ist;
+	c.found = 0;
+	walk_worktree(r, clean_cb, &c);
+	clean = !c.found;
+	index_release(&ist);
+	return clean;
+}
+
 /* ------------------------------------------------------------------ */
 /* branch                                                             */
 

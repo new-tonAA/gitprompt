@@ -39,13 +39,14 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 72. Missing are `submodule` and the
-  layers under it -- credential helpers and sparse checkout. The object model,
-  the index, committing, history, branches, merging including conflicts,
-  replaying a commit elsewhere, undoing one, reusing a conflict's resolution,
-  setting work aside, tags, reset, the ref plumbing, remotes, the prompt layer,
-  a second working directory with `worktree`, and the object-store maintenance
-  `archive`, `notes`, `gc`, `repack` and `prune` are all here.
+  gitprompt built from this tree lists 73. Missing are credential helpers and
+  sparse checkout. The object model, the index, committing, history, branches,
+  merging including conflicts, replaying a commit elsewhere, undoing one,
+  reusing a conflict's resolution, setting work aside, tags, reset, the ref
+  plumbing, remotes, the prompt layer, a second working directory with
+  `worktree`, a repository nested in another with `submodule`, and the
+  object-store maintenance `archive`, `notes`, `gc`, `repack` and `prune` are
+  all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -130,6 +131,23 @@ counterpart here, is in [The commands](commands.md).
   bare repository is not a form this reads, so the questions git answers about
   one with `core.bare` and `--relative-paths` do not come up. The reasoning is
   in [Notes](notes.md#a-second-working-directory).
+- **`submodule`, at its edges.** A submodule is the three things git makes it:
+  a gitlink in the parent's tree, an entry in `.gitmodules` naming where that
+  commit comes from, and a repository of its own whose store lives under the
+  parent's `modules/`, keyed by the submodule's path, with the path holding a
+  `.git` file that names it. `add`, `init`, `update` (`--init`, `--remote`,
+  `-f`), `status`, `sync`, `deinit` and `foreach` are here. `update` will not
+  check a submodule out over uncommitted changes to its tracked files, which
+  `-f` overrides; `deinit` refuses for the same reason, counting an untracked
+  file as well, until forced. So a submodule is never quietly emptied. What is
+  missing is `--recursive` (nothing
+  descends into a submodule's own submodules), `absorbgitdirs`, `summary`, the
+  merge of a `.gitmodules` both sides changed, and `--depth`/`--jobs`. A remote
+  is whatever `.gitmodules` names: an `https` or `ssh` url goes through git, and
+  a local path is read directly, which means it has to be a gitprompt store --
+  a plain git repository at a local path is not a form a local fetch reads, the
+  same way `remote` will not take one. The reasoning is in
+  [Notes](notes.md#a-repository-inside-a-repository).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

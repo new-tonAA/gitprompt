@@ -745,6 +745,14 @@ int cmd_status(struct repo *r, int argc, char **argv)
 
 		if (e->stage)
 			continue;
+		/*
+		 * A gitlink has no file here to compare against -- whether the
+		 * submodule is dirty is a question about its own repository, and this
+		 * one does not look inside it, so the entry is left as the index has
+		 * it rather than called missing because the walk stopped at its door.
+		 */
+		if ((e->mode & 0170000) == 0160000)
+			continue;
 		if (!slist_has(&wt, e->path)) {
 			found = 0;              /* deleted from the work tree */
 		} else {
@@ -2689,9 +2697,24 @@ static void tdiff_emit(struct tdiff_ctx *c, const char *path,
 
 	buf_init(&a);
 	buf_init(&b);
-	if (old_oid)
+	/*
+	 * A gitlink's id names a commit in the submodule's store, so reading it
+	 * here would be reading an object this repository does not have.  git
+	 * answers that the same way on both sides: the content of a gitlink is the
+	 * line naming the commit it points at, which is what the hunks below then
+	 * show changing.
+	 */
+	if (old_oid && (old_mode & 0170000) == 0160000) {
+		char hex[GP_SHA1_HEXSZ + 1];
+		oid_hex(old_oid, hex);
+		buf_addf(&a, "Subproject commit %s\n", hex);
+	} else if (old_oid)
 		odb_read(&c->r->odb, old_oid, NULL, &a);
-	if (new_oid)
+	if (new_oid && (new_mode & 0170000) == 0160000) {
+		char hex[GP_SHA1_HEXSZ + 1];
+		oid_hex(new_oid, hex);
+		buf_addf(&b, "Subproject commit %s\n", hex);
+	} else if (new_oid)
 		odb_read(&c->r->odb, new_oid, NULL, &b);
 
 	if (c->stat_only) {
@@ -2867,7 +2890,14 @@ static void tdiff_recurse(struct tdiff_ctx *c, const char *prefix,
 			j++;
 		} else {
 			char *p = xstrfmt("%s%s", prefix, ot.e[i].name);
-			int is_dir = (ot.e[i].mode & 0170000) == 0040000;
+			/*
+			 * Both sides have to be directories to be walked as one: a
+			 * directory that became a gitlink (or the other way round) is
+			 * two different kinds of thing under one name, which the emit
+			 * below reports as the change it is.
+			 */
+			int is_dir = (ot.e[i].mode & 0170000) == 0040000 &&
+				     (nt.e[j].mode & 0170000) == 0040000;
 			if (is_dir) {
 				char *full = xstrfmt("%s/", p);
 				tdiff_recurse(c, full, &ot.e[i].oid, &nt.e[j].oid);

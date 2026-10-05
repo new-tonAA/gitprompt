@@ -40,6 +40,7 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 	const char *dir;
 	const char *branch;
 	int bare;
+	int quiet;
 	int existed;
 	char *gpdir;
 	const char *root;
@@ -47,8 +48,9 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 
 	(void)unused;
 	opts_init(&o, argc, argv, (const char *const[]){
-		"--bare", "-b=", "--initial-branch=", NULL });
+		"--bare", "-q", "--quiet", "-b=", "--initial-branch=", NULL });
 	bare = opts_flag(&o, "--bare");
+	quiet = opts_flag(&o, "-q") || opts_flag(&o, "--quiet");
 	dir = opts_arg(&o, 0);
 
 	if (opts_flag(&o, "-b") || opts_flag(&o, "--initial-branch"))
@@ -72,11 +74,14 @@ int cmd_init(struct repo *unused, int argc, char **argv)
 	gpdir = bare ? xstrfmt("%s", root) : xstrfmt("%s/.gitprompt", root);
 
 	existed = is_directory(gpdir) && is_file(xstrfmt("%s/HEAD", gpdir));
-	if (existed)
-		printf("Reinitialized existing gitprompt repository in %s/\n",
-		       gpdir);
-	else
-		printf("Initialized empty gitprompt repository in %s/\n", gpdir);
+	if (!quiet) {
+		if (existed)
+			printf("Reinitialized existing gitprompt repository in %s/\n",
+			       gpdir);
+		else
+			printf("Initialized empty gitprompt repository in %s/\n",
+			       gpdir);
+	}
 
 	{
 		char *p;

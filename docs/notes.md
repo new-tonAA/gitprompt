@@ -791,6 +791,54 @@ directory holds this branch -- asked by both. And a directory's `HEAD` being a
 file of its own is what `worktree list` reads to print the branch beside each
 path, where a detached one has no branch to print.
 
+## A repository inside a repository
+
+A submodule stands on the same `.git` file a linked worktree does, and that is
+the whole trick: a directory whose `.git` names another store is a repository of
+its own, and gitprompt had learned to read that file for `worktree`. What a
+submodule adds is a way to have the store *be* part of the tree. The tree holds
+a gitlink -- an entry with mode `160000` whose object name is a commit in a
+repository the tree knows nothing else about -- `.gitmodules` holds the name and
+the url under `submodule.<name>.path` and `.url`, and the store itself lives at
+`<store>/modules/<name>`, created by `init --bare` like any other store. The path
+is a checkout of it with `core.worktree` pointed at the path, so the two agree
+about where the files are, and the name is the path, as git has it, so that
+`libs/foo` and `other/foo` are two submodules and not one.
+
+The gitlink is why nothing in the tree layer reads a submodule's entry: a commit
+is not in this object store and looking it up would fail or, worse, find an
+unrelated object of the same name. So the tree code carries the mode through
+without opening it, and only the submodule commands know to open the store the
+path names and ask *it* for the commit. `ls-tree` prints the entry, `status`
+prints it as a change to be committed the way git does, and `checkout` makes the
+empty directory and stops.
+
+`update` is the one that crosses over, and it is the one place where the two
+kinds of remote meet. A submodule's url is usually another repository -- on this
+machine a path beside the parent, and `.gitmodules` keeps it relative so that a
+clone of the parent still finds it. Fetching one is the same call the parent's
+own `fetch` makes, so a submodule that is a local path is read directly and one
+that is an `https` or `ssh` url goes through git, exactly as `remote` does. A
+local path is read by opening it as a gitprompt store, so a bare git repository
+at a path is not a submodule source here; where git would clone one, gitprompt
+says the path is not a repository. What it *can* always read is a store git
+wrote into, because a gitprompt store is an ordinary git object store -- `git
+push` into one is how the two tools are checked against each other. What
+`update` then checks out is the commit *the parent's index records*, not the
+submodule's branch tip, which is the point of a submodule: a checkout of the
+parent gives you the submodule at the commit the parent was tested with. That is
+also why `update` will not proceed over a changed tracked file in the submodule,
+and because the answer to "would this lose work" belongs in one place rather
+than three, `deinit` and `worktree remove` both ask `worktree_is_clean`, which
+counts an untracked file as much as a changed one.
+
+`foreach` runs a command per submodule, and had to be built on `system` rather
+than a `spawn` variant. The variables git sets -- `name`, `sm_path`,
+`displaypath`, `sha1`, `toplevel` -- go into the environment, but `path` does
+not, because on Windows a variable's name is matched without regard to case and
+setting `path` would take the `PATH` with it. `git` leaves `path` out for the
+same reason.
+
 ## Transports
 
 | URL form | how it works |

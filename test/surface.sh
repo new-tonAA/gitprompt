@@ -1013,6 +1013,101 @@ fi
 
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- submodules
+say "a repository inside a repository, read back by git"
+
+# Two repositories have to agree about a third without sharing a store: the
+# parent's tree holds a gitlink naming a commit, `.gitmodules` names where that
+# commit comes from, and the submodule's own store answers for the commit.  The
+# gitlink and the `.gitmodules` are an ordinary tree entry and blob, so git can
+# read what gitprompt wrote; and the commit gitprompt arrives at is one git
+# recorded, so a store git built is handed back in the other direction.
+sublib=$work/sub-lib
+
+if [ "$have_git" = 1 ]; then
+	rm -rf "$sublib" "$work/sub-gp"
+	mkdir -p "$sublib" || exit 2
+	cd "$sublib" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name Surface
+	printf 'inner\n' > in.txt
+	"$GP" add in.txt >/dev/null
+	"$GP" commit -m inner >/dev/null
+	libsha=$("$GP" rev-parse HEAD)
+
+	mkdir -p "$work/sub-gp" || exit 2
+	cd "$work/sub-gp" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name Surface
+	printf 'outer\n' > out.txt
+	"$GP" add out.txt >/dev/null
+	"$GP" commit -m outer >/dev/null
+	"$GP" submodule add ../sub-lib vendor/lib >/dev/null
+	"$GP" commit -m "with a submodule" >/dev/null
+
+	chk "git reads the gitlink gitprompt wrote" \
+		"160000 $libsha 0	vendor/lib" \
+		"$(git --git-dir="$work/sub-gp/.gitprompt" ls-files -s vendor/lib)"
+	chk "and the path gitprompt wrote into .gitmodules" "vendor/lib" \
+		"$(git config -f "$work/sub-gp/.gitmodules" --get submodule.vendor/lib.path)"
+	chk "and the url beside it" "../sub-lib" \
+		"$(git config -f "$work/sub-gp/.gitmodules" --get submodule.vendor/lib.url)"
+	chk "and names that commit when asked about the submodule" \
+		"$libsha vendor/lib" \
+		"$(git --git-dir="$work/sub-gp/.gitprompt" --work-tree="$work/sub-gp" \
+			submodule status vendor/lib 2>/dev/null | sed -e 's/^[-+U ]*//' -e 's/ (.*//')"
+
+	# the other direction: git writes the commit, gitprompt checks it out.  The
+	# store has to be gitprompt's shape for a local path to be read at all, so
+	# git writes into one gitprompt made, which is also the honest picture --
+	# a gitprompt store is an ordinary git object store.
+	rm -rf "$work/sub-src" "$work/sub-maker" "$work/sub-gp2"
+	mkdir -p "$work/sub-src" || exit 2
+	cd "$work/sub-src" || exit 2
+	"$GP" init --bare . >/dev/null
+
+	mkdir -p "$work/sub-maker" || exit 2
+	cd "$work/sub-maker" || exit 2
+	git init -q .
+	git symbolic-ref HEAD refs/heads/main
+	git config user.email s@example.com
+	git config user.name Surface
+	printf 'inner\n' > in.txt
+	git add in.txt
+	git commit -qm inner
+	gitsha=$(git rev-parse HEAD)
+	git push -q ../sub-src main
+
+	mkdir -p "$work/sub-gp2" || exit 2
+	cd "$work/sub-gp2" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name Surface
+	printf 'outer\n' > out.txt
+	"$GP" add out.txt >/dev/null
+	"$GP" commit -m outer >/dev/null
+	"$GP" submodule add ../sub-src vendor/lib >/dev/null
+
+	chk "gitprompt records the commit git made" "$gitsha" \
+		"$("$GP" ls-files -s vendor/lib | awk '{print $2}')"
+	chk "and reads the file out of the store git wrote" "inner" \
+		"$(cat vendor/lib/in.txt)"
+	chk "and names the same commit in its own status" "$gitsha" \
+		"$("$GP" submodule status vendor/lib | sed -e 's/^[-+U ]*//' -e 's/ .*//')"
+else
+	skip "git reads the gitlink gitprompt wrote (no git)"
+	skip "and the path gitprompt wrote into .gitmodules (no git)"
+	skip "and the url beside it (no git)"
+	skip "and names that commit when asked about the submodule (no git)"
+	skip "gitprompt records the commit git made (no git)"
+	skip "and reads the file out of the store git wrote (no git)"
+	skip "and names the same commit in its own status (no git)"
+fi
+
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

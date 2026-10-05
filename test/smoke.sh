@@ -5912,6 +5912,156 @@ expect "list shows it at the new place" "wt-moved" gp worktree list
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "a repository inside a repository"
+
+# A submodule is three things that have to agree: a gitlink in the tree, an
+# entry in `.gitmodules` naming where that commit comes from, and a repository
+# of its own under `modules/` that the path is a checkout of.  These checks make
+# one, take it apart, and put it back from the parent alone -- which is what a
+# clone has to do, and the reason the two halves are written together.
+smroot=$work/submodule
+rm -rf "$smroot"
+mkdir -p "$smroot/lib" || exit 2
+cd "$smroot/lib" || exit 2
+gp init . >/dev/null 2>&1
+printf 'inner\n' > in.txt
+gp add in.txt >/dev/null 2>&1
+gp commit -m "the submodule's first" >/dev/null 2>&1
+libhead=$(gp rev-parse HEAD)
+
+# in_sub <directory> <gp args...> -- run gitprompt somewhere else for one check
+in_sub() {
+	smdir=$1; shift
+	( cd "$smdir" && gp "$@" )
+}
+
+mergecase "$smroot/main"
+printf 'outer\n' > out.txt
+gp add out.txt >/dev/null 2>&1
+gp commit -m "the parent's first" >/dev/null 2>&1
+
+added=$(gp submodule add ../lib vendor/lib 2>&1); added_rc=$?
+if [ "$added_rc" = 0 ]; then
+	ok "a submodule can be added"
+else
+	bad "a submodule can be added" "exit $added_rc: $added"
+fi
+expect_in "saying what it cloned" "Cloning into 'vendor/lib'" "$added"
+expect_file "the submodule is checked out" vendor/lib/in.txt
+expect_file "and registered in .gitmodules" .gitmodules
+expect_in "which names the path" "path = vendor/lib" "$(cat .gitmodules)"
+expect_in "and the url it came from" "url = ../lib" "$(cat .gitmodules)"
+expect "the index records it as a gitlink" "160000 $libhead" gp ls-files -s
+expect_file "the path holds a .git file, not a directory" vendor/lib/.git
+expect_in "naming a store of its own under modules/" "modules/vendor/lib" \
+	"$(cat vendor/lib/.git 2>/dev/null)"
+expect_file "which is a repository in its own right" \
+	.gitprompt/modules/vendor/lib/HEAD
+expect_out "status shows it where the index says" " $libhead vendor/lib" \
+	gp submodule status
+expect_out "and the tree it is added in is the only change" "A  .gitmodules
+A  vendor/lib" gp status --short
+expect_status "the submodule reads as a repository of its own" 0 \
+	in_sub vendor/lib status --short
+expect_file "with the file it carries" vendor/lib/in.txt
+gp commit -m "add the submodule" >/dev/null 2>&1
+expect_out "once it is committed the work tree is clean" "" gp status --short
+
+# a clone takes the record and not the checkout, which is what update is for
+cd "$smroot" || exit 2
+gp clone main main2 >/dev/null 2>&1
+cd "$smroot/main2" || exit 2
+expect_absent "a clone carries no submodule checkout" vendor/lib/in.txt
+expect_file "though the path the tree names is there, empty" vendor/lib
+expect_out "and status says it is not checked out" "-$libhead vendor/lib" \
+	gp submodule status
+expect_status "update on an unregistered submodule leaves it alone" 0 \
+	gp submodule update
+expect_absent "which is still not checked out" vendor/lib/in.txt
+initout=$(gp submodule init 2>&1); init_rc=$?
+if [ "$init_rc" = 0 ]; then
+	ok "init succeeds"
+else
+	bad "init succeeds" "exit $init_rc: $initout"
+fi
+expect_in "saying what it registered" \
+	"Submodule 'vendor/lib' (../lib) registered for path 'vendor/lib'" \
+	"$initout"
+expect_out "with the url in this repository's own configuration" "../lib" \
+	gp config submodule.vendor/lib.url
+expect "update then checks the recorded commit out" \
+	"checked out '$libhead'" gp submodule update
+expect_file "so the files are there" vendor/lib/in.txt
+expect_out "and status agrees with the index again" " $libhead vendor/lib" \
+	gp submodule status
+
+# --remote follows the submodule's branch instead of the record
+cd "$smroot/lib" || exit 2
+printf 'inner two\n' > two.txt
+gp add two.txt >/dev/null 2>&1
+gp commit -m "the submodule's second" >/dev/null 2>&1
+libhead2=$(gp rev-parse HEAD)
+cd "$smroot/main2" || exit 2
+expect_status "update alone does not move off the record" 0 gp submodule update
+expect_out "which is still what the index says" " $libhead vendor/lib" \
+	gp submodule status
+expect "update --remote follows the branch instead" \
+	"checked out '$libhead2'" gp submodule update --remote
+expect_out "so the submodule is ahead of the record" "+$libhead vendor/lib" \
+	gp submodule status
+
+# a checkout that would throw away the submodule's own work is refused
+printf 'edited\n' >> vendor/lib/in.txt
+expect_status "an update over local changes is refused" 1 gp submodule update
+expect "and says which submodule" "submodule 'vendor/lib' has local changes" \
+	gp submodule update
+in_sub vendor/lib checkout -- in.txt >/dev/null 2>&1
+expect_status "and once they are put back it goes through" 0 \
+	gp submodule update --force
+
+# foreach runs a command in each submodule, with git's variables set
+expect "foreach says where it is entering" "Entering 'vendor/lib'" \
+	gp submodule foreach 'printf "%s\n%s\n" "$name" "$sha1" > foreach-out.txt'
+expect_out "and runs with the submodule's directory as the cwd, its name and
+the commit the index records in the environment" "vendor/lib
+$libhead" cat vendor/lib/foreach-out.txt
+expect_status "a command that fails is the status of the command" 3 \
+	gp submodule foreach 'exit 3'
+expect_out "and nothing is left behind in the store" "0" \
+	sh -c 'ls .gitprompt/foreach.*.sh 2>/dev/null | wc -l | tr -d " "'
+rm -f vendor/lib/foreach-out.txt
+
+# sync corrects a submodule whose remote has drifted from .gitmodules
+in_sub vendor/lib config remote.origin.url https://example.invalid/x.git
+expect "sync says what it is doing" "Synchronizing submodule url for 'vendor/lib'" \
+	gp submodule sync
+expect_out "and puts the url .gitmodules names back" "../lib" \
+	in_sub vendor/lib config remote.origin.url
+
+# deinit takes the work tree away and leaves the store
+printf 'local edit\n' >> vendor/lib/in.txt
+expect_status "a submodule with local changes is not cleared" 1 \
+	gp submodule deinit vendor/lib
+expect "and the refusal says which submodule" "submodule 'vendor/lib' has local changes" \
+	gp submodule deinit vendor/lib
+in_sub vendor/lib checkout -- in.txt >/dev/null 2>&1
+touch vendor/lib/untracked.txt
+expect_status "nor one holding a file its index never had" 1 \
+	gp submodule deinit vendor/lib
+rm -f vendor/lib/untracked.txt
+expect_status "deinit -f clears it anyway" 0 gp submodule deinit -f vendor/lib
+expect_absent "the work tree is gone" vendor/lib/in.txt
+expect_file "while the store is left alone" .gitprompt/modules/vendor/lib/HEAD
+expect_out "and status shows it unchecked out" "-$libhead vendor/lib" \
+	gp submodule status
+expect_status "update --init brings it back" 0 gp submodule update --init
+expect_file "at the recorded commit" vendor/lib/in.txt
+expect_out "with the submodule's own index back as well" "" \
+	in_sub vendor/lib status --short
+
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

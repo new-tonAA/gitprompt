@@ -208,6 +208,13 @@ int obj_type_valid(enum obj_type t);
 #define MODE_EXEC   0100755
 #define MODE_LINK   0120000
 
+/*
+ * A gitlink: the entry a submodule leaves in the tree that holds it.  It names
+ * a commit, but not one of this repository's -- the commit is in the submodule's
+ * own store -- so nothing here reads it as an object.  git spells it 160000.
+ */
+#define MODE_GITLINK 0160000
+
 struct tree_entry {
 	u32 mode;
 	oid_t oid;
@@ -619,6 +626,13 @@ char *repo_agent_setting(struct repo *r, const char *agent, const char *field,
 int repo_config_set(struct repo *r, const char *key, const char *value,
 		    int global);
 int repo_config_unset(struct repo *r, const char *key);
+/* the same reader and writer, opened to a named file -- `.gitmodules` is a
+ * configuration file by another name, and these are what the submodule
+ * commands read and write it with (repo.c) */
+int config_file_get(const char *path, const char *key, char **out);
+int config_file_set(const char *path, const char *key, const char *value);
+/* the subsection names under `section`, in the order they appear */
+struct slist *config_file_subsections(const char *path, const char *section);
 void repo_config_list(struct repo *r, int global,
 		      void (*fn)(const char *k, const char *v, void *),
 		      void *data);
@@ -760,6 +774,13 @@ int read_tree_into_index(struct repo *r, struct index_state *istate,
  */
 int worktree_dirty_paths(struct repo *r, char ***paths);
 void path_list_free(char **paths);
+
+/*
+ * Whether a working directory would lose anything if it were taken away whole:
+ * a tracked file that differs from the index, or one the index has never heard
+ * of.  Removing a linked worktree and clearing a submodule both refuse on this.
+ */
+int worktree_is_clean(struct repo *r);
 
 /* paths */
 void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
@@ -966,6 +987,16 @@ char *remote_tracking_ref(const char *name, const char *refname);
 void remote_update_local_ref(struct repo *r, const char *name,
 			     const char *refname, const oid_t *oid);
 
+/* the second half of clone: fill an empty repository from a url, leaving the
+ * remote's default branch checked out.  `submodule add` fills a submodule with
+ * the same call (cmd_remote.c) */
+int remote_clone_into(struct repo *r, const char *remote, const char *url);
+
+/* just the fetching half of the above, without a branch to check out: every
+ * branch of `url` comes in under `refs/remotes/<remote>/`.  `submodule update`
+ * fetches a submodule that is already there with this (cmd_remote.c) */
+int remote_fetch_all(struct repo *r, const char *remote, const char *url);
+
 /* ------------------------------------------------------------------ */
 /* command dispatch                                                    */
 
@@ -1036,6 +1067,7 @@ int cmd_apply(struct repo *, int, char **);
 int cmd_range_diff(struct repo *, int, char **);
 int cmd_rerere(struct repo *, int, char **);
 int cmd_worktree(struct repo *, int, char **);
+int cmd_submodule(struct repo *, int, char **);
 
 /*
  * The working directory other than this one that has `branch` checked out, or

@@ -1557,12 +1557,156 @@ static char *remote_head_branch(struct repo *r, const char *url,
 	return fallback;
 }
 
+/*
+ * Bring in everything `url` has, under the name `remote`: every branch it
+ * offers, into `refs/remotes/<remote>/`, with the local odb filled to match.
+ *
+ * Which carrier this goes through is the url's decision, the same way it is
+ * everywhere else here: a local path or a `gp://` remote is read by this
+ * program, and an https or ssh one is handed to git, which is the only thing
+ * that speaks those protocols.  Returns 0, or -1 with the reason reported.
+ */
+int remote_fetch_all(struct repo *r, const char *remote, const char *url)
+{
+	if (!url_is_local(url) && !url_is_gp(url)) {
+		struct buf out = BUF_INIT;
+		const char *args[4];
+		char *refspec;
+		int rc;
+
+		if (!git_available()) {
+			gp_error("%s needs the git binary on PATH", url);
+			return -1;
+		}
+		refspec = xstrfmt("+refs/heads/*:refs/remotes/%s/*", remote);
+		args[0] = "fetch";
+		args[1] = url;
+		args[2] = refspec;
+		args[3] = NULL;
+		rc = run_git(r->gpdir, args, 3, &out);
+		if (rc != 0) {
+			gp_error("fetch failed:\n%s", buf_cstr(&out));
+			buf_release(&out);
+			free(refspec);
+			return -1;
+		}
+		free(refspec);
+		buf_release(&out);
+	} else {
+		struct fetch_collect fc;
+		struct oid_array wants = OID_ARRAY_INIT;
+		size_t i;
+
+		memset(&fc, 0, sizeof fc);
+		remote_read_refs(r, url, remote, fetch_collect_cb, &fc);
+		for (i = 0; i < fc.nr; i++)
+			oid_array_append(&wants, &fc.e[i].oid);
+		remote_fetch_objects(r, url, remote, &wants);
+		for (i = 0; i < fc.nr; i++)
+			remote_update_local_ref(r, remote, fc.e[i].refname,
+						&fc.e[i].oid);
+		oid_array_clear(&wants);
+		fetch_collect_release(&fc);
+	}
+	return 0;
+}
+
+/*
+ * Fill an empty repository from `url`, the way `clone` fills the one it makes:
+ * fetch everything the remote has under the name `remote`, work out which
+ * branch the remote's HEAD is on, make that a local branch, and check it out.
+ *
+ * This is the second half of clone, and it lives apart from cmd_clone so that
+ * `submodule add` can fill a submodule with it rather than with a second copy
+ * of the same fetch.  The caller has already made `r` and set its identity and
+ * prints whatever it wants said before the fetch; the branch's upstream is
+ * configured here, since both callers want that and neither wants it twice.
+ *
+ * Returns 0, or -1 with the reason already reported.
+ */
+int remote_clone_into(struct repo *r, const char *remote, const char *url)
+{
+	char *branch = NULL;
+	int rc = 0;
+
+	remote_add(r, remote, url);
+
+	if (remote_fetch_all(r, remote, url) < 0)
+		return -1;
+
+	branch = remote_head_branch(r, url, remote);
+
+	/* fall back to the usual suspects when the remote's HEAD is unknown */
+	if (!branch) {
+		oid_t probe;
+		char *cand[] = { "main", "master" };
+		size_t i;
+		for (i = 0; i < 2; i++) {
+			char *ref = xstrfmt("refs/remotes/%s/%s", remote, cand[i]);
+			if (refs_read(&r->refs, ref, &probe) == 0)
+				branch = xstrdup(cand[i]);
+			free(ref);
+			if (branch)
+				break;
+		}
+	}
+
+	if (branch) {
+		oid_t oid;
+		char *remote_ref = xstrfmt("refs/remotes/%s/%s", remote, branch);
+		if (refs_read(&r->refs, remote_ref, &oid) == 0) {
+			char *head_ref = xstrfmt("refs/heads/%s", branch);
+			struct commit c = COMMIT_INIT;
+			oid_t tree;
+
+			refs_write(&r->refs, head_ref, &oid);
+			/* git's clone leaves a reflog behind, and without one
+			 * `gitprompt reflog` in a fresh clone fails on a branch
+			 * that the clone itself just created. */
+			{
+				char *msg = xstrfmt("clone: from %s", url);
+				refs_reflog(&r->refs, head_ref, &null_oid, &oid, msg);
+				refs_set_head(&r->refs, head_ref);
+				refs_reflog_head(&r->refs, head_ref, &null_oid, &oid,
+						 msg);
+				free(msg);
+			}
+			read_commit(r, &oid, &c);
+			tree = c.tree;
+			commit_release(&c);
+			checkout_tree(r, &tree, 1, 1);
+			free(head_ref);
+		} else {
+			/* the branch was named but never arrived: saying "done."
+			 * here would hand back an empty checkout */
+			gp_error("fetched no %s, so there is nothing to check out",
+				 remote_ref);
+			rc = -1;
+		}
+		free(remote_ref);
+	} else {
+		gp_warn("the remote has no branches to check out");
+	}
+
+	{
+		char *k = xstrfmt("branch.%s.remote", branch ? branch : "main");
+		char *m = xstrfmt("branch.%s.merge", branch ? branch : "main");
+		char *merge = xstrfmt("refs/heads/%s", branch ? branch : "main");
+		repo_config_set(r, k, remote, 0);
+		repo_config_set(r, m, merge, 0);
+		free(k);
+		free(m);
+		free(merge);
+	}
+
+	free(branch);
+	return rc;
+}
+
 int cmd_clone(struct repo *r, int argc, char **argv)
 {
 	struct opts o;
 	const char *url, *dir;
-	char *name = NULL, *how = NULL;
-	char *branch = NULL;
 	struct repo local;
 	int rc = 0;
 
@@ -1609,121 +1753,13 @@ int cmd_clone(struct repo *r, int argc, char **argv)
 		buf_release(&id);
 	}
 
-	name = xstrdup("origin");
-	how = xstrdup(url);
-
-	remote_add(&local, name, how);
-
-	if (!url_is_local(how) && !url_is_gp(how)) {
-		struct buf out = BUF_INIT;
-		const char *args[4];
-		if (!git_available()) {
-			gp_error("clone: %s needs the git binary on PATH", how);
-			rc = 1;
-			goto done;
-		}
-		args[0] = "fetch";
-		args[1] = how;
-		args[2] = "+refs/heads/*:refs/remotes/origin/*";
-		args[3] = NULL;
-		printf("Cloning from %s ...\n", how);
-		if (run_git(local.gpdir, args, 3, &out) != 0) {
-			gp_error("clone: fetch failed:\n%s", buf_cstr(&out));
-			buf_release(&out);
-			rc = 1;
-			goto done;
-		}
-		buf_release(&out);
+	printf("Cloning from %s ...\n", url);
+	if (remote_clone_into(&local, "origin", url) < 0) {
+		rc = 1;
 	} else {
-		struct fetch_collect fc;
-		size_t i;
-		struct oid_array wants = OID_ARRAY_INIT;
-
-		memset(&fc, 0, sizeof fc);
-		remote_read_refs(&local, how, name, fetch_collect_cb, &fc);
-		for (i = 0; i < fc.nr; i++)
-			oid_array_append(&wants, &fc.e[i].oid);
-		printf("Cloning from %s ...\n", how);
-		remote_fetch_objects(&local, how, name, &wants);
-		for (i = 0; i < fc.nr; i++)
-			remote_update_local_ref(&local, name, fc.e[i].refname,
-						&fc.e[i].oid);
-		oid_array_clear(&wants);
-		fetch_collect_release(&fc);
+		printf("done.\n");
 	}
 
-	branch = remote_head_branch(&local, how, name);
-
-	/* fall back to the usual suspects when the remote's HEAD is unknown */
-	if (!branch) {
-		oid_t probe;
-		char *cand[] = { "main", "master" };
-		size_t i;
-		for (i = 0; i < 2; i++) {
-			char *ref = xstrfmt("refs/remotes/%s/%s", name, cand[i]);
-			if (refs_read(&local.refs, ref, &probe) == 0)
-				branch = xstrdup(cand[i]);
-			free(ref);
-			if (branch)
-				break;
-		}
-	}
-
-	if (branch) {
-		oid_t oid;
-		char *remote_ref = xstrfmt("refs/remotes/%s/%s", name, branch);
-		if (refs_read(&local.refs, remote_ref, &oid) == 0) {
-			char *head_ref = xstrfmt("refs/heads/%s", branch);
-			struct commit c = COMMIT_INIT;
-			oid_t tree;
-
-			refs_write(&local.refs, head_ref, &oid);
-			/* git's clone leaves a reflog behind, and without
-			 * one `gitprompt reflog` in a fresh clone fails on a
-			 * branch that the clone itself just created. */
-			{
-				char *msg = xstrfmt("clone: from %s", how);
-				refs_reflog(&local.refs, head_ref, &null_oid, &oid,
-					    msg);
-				refs_set_head(&local.refs, head_ref);
-				refs_reflog_head(&local.refs, head_ref, &null_oid,
-						 &oid, msg);
-				free(msg);
-			}
-			read_commit(&local, &oid, &c);
-			tree = c.tree;
-			commit_release(&c);
-			checkout_tree(&local, &tree, 1, 1);
-			free(head_ref);
-		} else {
-			/* the branch was named but never arrived: saying
-			 * "done." here would hand back an empty checkout */
-			gp_error("clone: fetched no %s, so there is nothing to "
-				 "check out", remote_ref);
-			rc = 1;
-		}
-		free(remote_ref);
-	} else {
-		gp_warn("clone: the remote has no branches to check out");
-	}
-
-	{
-		char *k = xstrfmt("branch.%s.remote", branch ? branch : "main");
-		char *m = xstrfmt("branch.%s.merge", branch ? branch : "main");
-		char *merge = xstrfmt("refs/heads/%s", branch ? branch : "main");
-		repo_config_set(&local, k, name, 0);
-		repo_config_set(&local, m, merge, 0);
-		free(k);
-		free(m);
-		free(merge);
-	}
-
-	printf("done.\n");
-
-done:
-	free(branch);
-	free(name);
-	free(how);
 	repo_release(&local);
 	if (!opts_arg(&o, 1))
 		free((char *)dir);

@@ -426,6 +426,16 @@ const struct command commands[] = {
 	  "   worktree prune [-n] [-v]\n"
 	  "   Every worktree shares the objects and the refs and keeps its own HEAD\n"
 	  "   and index, so a second one is a second place to work, not a copy." },
+	{ "submodule",  cmd_submodule,  "A repository inside a repository",
+	  "submodule add <url> [<path>]\n"
+	  "   submodule status\n"
+	  "   submodule init [<path>...]\n"
+	  "   submodule update [--init] [--remote] [<path>...]\n"
+	  "   submodule sync [<path>...]\n"
+	  "   submodule deinit [-f] <path>...\n"
+	  "   submodule foreach <command>\n"
+	  "   The path is a directory holding a checkout of another repository,\n"
+	  "   which has its own store under this one's `modules/`." },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",

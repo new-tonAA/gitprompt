@@ -629,6 +629,39 @@ static int parse_key_value(const char *line, char **key, char **value)
 	return 0;
 }
 
+/*
+ * The names of the subsections of `section` -- the `sub` in `[section "sub"]`
+ * -- in the order they appear.  A repeated subsection is named once.  This is
+ * how the entries of `.gitmodules` are enumerated, since it is the subsection
+ * that names a submodule and the keys under it are what describe one.
+ */
+struct slist *config_file_subsections(const char *path, const char *section)
+{
+	struct lines l;
+	struct slist *out = xcalloc(1, sizeof(*out));
+	size_t i, j;
+
+	lines_load(&l, path);
+	for (i = 0; i < l.nr; i++) {
+		char *s, *sub;
+		int seen = 0;
+
+		if (parse_header(l.v[i], &s, &sub) != 0)
+			continue;
+		if (sub && !stricmp_ascii(s, section)) {
+			for (j = 0; j < out->nr; j++)
+				if (!strcmp(out->v[j], sub))
+					seen = 1;
+			if (!seen)
+				slist_push(out, sub);
+		}
+		free(s);
+		free(sub);
+	}
+	lines_free(&l);
+	return out;
+}
+
 static int config_lookup_file(const char *path, const char *key, char **out)
 {
 	struct lines l;
@@ -680,31 +713,6 @@ static int config_lookup_file(const char *path, const char *key, char **out)
 	return found;
 }
 
-int repo_config_get(struct repo *r, const char *key, char **out)
-{
-	char *path;
-
-	if (out)
-		*out = NULL;
-	path = local_config_path(r);
-	if (path) {
-		if (config_lookup_file(path, key, out) == 0) {
-			free(path);
-			return 0;
-		}
-		free(path);
-	}
-	path = global_config_path();
-	if (path) {
-		if (config_lookup_file(path, key, out) == 0) {
-			free(path);
-			return 0;
-		}
-		free(path);
-	}
-	return -1;
-}
-
 /*
  * One piece of how an agent is driven: `gitprompt.agent.<name>.<field>`.
  *
@@ -733,18 +741,44 @@ char *repo_agent_setting(struct repo *r, const char *agent, const char *field,
 	return builtin ? xstrdup(builtin) : NULL;
 }
 
-int repo_config_set(struct repo *r, const char *key, const char *value,
-		    int global)
+int repo_config_get(struct repo *r, const char *key, char **out)
 {
-	char *path = global ? global_config_path() : local_config_path(r);
+	char *path;
+
+	if (out)
+		*out = NULL;
+	path = local_config_path(r);
+	if (path) {
+		if (config_lookup_file(path, key, out) == 0) {
+			free(path);
+			return 0;
+		}
+		free(path);
+	}
+	path = global_config_path();
+	if (path) {
+		if (config_lookup_file(path, key, out) == 0) {
+			free(path);
+			return 0;
+		}
+		free(path);
+	}
+	return -1;
+}
+
+/* the same reader, opened to a named file: `.gitmodules` is read this way */
+int config_file_get(const char *path, const char *key, char **out)
+{
+	return config_lookup_file(path, key, out);
+}
+
+int config_file_set(const char *path, const char *key, const char *value)
+{
 	struct lines l;
 	char *want_section, *want_sub, *want_name;
 	char *cur_section = NULL, *cur_sub = NULL;
 	size_t i;
 	int done = 0, insert_at = -1;
-
-	if (!path)
-		return -1;
 
 	split_key(key, &want_section, &want_sub, &want_name);
 	lines_load(&l, path);
@@ -819,8 +853,20 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 	free(want_name);
 	lines_save(&l, path);
 	lines_free(&l);
-	free(path);
 	return 0;
+}
+
+int repo_config_set(struct repo *r, const char *key, const char *value,
+		    int global)
+{
+	char *path = global ? global_config_path() : local_config_path(r);
+	int rc;
+
+	if (!path)
+		return -1;
+	rc = config_file_set(path, key, value);
+	free(path);
+	return rc;
 }
 
 int repo_config_unset(struct repo *r, const char *key)
