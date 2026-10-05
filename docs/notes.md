@@ -839,6 +839,52 @@ not, because on Windows a variable's name is matched without regard to case and
 setting `path` would take the `PATH` with it. `git` leaves `path` out for the
 same reason.
 
+## Only part of the index in the work tree
+
+Sparse checkout is easy to misread as "some paths are not tracked". They are all
+tracked. A sparse work tree is a work tree that has been told to keep only part
+of what the index holds, and the difference between the two has to be recorded
+somewhere or every command that compares the index to the work tree would read
+the missing paths as deletions.
+
+Git records it in the index itself, as a per-entry bit -- skip-worktree, the
+same bit `update-index --skip-worktree` sets by hand. Every entry stays; the bit
+on it says this work tree is not the place that path lives. That is what makes
+`status` quiet about it, what keeps `commit -a` from staging a deletion, and
+what `ls-files -t` prints as `S` instead of `H`. It is also why nothing here
+thins the index: the index is the list of what is tracked, and it does not get
+shorter.
+
+The bit has no room in version 2 of the index. The version 2 entry is a fixed
+62 bytes and then the name, so there is nowhere for a second flags word to go;
+version 3 puts one between the flags and the name, and the length of the name
+that follows is what shifts. That is the whole of the difference, and it is a
+difference that matters to whoever reads the file: the path in a version 3 entry
+starts at 64, not 62, and a reader that assumes 62 reads the second flags word as
+the first two letters of the name. The suite checks both directions -- git reads
+the bit gitprompt set, and gitprompt reads the bit git set -- because a bug here
+is invisible until someone else opens the file.
+
+The patterns are the other half, and they are git's: one to a line in
+`info/sparse-checkout`, `#` for a comment, a leading `!` to exclude, a trailing
+`/` for a directory only. What is worth saying twice is the default. A path that
+no line names is *not* in the work tree, so an empty pattern file is an empty
+work tree, and a file of nothing but negations excludes everything they do not
+name. The last line that matches decides, which is what makes a list read as a
+series of corrections. It also explains what `init` writes: not an empty file,
+which would take the whole work tree away, but two lines -- everything at the
+top, then no directories -- which is what git writes and what leaves you with
+the top-level files and nothing else.
+
+Only the pattern list is here. Git's cone mode is a way of asking for that same
+list in terms of directories, and expanding it is a convenience gitprompt does
+not have, so a large cone has to be written out by hand. And the bit is only
+honored where the work tree is walked: a checkout, a status, a `commit -a`, a
+branch switch. The rest of git's sparse machinery -- a sparse index, `add
+--sparse`, the `--sparse` option on the commands that take a pathspec -- is not
+here, so a marked path is one nothing writes to, not one that has a second class
+of behavior everywhere.
+
 ## Transports
 
 | URL form | how it works |

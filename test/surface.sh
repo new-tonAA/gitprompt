@@ -1106,6 +1106,92 @@ else
 	skip "and names the same commit in its own status (no git)"
 fi
 
+say "a work tree that holds only part of the index, read back by git"
+
+# Sparse checkout leaves two things behind that git has to be able to read: an
+# index carrying the skip-worktree bit, and a pattern list in git's own format
+# in git's own file.  The index is the harder half, because the bit lives in a
+# second flags word that only version 3 of the format has room for, so git
+# reading the bit gitprompt wrote is the check that means something -- and the
+# other direction, git setting the bit and gitprompt reading it, is the same
+# claim from the other side.
+#
+# The patterns begin with a slash, and the shell this may run under on Windows
+# rewrites such an argument into a Windows path before gitprompt or git ever
+# sees it.  Rewriting is off for this section; the variable means nothing on the
+# other two runners.
+MSYS_NO_PATHCONV=1
+export MSYS_NO_PATHCONV
+
+foursome() {
+	mkdir -p src docs || exit 2
+	printf 'a\n' > src/a.c
+	printf 'b\n' > src/b.h
+	printf 'd\n' > docs/d.md
+	printf 'r\n' > README.md
+}
+
+if [ "$have_git" = 1 ]; then
+	rm -rf "$work/sp-gp" "$work/sp-git"
+
+	mkdir -p "$work/sp-gp" || exit 2
+	cd "$work/sp-gp" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name Surface
+	foursome
+	"$GP" add . >/dev/null
+	"$GP" commit -m "one of each" >/dev/null
+	"$GP" sparse-checkout set '/src/*.c' >/dev/null
+
+	chk "git reads the skip-worktree bits gitprompt wrote" \
+		"S README.md
+S docs/d.md
+H src/a.c
+S src/b.h" "$(git --git-dir=.gitprompt --work-tree=. ls-files -t)"
+	chk "and the pattern list, through git's own reader" "/src/*.c" \
+		"$(git --git-dir=.gitprompt --work-tree=. sparse-checkout list)"
+	# -uno, because git is being pointed at a store it did not lay out: the
+	# directory holding it is not a `.git`, so git would otherwise offer it up
+	# as an untracked directory.  What this is asking is whether git agrees
+	# about the tracked files.
+	chk "and agrees about the tracked files on disk" "" \
+		"$(git --git-dir=.gitprompt --work-tree=. status --short -uno)"
+
+	# the other direction: git sets the bits, gitprompt reads them.  git keeps
+	# the switch in a work tree's own configuration file when
+	# `extensions.worktreeConfig` is on, which is what its own sparse-checkout
+	# turns on, so this also checks that gitprompt looks where git wrote.
+	mkdir -p "$work/sp-git" || exit 2
+	cd "$work/sp-git" || exit 2
+	"$GP" init . >/dev/null
+	"$GP" config user.email s@example.com
+	"$GP" config user.name Surface
+	foursome
+	"$GP" add . >/dev/null
+	"$GP" commit -m "one of each" >/dev/null
+	git --git-dir=.gitprompt --work-tree=. sparse-checkout set --no-cone \
+		'/src/*.c' >/dev/null 2>&1
+
+	chk "gitprompt reads the bits git set" \
+		"S README.md
+S docs/d.md
+H src/a.c
+S src/b.h" "$("$GP" ls-files -t)"
+	chk "and the pattern list git wrote" "/src/*.c" \
+		"$("$GP" sparse-checkout list)"
+	chk "and takes no exception to the work tree git left" "" \
+		"$("$GP" status --short)"
+else
+	skip "git reads the skip-worktree bits gitprompt wrote (no git)"
+	skip "and the pattern list, through git's own reader (no git)"
+	skip "and agrees about the tracked files on disk (no git)"
+	skip "gitprompt reads the bits git set (no git)"
+	skip "and the pattern list git wrote (no git)"
+	skip "and takes no exception to the work tree git left (no git)"
+fi
+
+unset MSYS_NO_PATHCONV
 cd "$repo" || exit 2
 
 # ---------------------------------------------------------------- the prompt layer

@@ -926,11 +926,20 @@ int cmd_ls_files(struct repo *r, int argc, char **argv)
 	struct opts o;
 	struct index_state ist;
 	size_t i;
-	int show_stage;
+	int show_stage, show_tag;
 
 	opts_init(&o, argc, argv, (const char *const[]){
-		"-s", "--stage", NULL });
+		"-s", "--stage", "-t", NULL });
 	show_stage = opts_flag(&o, "-s") || opts_flag(&o, "--stage");
+	/*
+	 * git refuses the two together, and the reason is that each one is about to
+	 * print a different first field.
+	 */
+	show_tag = opts_flag(&o, "-t");
+	if (show_tag && show_stage) {
+		gp_error("ls-files: -t and -s cannot be used together");
+		return 1;
+	}
 
 	memset(&ist, 0, sizeof ist);
 	index_read(&ist, repo_index_path(r));
@@ -943,7 +952,16 @@ int cmd_ls_files(struct repo *r, int argc, char **argv)
 			if (!matched)
 				continue;
 		}
-		if (show_stage) {
+		if (show_tag) {
+			/*
+			 * H for a path the work tree is expected to hold, S for one
+			 * sparse checkout left out of it -- the two tags git prints for
+			 * the states this index has.
+			 */
+			printf("%c %s\n",
+			       (ist.e[i].flags & IDX_FLAG_SKIP_WORKTREE) ? 'S' : 'H',
+			       ist.e[i].path);
+		} else if (show_stage) {
 			char hex[GP_SHA1_HEXSZ + 1];
 			oid_hex(&ist.e[i].oid, hex);
 			printf("%06o %s %u\t%s\n", ist.e[i].mode, hex,

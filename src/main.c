@@ -436,6 +436,14 @@ const struct command commands[] = {
 	  "   submodule foreach <command>\n"
 	  "   The path is a directory holding a checkout of another repository,\n"
 	  "   which has its own store under this one's `modules/`." },
+	{ "sparse-checkout", cmd_sparse_checkout,
+	  "A work tree that holds only part of the index",
+	  "sparse-checkout init\n"
+	  "   sparse-checkout set <pattern>...\n"
+	  "   sparse-checkout list\n"
+	  "   sparse-checkout disable\n"
+	  "   Every path stays tracked; the work tree is the part the patterns\n"
+	  "   name, and the rest is marked skip-worktree so nothing misses it." },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",

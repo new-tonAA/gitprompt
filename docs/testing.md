@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1499 checks, 0 failures** — 1317 in
-`test/smoke.sh`, 146 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1549 checks, 0 failures** — 1361 in
+`test/smoke.sh`, 152 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -94,7 +94,14 @@ url that has drifted from `.gitmodules`, `foreach` runs with the submodule's
 directory as its cwd and its name, path and commit in the environment and
 leaves no script behind, and `deinit` refuses a submodule that holds either a
 changed tracked file or one its index never had, clearing it only under `-f`
-while its store stays.
+while its store stays. A work tree is told to hold only part of the index: the
+paths a pattern list names are the ones on disk, the ones it leaves out are
+taken away and marked in the index so that `ls-files -t` calls them `S` where a
+path kept is `H`, `status` is clean and `commit -a` leaves their entries alone
+rather than reading their absence as a deletion, a branch switch carries the
+same sparse state across, a later line takes an earlier pattern back, `init`
+writes the pattern list git's own `init` writes, and `disable` puts every path
+back and removes the switch from the configuration.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -135,7 +142,14 @@ are written by gitprompt and read by git — `git ls-files -s`, `git config -f`
 and `git submodule status` all on gitprompt's output — and, the other way, a
 commit git makes is pushed into a gitprompt store and checked out by
 `gitprompt submodule add`, which is the sharpest form of the claim that a
-gitprompt store is an ordinary git object store. Two
+gitprompt store is an ordinary git object store. `sparse-checkout` is compared
+through the file the two tools share, in both directions: `git ls-files -t` and
+`git sparse-checkout list` read the bit and the pattern list gitprompt wrote,
+and `gitprompt ls-files -t`, `gitprompt sparse-checkout list` and a `status`
+read what `git sparse-checkout set` wrote — which is the check that means
+something, since the skip-worktree bit lives in a second flags word that only
+version 3 of the index has room for, and a reader that assumed version 2 would
+take those two bytes for the first two letters of the path. Two
 things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.

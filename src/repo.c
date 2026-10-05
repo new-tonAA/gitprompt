@@ -872,14 +872,24 @@ int repo_config_set(struct repo *r, const char *key, const char *value,
 int repo_config_unset(struct repo *r, const char *key)
 {
 	char *path = local_config_path(r);
+	int rc;
+
+	if (!path)
+		return -1;
+	rc = config_file_unset(path, key);
+	free(path);
+	return rc;
+}
+
+/* the same reader's opposite, opened to a named file: see config_file_get */
+int config_file_unset(const char *path, const char *key)
+{
 	struct lines l;
 	char *want_section, *want_sub, *want_name;
 	char *cur_section = NULL, *cur_sub = NULL;
 	size_t i;
 	int removed = 0;
 
-	if (!path)
-		return -1;
 	split_key(key, &want_section, &want_sub, &want_name);
 	lines_load(&l, path);
 
@@ -923,7 +933,6 @@ int repo_config_unset(struct repo *r, const char *key)
 	if (removed)
 		lines_save(&l, path);
 	lines_free(&l);
-	free(path);
 	return removed ? 0 : -1;
 }
 

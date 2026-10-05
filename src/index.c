@@ -1,9 +1,11 @@
 /*
- * index.c - the staging area, in git's binary index version 2 format.
+ * index.c - the staging area, in git's binary index format.
  *
  * Header "DIRC", a version, a count, then one fixed-size record per entry
  * (a stat block, the id, flags, the path itself, NUL, padded to a multiple
  * of eight bytes), then the whole thing SHA-1'd.  Big-endian throughout.
+ * Version 2 is written unless a path needs the second flags word version 3
+ * has room for -- that word is where skip-worktree lives -- and both are read.
  *
  * An entry is a path at a merge stage.  Most paths have one entry, at stage
  * 0; a path in conflict has its base, our version and their version as three
@@ -30,8 +32,26 @@
 #endif
 
 #define IDX_SIGNATURE "DIRC"
+/*
+ * Two versions are written, and the choice is not a preference: an entry whose
+ * skip-worktree bit is set has to carry a second flags word beside the path,
+ * and only version 3 has anywhere to put it.  So a plain index stays version 2
+ * and an index with any sparse path in it becomes version 3, which is the rule
+ * git follows and the reason both are read here.
+ */
 #define IDX_VERSION 2
+#define IDX_VERSION_EXTENDED 3
 #define IDX_ENTRY_FIXED 62       /* everything up to and including flags */
+
+/*
+ * In the first flags word the second-highest bit is not a flag of its own but
+ * the marker saying a second word follows the path -- which is where
+ * skip-worktree lives, since the low bits are taken by the merge stage and the
+ * name length.  The two names collide in value and mean different things, so
+ * they are kept apart: one is the marker on disk, the other is the bit in
+ * `struct index_entry.flags`.
+ */
+#define IDX_F_EXTENDED 0x4000            /* on disk, in the first word */
 
 static void put_be32(struct buf *b, u32 v)
 {
@@ -236,7 +256,7 @@ void index_read(struct index_state *istate, const char *path)
 {
 	struct buf b;
 	const u8 *p;
-	u32 count, i;
+	u32 count, i, version;
 	gp_sha1_ctx ctx;
 	u8 want[GP_SHA1_RAWSZ];
 
@@ -261,7 +281,8 @@ void index_read(struct index_state *istate, const char *path)
 		buf_release(&b);
 		return;
 	}
-	if (get_be32(b.b + 4) != IDX_VERSION) {
+	version = get_be32(b.b + 4);
+	if (version != IDX_VERSION && version != IDX_VERSION_EXTENDED) {
 		gp_error("unsupported index version %u in %s",
 			 (unsigned)get_be32(b.b + 4), path);
 		buf_release(&b);
@@ -273,7 +294,7 @@ void index_read(struct index_state *istate, const char *path)
 	for (i = 0; i < count; i++) {
 		struct index_entry e;
 		u16 flags, namelen;
-		size_t entlen;
+		size_t entlen, hdrsz;
 
 		if ((size_t)(p - b.b) + IDX_ENTRY_FIXED > b.len - GP_SHA1_RAWSZ)
 			break;
@@ -292,16 +313,33 @@ void index_read(struct index_state *istate, const char *path)
 		flags = get_be16(p + 60);
 		namelen = (u16)(flags & 0x0fff);
 		/*
-		 * Only the assume-valid bit is carried through.  Bits 12-13 are
-		 * the merge stage, which has a field of its own from here on, and
-		 * the extended bit says a second flags word follows the path --
-		 * one gitprompt cannot write back, so it must not claim it.
+		 * Only the assume-valid bit and skip-worktree are carried through.
+		 * Bits 12-13 are the merge stage, which has a field of its own from
+		 * here on, and the extended bit says a second flags word follows the
+		 * path -- which is where skip-worktree lives, so it is read when the
+		 * entry claims one and the entry is that much longer for it.
 		 */
-		e.flags = flags & (u16)0x8000;
+		e.flags = flags & IDX_FLAG_ASSUME_VALID;
 		e.stage = (u16)((flags >> 12) & 3);
-		entlen = IDX_ENTRY_FIXED + namelen;
-		entlen = (entlen + 8) & ~(size_t)7;    /* pad to 8 */
-		e.path = xstrndup((const char *)p + IDX_ENTRY_FIXED, namelen);
+		/*
+		 * The second flags word sits between the first one and the path --
+		 * which is what makes the path start two bytes later, not what makes
+		 * the record two bytes longer at the far end.
+		 */
+		hdrsz = IDX_ENTRY_FIXED;
+		if (flags & IDX_F_EXTENDED) {
+			u16 ext;
+
+			if ((size_t)(p - b.b) + IDX_ENTRY_FIXED + 2 >
+			    b.len - GP_SHA1_RAWSZ)
+				break;
+			ext = get_be16(p + IDX_ENTRY_FIXED);
+			if (ext & IDX_FLAG_SKIP_WORKTREE)
+				e.flags |= IDX_FLAG_SKIP_WORKTREE;
+			hdrsz += 2;
+		}
+		entlen = (hdrsz + namelen + 8) & ~(size_t)7;    /* pad to 8 */
+		e.path = xstrndup((const char *)p + hdrsz, namelen);
 		index_push(istate, &e);
 		free(e.path);
 		p += entlen;
@@ -349,13 +387,17 @@ void index_write(const struct index_state *istate, const char *path)
 
 	buf_init(&b);
 	buf_add(&b, IDX_SIGNATURE, 4);
-	put_be32(&b, IDX_VERSION);
+	for (i = 0; i < istate->nr; i++)
+		if (sorted[i].flags & IDX_FLAG_SKIP_WORKTREE)
+			break;
+	put_be32(&b, i < istate->nr ? IDX_VERSION_EXTENDED : IDX_VERSION);
 	put_be32(&b, (u32)istate->nr);
 
 	for (i = 0; i < istate->nr; i++) {
 		const struct index_entry *e = &sorted[i];
 		size_t start = b.len;
 		size_t namelen = strlen(e->path);
+		int extended = (e->flags & IDX_FLAG_SKIP_WORKTREE) != 0;
 		u16 flags;
 
 		put_be32(&b, e->ctime_sec);
@@ -370,10 +412,15 @@ void index_write(const struct index_state *istate, const char *path)
 		put_be32(&b, e->size);
 		buf_add(&b, e->oid.raw, GP_SHA1_RAWSZ);
 
-		flags = (u16)(e->flags & (u16)~0x0fff);
+		flags = (u16)(e->flags & IDX_FLAG_ASSUME_VALID);
 		flags |= (u16)((e->stage & 3) << 12);
 		flags |= (u16)(namelen < 0x0fff ? namelen : 0x0fff);
+		if (extended)
+			flags |= IDX_F_EXTENDED;
 		put_be16(&b, flags);
+		/* the second flags word, between the first one and the name */
+		if (extended)
+			put_be16(&b, IDX_FLAG_SKIP_WORKTREE);
 
 		buf_add(&b, e->path, namelen);
 		buf_addch(&b, '\0');

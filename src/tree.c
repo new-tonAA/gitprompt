@@ -226,6 +226,13 @@ static void rti_cb(const char *path, u32 mode, const oid_t *oid, void *ud)
 	       : (mode & 0170000) == 0120000 ? MODE_LINK
 	       : (mode & 0100) ? MODE_EXEC : MODE_BLOB;
 	e.oid = *oid;
+	/*
+	 * The path is recorded either way -- sparse checkout does not thin the index
+	 * -- and what says "not in this work tree" is the flag, so that a later
+	 * `status` or walk does not read the absence as a deletion.
+	 */
+	if (sparse_skips(c->r, path))
+		e.flags |= IDX_FLAG_SKIP_WORKTREE;
 	e.path = (char *)path;
 	index_fill_stat(&e, full);
 	index_add(c->ist, &e);
@@ -252,8 +259,8 @@ struct co_ctx {
 	int wrote;
 };
 
-static void co_write_file(struct repo *r, const char *relpath, u32 mode,
-			  const oid_t *oid)
+void checkout_path(struct repo *r, const char *relpath, u32 mode,
+		   const oid_t *oid)
 {
 	char *full = xstrfmt("%s/%s", r->root, relpath);
 	char *dir = xstrdup(full);
@@ -314,7 +321,16 @@ static void co_write_file(struct repo *r, const char *relpath, u32 mode,
 static void co_cb(const char *path, u32 mode, const oid_t *oid, void *ud)
 {
 	struct co_ctx *c = ud;
-	co_write_file(c->r, path, mode, oid);
+
+	/*
+	 * A path the sparse-checkout patterns leave out is not written and not
+	 * counted: it is tracked, it is in the index, and this work tree is simply
+	 * not the place it lives.  The index gets the skip-worktree bit below, which
+	 * is what keeps everything else from treating its absence as a deletion.
+	 */
+	if (sparse_skips(c->r, path))
+		return;
+	checkout_path(c->r, path, mode, oid);
 	c->wrote++;
 }
 

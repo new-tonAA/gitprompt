@@ -753,6 +753,13 @@ int cmd_status(struct repo *r, int argc, char **argv)
 		 */
 		if ((e->mode & 0170000) == 0160000)
 			continue;
+		/*
+		 * Nor is a sparse path missing: the index says in so many words that
+		 * this work tree is not supposed to have it, so its absence is the
+		 * arrangement working, not a change to report.
+		 */
+		if (e->flags & IDX_FLAG_SKIP_WORKTREE)
+			continue;
 		if (!slist_has(&wt, e->path)) {
 			found = 0;              /* deleted from the work tree */
 		} else {
@@ -1155,6 +1162,13 @@ int cmd_commit(struct repo *r, int argc, char **argv)
 		index_read(&ist, repo_index_path(r));
 		worktree_paths(r, &wt);
 		for (i = 0; i < ist.nr; i++) {
+			/*
+			 * `commit -a` takes in what the work tree shows, and a sparse
+			 * path shows nothing because it was never meant to be here --
+			 * not because it was deleted.  It keeps its entry.
+			 */
+			if (ist.e[i].flags & IDX_FLAG_SKIP_WORKTREE)
+				continue;
 			if (slist_has(&wt, ist.e[i].path)) {
 				stage_into(r, &ist, ist.e[i].path);
 			} else {

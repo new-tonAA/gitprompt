@@ -474,6 +474,14 @@ size_t pack_drop_redundant(struct odb *o, const oid_t *seen, size_t nr_seen,
 /* index (git's index v2, byte for byte)                               */
 
 /*
+ * The two index flags that survive a round trip through the file.  Skip-worktree
+ * is the one sparse checkout is built on: it says the path is tracked but is not
+ * meant to be in this work tree, so nothing is expected of it there.
+ */
+#define IDX_FLAG_ASSUME_VALID  0x8000
+#define IDX_FLAG_SKIP_WORKTREE 0x4000
+
+/*
  * `stage` is git's merge stage: 0 for an ordinary entry, 1 for the merge
  * base, 2 for ours and 3 for theirs.  A path is "unmerged" when the index
  * holds any entry for it above stage 0, and then it has no stage-0 entry.
@@ -631,6 +639,7 @@ int repo_config_unset(struct repo *r, const char *key);
  * commands read and write it with (repo.c) */
 int config_file_get(const char *path, const char *key, char **out);
 int config_file_set(const char *path, const char *key, const char *value);
+int config_file_unset(const char *path, const char *key);
 /* the subsection names under `section`, in the order they appear */
 struct slist *config_file_subsections(const char *path, const char *section);
 void repo_config_list(struct repo *r, int global,
@@ -767,6 +776,12 @@ int hash_worktree_blob(struct repo *r, const char *relpath, oid_t *oid, u32 *mod
 int checkout_tree(struct repo *r, const oid_t *tree, int force, int update_index);
 int read_tree_into_index(struct repo *r, struct index_state *istate,
 			 const oid_t *tree, const char *prefix);
+/*
+ * One blob out to the work tree at its path, directories and mode included --
+ * the step a checkout is made of, on its own because putting back what a sparse
+ * checkout left out is exactly one of these (tree.c, cmd_sparse.c).
+ */
+void checkout_path(struct repo *r, const char *relpath, u32 mode, const oid_t *oid);
 
 /*
  * The paths whose work tree file differs from what the index holds -- what a
@@ -787,6 +802,12 @@ void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
 /* a glob against a whole single name -- no slash in either, anchored at both
  * ends (ignore.c, which owns the matcher) */
 int glob_match_name(const char *pattern, const char *name);
+/*
+ * The same matcher over a whole path from the root, which is what a
+ * sparse-checkout pattern is -- one language, two readers (ignore.c, and the
+ * caller relpath is relative to the root either way).
+ */
+int path_match_root(const char *pattern, const char *relpath);
 int path_is_ignored(struct repo *r, const char *relpath);
 int path_is_ignored_dir(struct repo *r, const char *relpath);
 void ignore_forget(void);       /* the index was written: look at it again */
@@ -1068,7 +1089,14 @@ int cmd_range_diff(struct repo *, int, char **);
 int cmd_rerere(struct repo *, int, char **);
 int cmd_worktree(struct repo *, int, char **);
 int cmd_submodule(struct repo *, int, char **);
-
+int cmd_sparse_checkout(struct repo *, int, char **);
+/*
+ * Whether a sparse-checkout pattern list leaves this path out of the work tree.
+ * No is the answer whenever sparse checkout is off, which is the usual case, and
+ * the patterns are read once per repository (cmd_sparse.c).
+ */
+int sparse_skips(struct repo *r, const char *relpath);
+void sparse_forget(void);
 /*
  * The working directory other than this one that has `branch` checked out, or
  * NULL -- what `checkout` refuses on, since one branch has one HEAD (cmd_worktree.c).

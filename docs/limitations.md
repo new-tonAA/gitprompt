@@ -39,14 +39,14 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 73. Missing are credential helpers and
-  sparse checkout. The object model, the index, committing, history, branches,
+  gitprompt built from this tree lists 74. Missing is the credential helper
+  protocol. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
   reusing a conflict's resolution, setting work aside, tags, reset, the ref
   plumbing, remotes, the prompt layer, a second working directory with
-  `worktree`, a repository nested in another with `submodule`, and the
-  object-store maintenance `archive`, `notes`, `gc`, `repack` and `prune` are
-  all here.
+  `worktree`, a repository nested in another with `submodule`, a work tree that
+  holds only part of the index with `sparse-checkout`, and the object-store
+  maintenance `archive`, `notes`, `gc`, `repack` and `prune` are all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -148,6 +148,27 @@ counterpart here, is in [The commands](commands.md).
   a plain git repository at a local path is not a form a local fetch reads, the
   same way `remote` will not take one. The reasoning is in
   [Notes](notes.md#a-repository-inside-a-repository).
+- **`sparse-checkout`, at its edges.** The index is not thinned: every path is
+  still in it, and what says a path is not in this work tree is the
+  skip-worktree bit, which is why `ls-files -t` prints `S` for one. That bit
+  only has a place to live in version 3 of the index format, so a repository
+  that has any sparse path writes version 3 -- which git reads, the two
+  directions of it are in the surface suite. The patterns are git's, in git's
+  `info/sparse-checkout` and in git's syntax, with the one difference the file
+  itself carries: they are read from the root, so a pattern with no leading
+  slash still means the top of the tree. The last line that matches decides and
+  a path no line matches is out, so an empty pattern file is an empty work tree;
+  `init` writes the two lines git's own `init` writes, which keeps the files at
+  the top and cuts the directories. Only the pattern list is here -- `--cone`,
+  `--no-cone`, `--stdin`, `-z` and the sparse-index files are refused as unknown
+  options, so the directory expansion cone mode does has to be written out by
+  hand, and `reapply` is not here. What is also not here is the rest of the
+  tree learning about it: a `checkout` writes no marked path and marks what it
+  read into the index, `status` does not call a missing marked path a deletion,
+  `commit -a` leaves its entry alone and `ls-files -t` reports it, but a sparse
+  index, `add --sparse` and the `--sparse` option on commands that take a
+  pathspec are not implemented. The reasoning is in
+  [Notes](notes.md#only-part-of-the-index-in-the-work-tree).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

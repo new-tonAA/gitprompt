@@ -6062,6 +6062,141 @@ expect_out "with the submodule's own index back as well" "" \
 cd "$back" || exit 2
 
 # ------------------------------------------------------------------
+say "a work tree that holds only part of the index"
+
+# Sparse checkout leaves every path in the index and takes some out of the work
+# tree, and the marker for that is the index's skip-worktree bit.  So there are
+# two halves to check: what lands on disk after a checkout, and what `status`
+# and `ls-files` say about the paths that did not.
+#
+# The patterns start with a slash, and on Windows the shell that runs this
+# suite rewrites an argument that starts with a slash into a Windows path --
+# `/src/*.c` would reach gitprompt as `C:/Program Files/Git/src/*.c`.  So path
+# rewriting is off for this section.  The variable means nothing elsewhere.
+MSYS_NO_PATHCONV=1
+export MSYS_NO_PATHCONV
+
+sproot=$work/sparse
+rm -rf "$sproot"
+mkdir -p "$sproot/src" "$sproot/docs" || exit 2
+cd "$sproot" || exit 2
+gp init . >/dev/null 2>&1
+printf 'a\n' > src/a.c
+printf 'b\n' > src/b.h
+printf 'd\n' > docs/d.md
+printf 'r\n' > README.md
+gp add . >/dev/null 2>&1
+gp commit -m "one of each" >/dev/null 2>&1
+
+expect_out "before any pattern is set nothing is held back" \
+	"H README.md
+H docs/d.md
+H src/a.c
+H src/b.h" gp ls-files -t
+expect_status "sparse checkout is off to begin with" 1 \
+	sh -c 'grep -q sparsecheckout .gitprompt/config'
+expect_status "nor has a pattern file been written" 1 \
+	test -e .gitprompt/info/sparse-checkout
+
+expect_status "a pattern list is accepted" 0 \
+	gp sparse-checkout set '/src/*.c'
+expect_out "and kept in the order it was given" "/src/*.c" \
+	gp sparse-checkout list
+expect_file "the file the pattern keeps is still there" src/a.c
+expect_absent "and every file it leaves out is gone" src/b.h
+expect_absent "at every depth it reaches" docs/d.md
+expect_absent "the root's files included" README.md
+expect_out "ls-files marks the ones that were left out" \
+	"S README.md
+S docs/d.md
+H src/a.c
+S src/b.h" gp ls-files -t
+expect_out "and status is clean, because a sparse path is not a missing one" \
+	"" gp status --short
+
+expect_status "a directory's contents can be named with a trailing slash" 0 \
+	gp sparse-checkout set '/docs/'
+expect_file "which brings that directory back" docs/d.md
+expect_absent "and takes the rest away" src/a.c
+expect_out "with the shares the other way round" \
+	"S README.md
+H docs/d.md
+S src/a.c
+S src/b.h" gp ls-files -t
+
+expect_status "a pattern can be taken back by a later one" 0 \
+	gp sparse-checkout set '/*' '!/docs/'
+expect_file "so the root and the others are here" README.md
+expect_file "src too" src/b.h
+expect_absent "and only the negated directory is not" docs/d.md
+expect_out "which is what the last matching line decided" \
+	"H README.md
+S docs/d.md
+H src/a.c
+H src/b.h" gp ls-files -t
+
+expect_status "a second branch carries the same sparse state" 0 \
+	gp checkout -b sparse-elsewhere
+expect_out "with the same paths held back on it" \
+	"H README.md
+S docs/d.md
+H src/a.c
+H src/b.h" gp ls-files -t
+expect_absent "and nothing put back by the switch" docs/d.md
+
+# `commit -a` takes in what the work tree shows; a sparse path shows nothing,
+# and that must not be read as a deletion.  A file that is present is edited
+# first, so the commit has something to take in and the two cases are told apart.
+printf 'changed\n' > src/a.c
+expect_status "commit -a on a sparse work tree succeeds" 0 \
+	gp commit -a -m "take in the edit"
+expect_out "and leaves every sparse path in the index" \
+	"H README.md
+S docs/d.md
+H src/a.c
+H src/b.h" gp ls-files -t
+expect_out "with the edit taken in and nothing else left over" "" gp status --short
+
+expect_status "the two tag forms are refused together, as git refuses them" 1 \
+	gp ls-files -t -s
+expect "saying why" "cannot be used together" gp ls-files -t -s
+
+expect_status "disable is accepted" 0 gp sparse-checkout disable
+expect_file "and puts every path back" docs/d.md
+expect_file "each of them" README.md
+expect_out "with the index no longer marking any" \
+	"H README.md
+H docs/d.md
+H src/a.c
+H src/b.h" gp ls-files -t
+expect_status "the switch is gone from the configuration" 1 \
+	sh -c 'grep -q sparsecheckout .gitprompt/config'
+expect_out "and the pattern file is removed" "" gp sparse-checkout list
+expect_out "so the repository is as it was" "" gp status --short
+
+# `init` is the switch on its own, and it writes the pattern list git's `init`
+# writes: the top-level files, and no directories.
+expect_status "init writes a default pattern list" 0 gp sparse-checkout init
+expect_out "which is the one git writes" '/*
+!/*/' gp sparse-checkout list
+expect_file "keeping the root's files" README.md
+expect_absent "and taking the directories away" src/a.c
+expect_out "with the index marked to match" \
+	"H README.md
+S docs/d.md
+S src/a.c
+S src/b.h" gp ls-files -t
+expect_status "turning it off again puts them back" 0 gp sparse-checkout disable
+expect_file "directories and all" src/a.c
+
+expect_status "an unknown subcommand is refused" 1 gp sparse-checkout frobnicate
+expect "naming the ones there are" "sparse-checkout init" \
+	gp sparse-checkout frobnicate
+
+unset MSYS_NO_PATHCONV
+cd "$back" || exit 2
+
+# ------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

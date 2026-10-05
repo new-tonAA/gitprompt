@@ -206,6 +206,17 @@ static int wm(const char *pat, const char *s)
 }
 
 /*
+ * One pattern against one whole path from the root of the work tree.  This is
+ * the matcher above, exposed because a pattern does not have to come from an
+ * ignore file to be written in this syntax: the sparse-checkout pattern list is
+ * the same language, read from the root (cmd_sparse.c).
+ */
+int path_match_root(const char *pattern, const char *relpath)
+{
+	return wm(pattern, relpath);
+}
+
+/*
  * One rule against one path, the path given relative to the directory the rule
  * came from.  A rule with a slash in it is about that whole path; one without
  * is about a name, and is matched against the last segment of the path

@@ -103,6 +103,14 @@ static void dirty_paths(struct repo *r, struct strlist *out)
 		struct buf b;
 		oid_t oid;
 
+		/*
+		 * A sparse path is absent on purpose.  It is not a difference to keep
+		 * a checkout from switching branches over, so it is not one here.
+		 */
+		if (ist.e[i].flags & IDX_FLAG_SKIP_WORKTREE) {
+			free(full);
+			continue;
+		}
 		buf_init(&b);
 		if (read_file(full, &b) < 0) {
 			strlist_push(out, ist.e[i].path);
