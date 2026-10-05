@@ -23,6 +23,14 @@ counterpart here, is in [The commands](commands.md).
   the run is kept: not its standard error, not the files it changed, not what it
   cost. And an agent nobody asked to record is not recorded, so a history is as
   complete as whoever kept it.
+- **Which agents can be replayed into.** `claude` is the only agent this tree
+  replays into as conversations. `codex` and `dsh` cannot be given a name for a
+  new conversation, so `rerun --agent=codex` and `--agent=dsh` are refused
+  rather than run as a string of unrelated sessions. An agent the table has never
+  heard of is usable once `gitprompt.agent.<name>.command` says how this machine
+  runs it, and every other piece of how one is driven is settable the same way;
+  the whole of it is in
+  [Notes](notes.md#how-this-machine-runs-an-agent).
 - **Platforms.** Developed and built on Windows with TDM-GCC. The code is
   plain C99: what is Windows-specific is a small `#ifdef _WIN32` block for
   `_getcwd`/`_getpid`, `__USE_MINGW_ANSI_STDIO`, and putting the streams in

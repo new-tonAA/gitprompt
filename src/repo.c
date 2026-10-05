@@ -438,6 +438,34 @@ int repo_config_get(struct repo *r, const char *key, char **out)
 	return -1;
 }
 
+/*
+ * One piece of how an agent is driven: `gitprompt.agent.<name>.<field>`.
+ *
+ * The command line an agent answers to is a fact about the machine it is
+ * installed on rather than about the history being replayed -- which is why the
+ * agent is named at all -- and the same agent is installed differently, wrapped
+ * in something, or older than the flags this tree ships.  So every piece of it
+ * can be replaced here, and `builtin` is only what the shipped table says.
+ *
+ * A key set to the empty string means the agent has no such piece, which is not
+ * the same as the key being absent: absence falls back to `builtin`, emptiness
+ * takes it away.  The result is the caller's to free, and NULL means nothing --
+ * neither config nor the table -- says what this piece is.
+ */
+char *repo_agent_setting(struct repo *r, const char *agent, const char *field,
+			 const char *builtin)
+{
+	char *key = xstrfmt("gitprompt.agent.%s.%s", agent, field);
+	char *v = NULL;
+
+	if (repo_config_get(r, key, &v) == 0) {
+		free(key);
+		return v;
+	}
+	free(key);
+	return builtin ? xstrdup(builtin) : NULL;
+}
+
 int repo_config_set(struct repo *r, const char *key, const char *value,
 		    int global)
 {

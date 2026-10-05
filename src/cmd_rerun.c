@@ -45,38 +45,50 @@
 #endif
 
 /*
- * How to begin a conversation with an agent and how to continue one.  `start`
- * and `resume` are command prefixes; the conversation id is appended to
- * whichever applies.
+ * The command line an agent is replayed through, as the pieces it is built
+ * from.  Each is a default only: what an agent is installed as is a fact about
+ * the machine, not about the history, so every piece can be replaced with
+ * `gitprompt.agent.<name>.<field>` -- see `agent_cmd_resolve`.
  *
- * `resume` being NULL is the honest state of an agent that cannot be told which
- * conversation to use: continuation needs the id, and there is no way to invent
- * one it will accept.  Rather than run a session as a string of unrelated
- * conversations and call the result a replay, `rerun` refuses, and says why.
+ * `resume` and `new_session` being NULL is the honest state of an agent that
+ * cannot be told which conversation to use: continuation needs the id, and
+ * there is no way to invent one it will accept.  Rather than run a session as a
+ * string of unrelated conversations and call the result a replay, `rerun`
+ * refuses, and says why.
  */
 struct rerun_agent {
 	const char *name;
-	const char *start;
-	const char *resume;             /* or NULL when the id cannot be chosen */
-	const char *const *modes;       /* allowed values of --permission-mode */
+	const char *start;            /* how a new conversation is begun */
+	const char *resume;           /* flag the id follows to continue one */
+	const char *new_session;      /* flag the id follows to name a new one */
+	const char *model_flag;       /* flag a model name follows */
+	const char *permission_flag;  /* flag a permission mode follows */
+	const char *modes;            /* the values it takes, comma-separated */
 	const char *mode_default;
 };
 
-static const char *const claude_modes[] = {
-	"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan",
-	NULL
+static const struct rerun_agent rerun_agents[] = {
+	{ "claude", "claude -p", "--resume", "--session-id", "--model",
+	  "--permission-mode",
+	  "acceptEdits,auto,bypassPermissions,manual,dontAsk,plan", "acceptEdits" },
+	/*
+	 * `codex exec` and `dsh --profile headless` each run one task and
+	 * forget it: neither can be told which conversation to continue, so
+	 * neither can replay a history whose sessions are interrupted.  They
+	 * are listed rather than hidden because that reason is the thing
+	 * worth knowing about them.
+	 */
+	{ "codex",  "codex exec", NULL, NULL, NULL, NULL, NULL, NULL },
+	{ "dsh",    "dsh --profile headless", NULL, NULL, NULL, NULL, NULL, NULL },
 };
 
-static const struct rerun_agent rerun_agents[] = {
-	{ "claude", "claude -p", "--resume", claude_modes, "acceptEdits" },
-	{ "codex",  "codex exec", NULL, NULL, NULL },
-};
+#define RERUN_NR_AGENTS (sizeof rerun_agents / sizeof rerun_agents[0])
 
 static const struct rerun_agent *rerun_agent_find(const char *name)
 {
 	size_t i;
 
-	for (i = 0; i < sizeof rerun_agents / sizeof rerun_agents[0]; i++)
+	for (i = 0; i < RERUN_NR_AGENTS; i++)
 		if (!strcmp(rerun_agents[i].name, name))
 			return &rerun_agents[i];
 	return NULL;
@@ -86,11 +98,126 @@ static void rerun_agent_names(void)
 {
 	size_t i;
 
-	for (i = 0; i < sizeof rerun_agents / sizeof rerun_agents[0]; i++)
+	for (i = 0; i < RERUN_NR_AGENTS; i++)
 		fprintf(stderr, "%s%s", i ? ", " : "", rerun_agents[i].name);
 }
 
-#define RERUN_NR_AGENTS (sizeof rerun_agents / sizeof rerun_agents[0])
+/*
+ * One agent's command line after config has had its say.  Every field is owned
+ * here, and a field is NULL when nothing says what it is -- which, for the
+ * fields that are flags, is the same as "this agent has none".
+ */
+struct agent_cmd {
+	char *command;
+	char *resume;
+	char *new_session;
+	char *model_flag;
+	char *permission_flag;
+	char *modes;
+	char *mode_default;
+};
+
+static void agent_cmd_release(struct agent_cmd *c)
+{
+	free(c->command);
+	free(c->resume);
+	free(c->new_session);
+	free(c->model_flag);
+	free(c->permission_flag);
+	free(c->modes);
+	free(c->mode_default);
+}
+
+/*
+ * Fill in an agent's command line.  `row` is the shipped table's entry, or NULL
+ * for an agent this repository configures and the table has never heard of: a
+ * harness that arrives later is a command line, not a rebuild.  Config wins
+ * wherever it speaks, and an empty value there takes a piece away rather than
+ * falling back -- which is how a machine whose agent has no such flag says so.
+ */
+static void agent_cmd_resolve(struct repo *r, const char *name,
+			      const struct rerun_agent *row, struct agent_cmd *c)
+{
+	size_t i;
+
+	memset(c, 0, sizeof *c);
+	c->command = repo_agent_setting(r, name, "command",
+					row ? row->start : NULL);
+	c->resume = repo_agent_setting(r, name, "resume",
+				       row ? row->resume : NULL);
+	c->new_session = repo_agent_setting(r, name, "newSession",
+					    row ? row->new_session : NULL);
+	c->model_flag = repo_agent_setting(r, name, "modelFlag",
+					   row ? row->model_flag : NULL);
+	c->permission_flag = repo_agent_setting(r, name, "permissionFlag",
+						row ? row->permission_flag : NULL);
+	c->modes = repo_agent_setting(r, name, "modes", row ? row->modes : NULL);
+	c->mode_default = repo_agent_setting(r, name, "modeDefault",
+					     row ? row->mode_default : NULL);
+
+	/* "" and "absent" mean the same thing from here on */
+	{
+		char **all[] = { &c->command, &c->resume, &c->new_session,
+				 &c->model_flag, &c->permission_flag, &c->modes,
+				 &c->mode_default };
+
+		for (i = 0; i < sizeof all / sizeof all[0]; i++)
+			if (*all[i] && !**all[i]) {
+				free(*all[i]);
+				*all[i] = NULL;
+			}
+	}
+}
+
+/*
+ * Whether config says how this machine runs the agent, which is what makes an
+ * agent the shipped table has never heard of usable.
+ */
+static int agent_configured(struct repo *r, const char *name)
+{
+	char *v = repo_agent_setting(r, name, "command", NULL);
+	int yes = v && *v;
+
+	free(v);
+	return yes;
+}
+
+/* Whether `mode` is one of a comma-separated list. */
+static int mode_allowed(const char *modes, const char *mode)
+{
+	const char *p = modes;
+	size_t n = strlen(mode);
+
+	while (*p) {
+		const char *e = strchr(p, ',');
+
+		if (!e)
+			e = p + strlen(p);
+		if ((size_t)(e - p) == n && !strncmp(p, mode, n))
+			return 1;
+		if (!*e)
+			break;
+		p = e + 1;
+	}
+	return 0;
+}
+
+/* The list, as the error message prints it. */
+static void mode_list(const char *modes)
+{
+	const char *p = modes;
+
+	while (*p) {
+		const char *e = strchr(p, ',');
+
+		if (!e)
+			e = p + strlen(p);
+		fprintf(stderr, "%.*s%s", (int)(e - p), p, *e ? ", " : "");
+		if (!*e)
+			break;
+		p = e + 1;
+	}
+}
 
 /*
  * Whether there is somebody at the terminal to ask.  Both ends are checked, not
@@ -321,21 +448,86 @@ static int rerun_quote_path(const char *path, struct buf *out)
  * from running something else instead.  It is written to a file and handed over
  * on standard input, which removes the question.
  */
-static void rerun_build(struct buf *cmd, const struct rerun_agent *agent,
+static void rerun_build(struct buf *cmd, const struct agent_cmd *agent,
 			const char *model, const char *mode, const char *uuid,
 			int resume)
 {
 	buf_reset(cmd);
-	buf_addstr(cmd, agent->start);
+	buf_addstr(cmd, agent->command);
 	if (model)
-		buf_addf(cmd, " --model %s", model);
-	buf_addf(cmd, " --permission-mode %s", mode);
+		buf_addf(cmd, " %s %s", agent->model_flag, model);
+	if (mode)
+		buf_addf(cmd, " %s %s", agent->permission_flag, mode);
 	if (!uuid)
 		return;
 	if (resume)
 		buf_addf(cmd, " %s %s", agent->resume, uuid);
 	else
-		buf_addf(cmd, " --session-id %s", uuid);
+		buf_addf(cmd, " %s %s", agent->new_session, uuid);
+}
+
+/*
+ * The program an agent's command line starts with.  The line is read by a shell,
+ * so only the first word names it -- and a word may be quoted, which is how a
+ * command points at a path with a space in it.  NULL when there is no word at
+ * all, which is a command line that could not run anyway.
+ */
+static char *command_program(const char *command)
+{
+	const char *p = command;
+	struct buf b;
+	char *s;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+	buf_init(&b);
+	if (*p == '"')
+		for (p++; *p && *p != '"'; p++)
+			buf_addch(&b, *p);
+	else
+		for (; *p && *p != ' ' && *p != '\t'; p++)
+			buf_addch(&b, *p);
+	if (!b.len) {
+		buf_release(&b);
+		return NULL;
+	}
+	s = xstrdup(buf_cstr(&b));
+	buf_release(&b);
+	return s;
+}
+
+/*
+ * Whether a shell would find this program.  The question is put to a shell
+ * rather than answered by walking PATH here, because a shell is what will run
+ * the command line and its answer is the one that matters: on Windows that is
+ * cmd.exe, where PATHEXT and the working directory count, and on Unix it is
+ * /bin/sh.  A name that cannot even be asked about is reported as found, so an
+ * odd quoting is a clear failure from the shell rather than a refusal here.
+ */
+static int program_found(const char *program)
+{
+	struct buf probe;
+	int rc;
+
+	buf_init(&probe);
+#ifdef _WIN32
+	buf_addstr(&probe, "where ");
+#else
+	/* `command -v` is the POSIX spelling of the question */
+	buf_addstr(&probe, "command -v ");
+#endif
+	if (rerun_quote_path(program, &probe) < 0) {
+		buf_release(&probe);
+		return 1;
+	}
+#ifdef _WIN32
+	buf_addstr(&probe, " > NUL 2> NUL");
+#else
+	buf_addstr(&probe, " > /dev/null 2>&1");
+#endif
+	rc = system(buf_cstr(&probe));
+	buf_release(&probe);
+	return rc == 0;
 }
 
 int cmd_rerun(struct repo *r, int argc, char **argv)
@@ -346,10 +538,11 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	struct prompt_ref *order;
 	struct buf cmd, answer;
 	struct rerun_conv *convs = NULL;
+	struct agent_cmd agent;
 	size_t nr_convs = 0, i, n = 0, selected = 0;
-	const struct rerun_agent *agent;
+	const struct rerun_agent *row;
 	const char *name, *model, *mode, *salt, *from, *only;
-	char *msg_path;
+	char *msg_path, *prog = NULL;
 	int run, record, interactive;
 
 	opts_init(&o, argc, argv, (const char *const[]){
@@ -359,40 +552,53 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 	name = opts_value(&o, "--agent");
 	interactive = rerun_interactive();
 	if (name) {
-		agent = rerun_agent_find(name);
-		if (!agent) {
+		row = rerun_agent_find(name);
+		/*
+		 * An agent the table has never heard of is still usable when
+		 * the repository says how this machine runs it -- a harness
+		 * that arrives later is a command line, not a rebuild.
+		 */
+		if (!row && !agent_configured(r, name)) {
 			fprintf(stderr, "rerun: agent must be one of ");
 			rerun_agent_names();
-			fprintf(stderr, "\n");
+			fprintf(stderr,
+				"\n        or one this repository configures, with\n"
+				"        gitprompt.agent.<name>.command\n");
 			exit(2);
 		}
 	} else if (interactive) {
-		agent = rerun_ask_agent();
+		row = rerun_ask_agent();
+		name = row->name;
 	} else {
-		agent = rerun_agent_find("claude");
+		name = "claude";
+		row = rerun_agent_find(name);
 	}
-	if (!agent->resume)
+	agent_cmd_resolve(r, name, row, &agent);
+	if (!agent.command)
+		gp_die("rerun: nothing says how this machine runs %s\n"
+		       "        set gitprompt.agent.%s.command", name, name);
+
+	if (!agent.resume || !agent.new_session)
 		gp_die("rerun: %s cannot be told which conversation to continue, so a\n"
 		       "        session it began could not be returned to; a rerun\n"
 		       "        that ran each session as a string of unrelated\n"
-		       "        conversations would not be a replay of this history",
-		       agent->name);
+		       "        conversations would not be a replay of this history\n"
+		       "        (gitprompt.agent.%s.resume and .newSession say how a\n"
+		       "        conversation is named; empty means it cannot be)",
+		       name, name);
 
 	mode = opts_value(&o, "--permission-mode");
-	if (!mode)
-		mode = agent->mode_default;
-	if (agent->modes) {
-		const char *const *m;
-		int ok = 0;
-
-		for (m = agent->modes; *m; m++)
-			if (!strcmp(*m, mode))
-				ok = 1;
-		if (!ok) {
+	if (!agent.permission_flag) {
+		if (mode)
+			gp_die("rerun: %s has no permission mode to set\n"
+			       "        gitprompt.agent.%s.permissionFlag is empty",
+			       name, name);
+	} else {
+		if (!mode)
+			mode = agent.mode_default;
+		if (mode && agent.modes && !mode_allowed(agent.modes, mode)) {
 			fprintf(stderr, "rerun: --permission-mode must be one of ");
-			for (m = agent->modes; *m; m++)
-				fprintf(stderr, "%s%s", m == agent->modes ? "" : ", ",
-					*m);
+			mode_list(agent.modes);
 			fprintf(stderr, "\n");
 			exit(2);
 		}
@@ -409,6 +615,9 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 				    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 				    "0123456789.-_") != strlen(model)))
 		gp_die("rerun: --model takes a model name, not '%s'", model);
+	if (model && !agent.model_flag)
+		gp_die("rerun: %s has no model to set\n"
+		       "        gitprompt.agent.%s.modelFlag is empty", name, name);
 
 	salt = opts_value(&o, "--salt");
 	from = opts_value(&o, "--from");
@@ -456,8 +665,12 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 		gp_die("rerun: no prompt in session %s", only ? only : "?");
 	}
 
-	printf("rerun: %lu of %lu prompt(s), agent %s, permission mode %s\n",
-	       (unsigned long)selected, (unsigned long)pl.nr, agent->name, mode);
+	if (mode)
+		printf("rerun: %lu of %lu prompt(s), agent %s, permission mode %s\n",
+		       (unsigned long)selected, (unsigned long)pl.nr, name, mode);
+	else
+		printf("rerun: %lu of %lu prompt(s), agent %s\n",
+		       (unsigned long)selected, (unsigned long)pl.nr, name);
 	if (selected != pl.nr)
 		printf("       from the filters given, not the whole history\n");
 
@@ -555,6 +768,19 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 			printf("not started; nothing was run\n\n");
 	}
 
+	/*
+	 * Whether this machine has the agent at all is the one thing about the
+	 * run that the history cannot say, and it is asked now rather than
+	 * discovered by the first prompt: an agent that is not here should be
+	 * one sentence, not a run that stopped half way with the rest of the
+	 * prompts still to go.
+	 */
+	prog = command_program(agent.command);
+	if (run && !program_found(prog ? prog : agent.command))
+		gp_die("rerun: cannot run %s -- %s is not on PATH\n"
+		       "        set gitprompt.agent.%s.command to how this "
+		       "machine runs it", name, prog ? prog : agent.command, name);
+
 	for (i = 0; i < pl.nr; i++) {
 		const struct prompt *p = order[i].prompt;
 		struct rerun_conv *c;
@@ -583,7 +809,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 		       sid ? sid : "(no session)",
 		       resume ? "resume" : "start");
 
-		rerun_build(&cmd, agent, model, mode, c->uuid, resume);
+		rerun_build(&cmd, &agent, model, mode, c->uuid, resume);
 		if (!run) {
 			printf("         %s\n", buf_cstr(&cmd));
 			c->started = 1;
@@ -626,7 +852,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 			       "PATH?\n"
 			       "        %lu prompt(s) before it were done; "
 			       "`rerun --from %s --yes` starts again there",
-			       agent->name, id, rc, agent->name,
+			       name, id, rc, prog ? prog : name,
 			       (unsigned long)(n - 1), id);
 		}
 
@@ -639,8 +865,7 @@ int cmd_rerun(struct repo *r, int argc, char **argv)
 		 */
 		if (record && answer.len) {
 			if (record_response(r, p->id, buf_cstr(&answer),
-					    model ? model : agent->name, NULL,
-					    1) != 0)
+					    model ? model : name, NULL, 1) != 0)
 				gp_warn("rerun: could not record the answer to "
 					"%s", p->id ? p->id : "?");
 		}
@@ -656,7 +881,9 @@ done:
 	buf_release(&cmd);
 	buf_release(&answer);
 	free(msg_path);
+	free(prog);
 	free(order);
+	agent_cmd_release(&agent);
 	rerun_convs_release(convs, nr_convs);
 	session_groups_release(&sg);
 	prompt_list_release(&pl);

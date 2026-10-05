@@ -5,7 +5,7 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1103 checks, 0 failures** — 959 in
+The end-to-end suite passes: **1117 checks, 0 failures** — 973 in
 `test/smoke.sh`, 108 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
@@ -16,7 +16,10 @@ $ make test
 prompt and a session can be given, a task recorded in sessions that were
 interleaved and returned to, committing, reconstruction (ordering, session
 boundaries, and the flat chronology), the plan `rerun` would execute, the agent
-conversations it maps sessions to, and what `response` and `rerun --record` keep
+conversations it maps sessions to, the command line a machine gives an agent with
+`gitprompt.agent.<name>.<field>` — including an agent the table never heard of,
+a piece emptied away, and a program that is not on `PATH` — and what `response`
+and `rerun --record` keep
 and how every rendering shows it, branches, tags, history editing, the reflog of
 where HEAD has been, the commits a range of revisions reaches, merges
 including conflicts

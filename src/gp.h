@@ -584,6 +584,10 @@ const char *repo_head_path(struct repo *r);
 char *repo_git_path(struct repo *r, const char *fmt, ...);
 
 int repo_config_get(struct repo *r, const char *key, char **out);
+/* one piece of how an agent is driven, config first and the shipped table
+ * second; empty means "none", NULL means "nothing says" */
+char *repo_agent_setting(struct repo *r, const char *agent, const char *field,
+			 const char *builtin);
 int repo_config_set(struct repo *r, const char *key, const char *value,
 		    int global);
 int repo_config_unset(struct repo *r, const char *key);

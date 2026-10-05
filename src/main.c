@@ -251,14 +251,18 @@ const struct command commands[] = {
 	{ "log-prompt", cmd_log_prompt, "List prompts without commit noise",
 	  "log-prompt [<ref>] [--oneline]" },
 	{ "attach",     cmd_attach,     "Write the history where an agent reads its context",
-	  "attach [--agent=claude|codex] [<ref>] [-o FILE] [--dry-run] [--force]" },
+	  "attach [--agent=NAME] [<ref>] [-o FILE] [--dry-run] [--force]\n"
+	  "   claude, codex and dsh are known; gitprompt.agent.<name>.context\n"
+	  "   says where any other reads its context." },
 	{ "rerun",      cmd_rerun,      "Give the prompts back to an agent, in order",
-	  "rerun [<ref>] [--agent=claude] [--model M] [--permission-mode M]\n"
+	  "rerun [<ref>] [--agent=NAME] [--model M] [--permission-mode M]\n"
 	  "   rerun [<ref>] [--from ID] [--only-session ID] [--salt S] [--yes]"
 	  " [--record]\n"
 	  "   At a terminal, rerun asks which agent to replay into and confirms\n"
 	  "   before it starts.  --agent names the agent instead, and --yes runs\n"
-	  "   it without asking, which is what a run with no terminal needs." },
+	  "   it without asking, which is what a run with no terminal needs.\n"
+	  "   claude, codex and dsh are known; gitprompt.agent.<name>.* says\n"
+	  "   how this machine runs any other." },
 
 	/* examine the history */
 	{ "status",     cmd_status,     "Show the working tree status",

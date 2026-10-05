@@ -1403,18 +1403,29 @@ int cmd_replay(struct repo *r, int argc, char **argv)
  */
 
 /*
- * Where an agent looks for its project context, and the flag that puts it in
- * the mode where it reads without acting.  Each agent names both differently,
- * so neither is derivable from the other.
+ * Where an agent looks for its project context, and a command line that puts it
+ * in the mode where it reads without acting.  Each agent names both
+ * differently, so neither is derivable from the other.
+ *
+ * Like the rerun table these are defaults only.  The file an agent reads and
+ * the way it is started are facts about the agent as it is installed, so
+ * `gitprompt.agent.<name>.context` and `.readOnly` replace them, and an agent
+ * this table has never heard of is usable as soon as config names its context
+ * file.
  */
-static const struct {
+struct attach_agent {
 	const char *name;
 	const char *context_file;
-	const char *read_only;
-} attach_agents[] = {
-	{ "claude", "CLAUDE.md", "--permission-mode plan" },
-	{ "codex",  "AGENTS.md", "--sandbox read-only" },
+	const char *read_only;       /* or NULL when there is no way to say */
 };
+
+static const struct attach_agent attach_agents[] = {
+	{ "claude", "CLAUDE.md", "claude --permission-mode plan" },
+	{ "codex",  "AGENTS.md", "codex --sandbox read-only" },
+	{ "dsh",    "AGENTS.md", NULL },
+};
+
+#define ATTACH_NR_AGENTS (sizeof attach_agents / sizeof attach_agents[0])
 
 /*
  * The first line of every file this command writes.  It is how a later run
@@ -1423,17 +1434,36 @@ static const struct {
  */
 #define ATTACH_MARKER "<!-- gitprompt attach: generated -->"
 
-static const char *attach_context_file(const char *name, const char **read_only)
+static const struct attach_agent *attach_agent_row(const char *name)
 {
 	size_t i;
 
-	for (i = 0; i < sizeof attach_agents / sizeof attach_agents[0]; i++) {
-		if (!strcmp(attach_agents[i].name, name)) {
-			if (read_only)
-				*read_only = attach_agents[i].read_only;
-			return attach_agents[i].context_file;
-		}
-	}
+	for (i = 0; i < ATTACH_NR_AGENTS; i++)
+		if (!strcmp(attach_agents[i].name, name))
+			return &attach_agents[i];
+	return NULL;
+}
+
+/*
+ * The context file is the one thing an agent cannot be attached without, so it
+ * is also what decides that the agent is known at all: the table names it for
+ * the agents shipped here, and config names it for anything else.  Returns it
+ * as an owned copy, or NULL when nothing does.
+ */
+static char *attach_context_file(struct repo *r, const char *name,
+				 char **read_only)
+{
+	const struct attach_agent *row = attach_agent_row(name);
+	const char *dflt_ctx = row ? row->context_file : NULL;
+	const char *dflt_ro = row ? row->read_only : NULL;
+	char *ctx;
+
+	if (read_only)
+		*read_only = repo_agent_setting(r, name, "readOnly", dflt_ro);
+	ctx = repo_agent_setting(r, name, "context", dflt_ctx);
+	if (ctx && *ctx)
+		return ctx;
+	free(ctx);
 	return NULL;
 }
 
@@ -1464,8 +1494,8 @@ int cmd_attach(struct repo *r, int argc, char **argv)
 	struct prompt_list pl;
 	struct session_groups sg;
 	struct buf doc, body;
-	const char *agent, *ref, *out_path, *model, *context_file;
-	const char *read_only = NULL;
+	const char *agent, *ref, *out_path, *model;
+	char *context_file, *read_only = NULL;
 	char full[GP_SHA1_HEXSZ + 1];
 	char *abbrev, *root, *target;
 	oid_t commit;
@@ -1477,9 +1507,13 @@ int cmd_attach(struct repo *r, int argc, char **argv)
 	agent = opts_value(&o, "--agent");
 	if (!agent)
 		agent = "claude";
-	context_file = attach_context_file(agent, &read_only);
+	context_file = attach_context_file(r, agent, &read_only);
 	if (!context_file)
-		gp_die("attach: unknown agent '%s' (claude or codex)", agent);
+		gp_die("attach: unknown agent '%s' -- the agents known here are "
+		       "claude, codex\n"
+		       "        and dsh, and gitprompt.agent.%s.context names the "
+		       "file any\n"
+		       "        other agent reads", agent, agent);
 
 	if (opts_count(&o) > 1)
 		gp_die("attach: at most one revision");
@@ -1539,11 +1573,17 @@ int cmd_attach(struct repo *r, int argc, char **argv)
 		buf_addf(&doc,
 			 "The prompts were written for **%s**.  That is a hint about what\n"
 			 "they expect, not a requirement.\n\n", model);
-	buf_addf(&doc,
-		 "Read it with the agent in the mode where reading is all it does, which\n"
-		 "for %s is\n\n"
-		 "    %s %s\n\n"
-		 "---\n\n", agent, agent, read_only);
+	if (read_only)
+		buf_addf(&doc,
+			 "Read it with the agent in the mode where reading is all it does:\n\n"
+			 "    %s\n\n"
+			 "---\n\n", read_only);
+	else
+		buf_addf(&doc,
+			 "Read it with the agent in the mode where reading is all it does;\n"
+			 "this command does not know how %s is put in that mode, so\n"
+			 "gitprompt.agent.%s.readOnly is where to say.\n\n"
+			 "---\n\n", agent, agent);
 	buf_add(&doc, body.b, body.len);
 	buf_release(&body);
 
@@ -1582,10 +1622,13 @@ int cmd_attach(struct repo *r, int argc, char **argv)
 			gp_die("attach: cannot write %s", target);
 		printf("wrote %s\n", target);
 		printf("  %s, as of %s\n", root, abbrev);
-		printf("  read it with: %s %s\n", agent, read_only);
+		if (read_only)
+			printf("  read it with: %s\n", read_only);
 	}
 
 	buf_release(&doc);
+	free(context_file);
+	free(read_only);
 	free(abbrev);
 	free(root);
 	free(target);

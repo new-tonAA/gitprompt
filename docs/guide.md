@@ -136,10 +136,24 @@ restored exactly by checking out the commit, which is what `checkout` is for —
 the prompts are the *how it was made*, the commits are the *what was made*, and
 only the second is byte-exact.
 
-`codex` is refused rather than half-supported. Its conversations cannot be given
-an id to resume by, so an interrupted history could not be played back as the
-conversations it was — and running each session as a string of unrelated ones
-would not be a replay of anything.
+`codex` and `dsh` are refused rather than half-supported. Neither can be given an
+id to name a new conversation by, so an interrupted history could not be played
+back as the conversations it was — and running each session as a string of
+unrelated ones would not be a replay of anything. They are named anyway so that
+the refusal can say why.
+
+How an agent is run is a fact about the machine, not about the history, so every
+part of it is a default rather than the last word. `rerun` reads `command`,
+`resume`, `newSession`, `modelFlag`, `permissionFlag`, `modes` and `modeDefault`
+from `gitprompt.agent.<name>.<field>` if the repository or your
+`~/.gitpromptconfig` sets them — an agent installed through `npx`, or wrapped,
+or pinned to a version whose flags have moved, is described there rather than
+guessed at. An agent the table has never heard of works too, once
+`gitprompt.agent.<name>.command` says how this machine runs it. `attach` reads
+`context` and `readOnly` the same way. Before anything runs, the program named by
+`command` is looked up on `PATH` with the shell that is about to run it, and a
+missing one is reported before the first prompt rather than at it. See
+[notes](notes.md#how-this-machine-runs-an-agent) for the whole of it.
 
 ### Keeping what the agent answered
 

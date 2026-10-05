@@ -479,3 +479,65 @@ be run at all after some builds. Relinking (`make clean && make`) has cleared it
 every time so far, but a fresh Windows install or a different machine may need
 Smart App Control turned off (Windows Security → App and browser control) before
 the binary will start.
+
+## How this machine runs an agent
+
+`rerun` and `attach` have to turn a name — `claude`, `codex`, `dsh` — into a
+command line, and there is no single right answer to that. How an agent is
+installed is a fact about the machine the history is being replayed on rather
+than about the history, and the same agent is installed differently from one
+machine to the next: through `npx`, wrapped in a script, pinned to an older
+version whose flags have moved. `rerun` derives the conversation ids from the
+session ids precisely so that the same history replays into the same
+conversations on whatever machine it lands on, and that promise is worth little
+if the command line it hands them to is the one the author happened to have.
+
+So the table of agents is a set of defaults rather than the last word, and every
+piece of how one is driven can be replaced by
+`gitprompt.agent.<name>.<field>`. There are seven fields for a replay: `command`,
+the command line that begins a session; `resume`, the flag the conversation id
+follows to continue one; `newSession`, the flag the id follows to name a new
+one; `modelFlag` and `permissionFlag`, the flags a model name and a permission
+mode follow; `modes`, the comma-separated values that permission flag accepts;
+and `modeDefault`, which of them to use when nobody asks. `attach` reads two
+more: `context`, the file the agent reads the history out of, and `readOnly`, the
+whole command line that puts the agent in the mode where reading is all it does.
+
+A key that is absent falls back to the built-in. A key set to the **empty
+string** is not the same thing: it takes the piece away, and an agent with no
+`resume` is one that cannot be told which conversation to continue — which is
+exactly the state `codex` and `dsh` are in, and why `rerun` refuses them instead
+of starting a string of unrelated sessions and calling it a replay. They are
+named in the refusal so that the reason can be said out loud. An agent the table
+has never heard of is usable too, as long as `gitprompt.agent.<name>.command`
+says how this machine runs it; it needs `resume` and `newSession` as well before
+it can be replayed into, since those are what make a replay a replay rather than
+a first run.
+
+Two pairs have to move together. `modes` and `modeDefault` describe one flag:
+replace the values an agent accepts and `modeDefault` has to name one of them, or
+the run stops on mode validation before it starts. And `context` and `readOnly`
+describe one agent: an agent whose read-only invocation is not known is not
+refused, it is attached to without the read-only line, and the document says
+which key would have supplied it.
+
+A value that begins with a dash needs the option terminator, because our own
+`config` reads a dash-leading second argument as an option:
+
+```console
+$ gitprompt config gitprompt.agent.claude.modelFlag -- -m
+```
+
+real git takes it either way, so this is one of the small places where gitprompt
+is the stricter of the two. The keys live in gitprompt's own config files and
+nowhere else — the local `<repo>/.gitprompt/config` and the global
+`$HOME/.gitpromptconfig` — so a field name containing a dot is never something
+git is asked to parse.
+
+Last, the first word of `command` is looked up before anything runs, through the
+same shell that is about to run it — `command -v` on Unix, `where` on Windows —
+so `PATHEXT`, the working directory and quoting behave exactly as they will when
+the agent is started, and a missing program is reported as a missing program
+rather than as a confusing failure at the first prompt. The check happens only
+when a run is actually about to begin, never for the plan, so reading what a
+replay would do costs nothing.

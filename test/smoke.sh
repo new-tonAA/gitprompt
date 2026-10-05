@@ -338,6 +338,21 @@ expect "attach gives the read-only way to start codex" \
 	"codex --sandbox read-only" cat AGENTS.md
 expect_status "attach refuses an agent it does not know" 128 gp attach --agent gemini
 
+# The file an agent reads and the way it is put in the reading mode are facts
+# about the agent as installed, so both can be said in config -- and that is
+# what makes an agent the table has never heard of usable at all: `gemini` was
+# refused a moment ago only because nothing named the file it reads.
+expect "an agent with no read-only flag here says so rather than guessing" \
+	"does not know how dsh is put in that mode" gp attach --agent=dsh --dry-run
+gp config gitprompt.agent.gemini.context GEMINI.md
+gp attach --agent=gemini >/dev/null 2>&1
+expect_file "config names the context file of a new agent" GEMINI.md
+gp config gitprompt.agent.gemini.readOnly "gemini --read-only"
+expect "as does config, when the agent has one" \
+	"    gemini --read-only" gp attach --agent=gemini --dry-run
+gp config --unset gitprompt.agent.gemini.context
+gp config --unset gitprompt.agent.gemini.readOnly
+
 # -o writes the same document wherever the reader is told to look for it
 gp attach -o "$work/attach.md" >/dev/null 2>&1
 expect_file "attach writes the document elsewhere on request" "$work/attach.md"
@@ -2649,6 +2664,59 @@ expect_status "so is a permission mode the agent does not take" 2 \
 expect "a model name with shell syntax in it is refused" \
 	"takes a model name" gp rerun --model 'a;rm -rf /'
 expect_status "and that is fatal" 128 gp rerun --model 'a;rm -rf /'
+
+expect_status "an agent that cannot resume is refused whatever it is called" \
+	128 gp rerun --agent=dsh
+
+# The command line an agent answers to is a fact about the machine it is
+# installed on, not about the history being replayed -- the same agent is
+# installed differently, under a wrapper, or older than the flags this tree
+# knows.  So every piece of it can be replaced, and `--` is how a value that
+# begins with a dash gets past the option parser.
+gp config gitprompt.agent.claude.command "npx @anthropic-ai/claude-code -p"
+expect "config replaces how the agent is started" \
+	"npx @anthropic-ai/claude-code -p --permission-mode" gp rerun
+gp config --unset gitprompt.agent.claude.command
+
+gp config gitprompt.agent.claude.newSession -- --conversation
+expect "config replaces the flag that names a new conversation" \
+	"--conversation " gp rerun
+gp config --unset gitprompt.agent.claude.newSession
+
+gp config gitprompt.agent.claude.resume ""
+expect "and emptying one takes it away" \
+	"cannot be told which conversation to continue" gp rerun
+expect_status "which leaves the agent unable to replay a history" 128 gp rerun
+gp config --unset gitprompt.agent.claude.resume
+
+gp config gitprompt.agent.claude.modelFlag -- -m
+expect "config replaces the flag a model name follows" \
+	"-m opus" gp rerun --model opus
+gp config --unset gitprompt.agent.claude.modelFlag
+
+# An agent the table has never heard of is a command line, not a rebuild: the
+# table holds what the agents shipped here are called, and config holds what
+# this machine runs an agent with.
+gp config gitprompt.agent.mine.command "my-agent -p"
+gp config gitprompt.agent.mine.resume -- --resume
+gp config gitprompt.agent.mine.newSession -- --session-id
+expect "an agent this repository configures replays like a known one" \
+	"agent mine" gp rerun --agent=mine
+expect "with the command line it was given" \
+	"my-agent -p --session-id " gp rerun --agent=mine
+
+# Whether the machine has the agent at all is the one thing the history cannot
+# say, and it is said before the first prompt rather than by the first prompt:
+# a run that stopped half way would have done half the work.
+gp config gitprompt.agent.mine.command "no-such-agent-program -p"
+expect "an agent that is not installed is named before anything runs" \
+	"is not on PATH" gp rerun --agent=mine --yes
+expect_status "and that is fatal" 128 gp rerun --agent=mine --yes
+gp config --unset gitprompt.agent.mine.command
+gp config --unset gitprompt.agent.mine.resume
+gp config --unset gitprompt.agent.mine.newSession
+expect_status "with its name forgotten, it is a usage error again" 2 \
+	gp rerun --agent=mine
 
 cd "$rr" || exit 2
 rm -rf "$work/rerun-empty"
