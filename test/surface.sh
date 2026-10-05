@@ -595,6 +595,46 @@ else
 	skip "and the block form is identical too (no git)"
 fi
 
+# ---------------------------------------------------------------- handing a tree out
+say "writing the tree out as an archive"
+cd "$repo" || exit 2
+if [ "$have_git" = 1 ]; then
+	# the files come out of the tree, so the two containers hold the same
+	# bytes; autocrlf is taken out of the way because git would otherwise
+	# rewrite the line endings on the way out and gitprompt would not
+	"$GP" archive -o "$work/gp.tar"
+	git -c core.autocrlf=false --git-dir=.gitprompt archive HEAD -o "$work/git.tar"
+	mkdir -p "$work/gp-tar" "$work/git-tar"
+	tar -xf "$work/gp.tar" -C "$work/gp-tar"
+	tar -xf "$work/git.tar" -C "$work/git-tar"
+	if diff -r "$work/gp-tar" "$work/git-tar" >/dev/null 2>&1; then
+		ok "git and gitprompt write the same files to a tar"
+	else
+		bad "git and gitprompt write the same files to a tar" \
+			"$(diff -r "$work/gp-tar" "$work/git-tar" | head -4)"
+	fi
+
+	if command -v unzip >/dev/null 2>&1; then
+		"$GP" archive --format=zip -o "$work/gp.zip"
+		git -c core.autocrlf=false --git-dir=.gitprompt archive --format=zip \
+			HEAD -o "$work/git.zip"
+		mkdir -p "$work/gp-zip" "$work/git-zip"
+		unzip -q "$work/gp.zip" -d "$work/gp-zip"
+		unzip -q "$work/git.zip" -d "$work/git-zip"
+		if diff -r "$work/gp-zip" "$work/git-zip" >/dev/null 2>&1; then
+			ok "and the same files to a zip"
+		else
+			bad "and the same files to a zip" \
+				"$(diff -r "$work/gp-zip" "$work/git-zip" | head -4)"
+		fi
+	else
+		skip "and the same files to a zip (no unzip)"
+	fi
+else
+	skip "git and gitprompt write the same files to a tar (no git)"
+	skip "and the same files to a zip (no git)"
+fi
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

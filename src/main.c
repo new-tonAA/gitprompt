@@ -388,6 +388,8 @@ const struct command commands[] = {
 	  "check-ref-format <name>" },
 
 	/* other */
+	{ "archive",    cmd_archive,    "Write a tree to a tar or zip",
+	  "archive [--format=tar|zip] [-o <file>] [--prefix=<p>] [<rev>]" },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",

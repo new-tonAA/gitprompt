@@ -1731,6 +1731,64 @@ expect "shortlog names the unborn branch" "does not have any commits yet" \
 	gp shortlog
 expect_status "shortlog on an unknown revision fails" 128 gp shortlog nope
 
+# ------------------------------------------------------------------
+# archive writes the files of a tree into a container, and the container is an
+# ordinary one: it is `tar` and `unzip`, not gitprompt, that read it back.
+say "writing a tree out"
+
+ar=$work/archive
+mergecase "$ar"
+printf 'alpha\n' > a.txt
+mkdir -p sub
+printf 'beta\n' > sub/b.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the files to hand out" >/dev/null 2>&1
+
+expect_status "archive writes a tar by default" 0 gp archive -o out.tar
+expect_file "the container is on disk" out.tar
+expect "the tar names the file at the top" "a.txt" tar -tf out.tar
+expect "and the one in the directory below" "sub/b.txt" tar -tf out.tar
+
+mkdir -p x
+tar -xf out.tar -C x
+expect_out "the top file comes back with its contents" "alpha" cat x/a.txt
+expect_out "and the nested one with its own" "beta" cat x/sub/b.txt
+
+expect_status "the files can be prefixed" 0 gp archive --prefix=top/ -o p.tar
+expect "the prefix is on every name" "top/a.txt" tar -tf p.tar
+expect "and on the nested one too" "top/sub/b.txt" tar -tf p.tar
+
+# a tree's own id names the tree the commit points at, so it holds the same
+# files, though a tree carries no date and so its entries are stamped the epoch
+tree=$(gp cat-file -p HEAD | sed -n 's/^tree //p')
+expect_status "a tree id is a revision archive takes" 0 gp archive "$tree" -o t.tar
+mkdir -p tx
+tar -xf t.tar -C tx
+if diff -r x tx >/dev/null 2>&1; then
+	ok "and the tree holds the same files as the commit"
+else
+	bad "and the tree holds the same files as the commit" \
+		"$(diff -r x tx | head -4)"
+fi
+
+# the binary stream is set up for a terminal as well as a file
+gp archive > s.tar
+expect "the container can go to standard output" "a.txt" tar -tf s.tar
+
+if command -v unzip >/dev/null 2>&1; then
+	expect_status "archive writes a zip when asked" 0 \
+		gp archive --format=zip -o out.zip
+	expect "the zip carries the file" "a.txt" unzip -l out.zip
+	expect_out "and its contents read back" "beta" unzip -p out.zip sub/b.txt
+else
+	skip "archive writes a zip when asked"
+fi
+
+expect "archive refuses an option it does not have" "unknown option" \
+	gp archive --remote=origin
+expect_status "an unknown format fails" 128 gp archive --format=7z
+expect_status "and so does an unknown revision" 128 gp archive nope
+
 # the local transport reads objects rather than copying loose files, so a
 # packed repository clones like any other
 cd "$work" || exit 2

@@ -39,14 +39,24 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 65. Missing are
-  `archive`, `notes`, `worktree`, `submodule`, `apply` and `range-diff`, along
+  gitprompt built from this tree lists 66. Missing are
+  `notes`, `worktree`, `submodule`, `apply` and `range-diff`, along
   with the layers under them -- credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
   setting work aside, tags,
   reset, the ref plumbing, remotes, the prompt layer and the object-store
-  maintenance `gc`, `repack` and `prune` are all here.
+  maintenance `archive`, `gc`, `repack` and `prune` are all here.
+- **`archive`, at its edges.** The container holds the files of the tree and
+  nothing else: no directory entries are written, so an empty directory is not
+  in the archive, and the entries carry the commit's timestamp rather than a
+  per-file one. `--remote`, the gitattributes filters (`export-ignore`,
+  `export-subst`) and `--add-file` are refused as unknown options. The tar is
+  ustar, so a path longer than the 100-byte name field is refused rather than
+  written as the pax extension git writes, and the zip entries are stored rather
+  than deflated, which is why a zip here is larger than the one `git archive`
+  writes but is read by `unzip` exactly. The reasoning is in
+  [Notes](notes.md#handing-a-tree-out).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

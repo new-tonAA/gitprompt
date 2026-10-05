@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1155 checks, 0 failures** — 1005 in
-`test/smoke.sh`, 114 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1175 checks, 0 failures** — 1023 in
+`test/smoke.sh`, 116 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -53,7 +53,11 @@ ordinary git repository. As part of it, `git verify-pack` checks the packs `gc`
 and `repack` write against git's own index, `git ls-files` checks the index
 gitprompt wrote against git's own reader, and `git shortlog` is diffed against
 `gitprompt shortlog` line for line, which is the one summary command whose
-output is git's byte for byte.
+output is git's byte for byte. A tree is handed out with `archive`, and what is
+checked is that `tar` and `unzip` read what it wrote rather than that gitprompt
+does: the entries come back with their contents, a prefix lands on every name,
+the archive of a tree is the archive of the commit that points at it, and an
+unreadable option or an unknown format is refused.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -71,7 +75,11 @@ file both tools read is the same file: the untracked list, the words and the
 exit status `add` gives back for a path named while ignored, the set `-f` stages
 instead, and `clean` agreeing in each of its three modes and under `-d`. What
 needs git itself is skipped rather than
-faked when git is not on PATH. Two things `smoke.sh` did not catch were found here — a merge that carried
+faked when git is not on PATH. `archive` is compared on one tree: `git archive`
+and `gitprompt archive` are each written out and extracted, tar and zip alike,
+and the two sets of files have to be the same files — which is what makes the
+container an ordinary one and not a gitprompt format that happens to look like
+a tar. Two things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.
 

@@ -467,6 +467,37 @@ expression this cannot read is refused rather than guessed at, so `gc`'s
 fourteen-day grace period (`repack`'s job to preserve, `prune`'s to apply) is
 never quietly replaced by a number nobody asked for.
 
+## Handing a tree out
+
+`archive` writes the files of a tree into a tar or a zip, and the containers are
+ordinary ones: the check that matters is that `tar -xf` and `unzip` read them,
+and that the files they hold are byte for byte the files `git archive` of the
+same tree holds. The question `archive` answers is not about the repository at
+all — it is "give me the code as of this commit, as a file" — so it reads the
+tree and writes a stream, and touches nothing.
+
+The zip entries are stored, not deflated. A deflated entry needs a *raw* deflate
+stream, and the only deflate in this tree is zlib's, which wraps its stream in a
+zlib header that a zip reader will not accept; a stored entry is a format `unzip`
+reads exactly. A zip from here is therefore larger than one `git archive`
+writes, and that is the honest trade against writing an entry no reader would
+take. The tar is ustar, which is the oldest and most widely read form of it and
+the one `tar` on all three runners writes; it has a 100-byte name field, so a
+path that does not fit is refused rather than written as the pax extension git
+would add, since a long name is a thing to be told about rather than a thing to
+find out about at extraction.
+
+What is *not* written is the directory entries: `load_tree_flat` visits the
+files of a tree and not its directories, so the tar has no `sub/` line before
+`sub/file`, which is the one way its listing reads differently from git's. The
+extracted files are the same either way; what a directory entry would also carry
+is an empty directory, which git puts in the archive and this does not.
+
+The entry timestamp is the commit's, not the file's: git stores no per-file
+mtime, so the time in the header is the one thing about a tree that is a date,
+and every entry gets it. The mode comes from the tree, so an executable file is
+`0755` in the tar and a symlink is written as a symlink.
+
 ## Transports
 
 | URL form | how it works |
