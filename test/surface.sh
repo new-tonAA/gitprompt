@@ -635,6 +635,39 @@ else
 	skip "and the same files to a zip (no git)"
 fi
 
+# ---------------------------------------------------------------- notes
+say "notes, read by both tools"
+# a note lives on refs/notes/commits, which is a name git knows, so this is not
+# two formats that resemble each other: it is one ref, written by one tool and
+# read by the other, in both directions
+ndir="$work/notes"
+rm -rf "$ndir"
+mkdir -p "$ndir" || exit 2
+cd "$ndir" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.name "Surface" >/dev/null
+"$GP" config user.email s@example.com >/dev/null
+printf 'x\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the object to note" >/dev/null 2>&1
+"$GP" notes add -m "written by gitprompt" HEAD >/dev/null 2>&1
+
+if [ "$have_git" = 1 ]; then
+	chk "git reads the note gitprompt wrote" "written by gitprompt" \
+		"$(git --git-dir=.gitprompt notes show HEAD 2>&1)"
+	git -c user.name=G -c user.email=g@h.i --git-dir=.gitprompt \
+		notes add -f -m "written by git" HEAD >/dev/null 2>&1
+	chk "and gitprompt reads the note git wrote" "written by git" \
+		"$("$GP" notes show HEAD)"
+	chk "the two tools list the same pair" \
+		"$(git --git-dir=.gitprompt notes list)" "$("$GP" notes list)"
+else
+	skip "git reads the note gitprompt wrote (no git)"
+	skip "and gitprompt reads the note git wrote (no git)"
+	skip "the two tools list the same pair (no git)"
+fi
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

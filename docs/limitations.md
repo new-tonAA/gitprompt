@@ -39,14 +39,14 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 66. Missing are
-  `notes`, `worktree`, `submodule`, `apply` and `range-diff`, along
+  gitprompt built from this tree lists 67. Missing are
+  `worktree`, `submodule`, `apply` and `range-diff`, along
   with the layers under them -- credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
   setting work aside, tags,
   reset, the ref plumbing, remotes, the prompt layer and the object-store
-  maintenance `archive`, `gc`, `repack` and `prune` are all here.
+  maintenance `archive`, `notes`, `gc`, `repack` and `prune` are all here.
 - **`archive`, at its edges.** The container holds the files of the tree and
   nothing else: no directory entries are written, so an empty directory is not
   in the archive, and the entries carry the commit's timestamp rather than a
@@ -57,6 +57,16 @@ counterpart here, is in [The commands](commands.md).
   than deflated, which is why a zip here is larger than the one `git archive`
   writes but is read by `unzip` exactly. The reasoning is in
   [Notes](notes.md#handing-a-tree-out).
+- **`notes`, at its edges.** The ref is `refs/notes/commits` and nothing else:
+  `--ref`, `-c`/`-C` and `--allow-empty` are refused as unknown options, and
+  there is no merging of two notes trees, so a `merge` of the notes ref is not
+  something this can carry. A note is written with the object's name in full at
+  the top level of the tree, which is where git puts it for any ordinary
+  repository; a tree git has fanned out into a directory per two hex digits is
+  read, but the fanout is not reproduced on the way back. `notes add` without
+  `-m` or `-F` does not open an editor as git's does -- the message has to be
+  given -- while `notes edit` is there for the interactive case. The reasoning
+  is in [Notes](notes.md#a-note-is-a-blob-with-the-objects-name).
 - **The ignore file, at its edges.** What `status`, `add` and `clean` read is
   git's rules -- globs, anchoring, `**`, `!`, a file per directory, and a path
   in the index is never ignored -- and both `.gitignore` and

@@ -1802,6 +1802,95 @@ expect "the clone of a packed store has the same log" \
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "attaching a note to an object"
+
+# a note is a blob named after the object it is about, and the name lives in a
+# tree that hangs off a commit on refs/notes/commits -- which is where git looks
+# for one too, so the two read each other's notes
+notes=$work/notes
+mergecase "$notes"
+printf 'the file\n' > n.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "the object to note" >/dev/null 2>&1
+head_oid=$(gp rev-parse HEAD)
+
+expect_status "a note can be added" 0 gp notes add -m "a first note" HEAD
+expect_out "and reads back as it was written" "a first note" gp notes show HEAD
+expect "the list names the object it is about" "$head_oid" gp notes list
+expect "the ref is a commit, as git writes it" "commit" \
+	gp cat-file -t refs/notes/commits
+expect "the note's tree names the object it is about" "$head_oid" \
+	gp ls-tree refs/notes/commits
+
+# a second note for the same object overwrites only with -f
+expect "adding once more is refused" "Found existing notes" \
+	gp notes add -m "again" HEAD
+expect_status "and the refusal is an error" 1 gp notes add -m "again" HEAD
+expect_status "-f overwrites it" 0 gp notes add -f -m "the second note" HEAD
+expect_out "the newer text is what reads back" "the second note" gp notes show HEAD
+
+# a note can be about any object, not only a commit
+printf 'a blob\n' > b.txt
+blob=$(gp hash-object -w b.txt)
+expect_status "a blob can be noted too" 0 gp notes add -m "about a blob" "$blob"
+expect_out "and read back" "about a blob" gp notes show "$blob"
+expect "the list holds the commit's note" "$head_oid" gp notes list
+expect "and the blob's" "$blob" gp notes list
+
+expect_status "a note can be removed" 0 gp notes remove "$blob"
+expect_status "and is gone" 1 gp notes show "$blob"
+expect_status "removing it again is an error" 1 gp notes remove "$blob"
+expect "the other note is untouched" "the second note" gp notes show HEAD
+
+# a note about an object that the store no longer has: the object is made,
+# noted, and then pruned away, which leaves the note behind
+doomed=$(printf 'doomed\n' | gp hash-object -w --stdin)
+expect_status "a note can be about an object nothing points at" 0 \
+	gp notes add -m "about the doomed blob" "$doomed"
+gp prune --expire=now >/dev/null 2>&1
+if gp cat-file -t "$doomed" >/dev/null 2>&1; then
+	bad "the doomed object is gone from the store" "still readable"
+else
+	ok "the doomed object is gone from the store"
+fi
+expect "the note about it is still listed" "$doomed" gp notes list
+expect_status "notes prune drops it" 0 gp notes prune
+expect_status "and the note is gone" 1 gp notes show "$doomed"
+expect_status "the note about a live object stays" 0 gp notes show HEAD
+
+# a note is a blob in the same store as everything else, so the tools that
+# maintain the store must not throw it away
+expect_status "gc does not take the notes with it" 0 gp gc
+expect_out "the note survives a gc" "the second note" gp notes show HEAD
+
+# an editor writes the note, and a line starting with '#' is a comment
+cat > "$work/note-edit.sh" <<'EOF'
+#!/bin/sh
+printf 'from the editor\n# a comment line\nand a second line\n' > "$1"
+EOF
+expect_status "an editor can write the note" 0 \
+	env GIT_EDITOR="sh $work/note-edit.sh" "$GP" notes edit HEAD
+expect_out "the comment line is dropped" "from the editor
+and a second line" gp notes show HEAD
+
+cat > "$work/note-empty.sh" <<'EOF'
+#!/bin/sh
+: > "$1"
+EOF
+expect_status "emptying the note in the editor removes it" 0 \
+	env GIT_EDITOR="sh $work/note-empty.sh" "$GP" notes edit HEAD
+expect_status "and it is gone" 1 gp notes show HEAD
+expect "the ref outlives its last note, as in git" "commit" \
+	gp cat-file -t refs/notes/commits
+
+expect_status "adding with no message is refused" 1 gp notes add HEAD
+expect "an option it does not have is refused" "unknown option" gp notes list --ref=x
+expect "an unknown subcommand is refused" "not a notes subcommand" \
+	gp notes frobnicate
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "serving over gp://"
 
 # gitprompt's own transport, and the only one that is not a local path.  It is

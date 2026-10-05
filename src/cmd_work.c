@@ -909,14 +909,14 @@ static int do_commit(struct repo *r, const char *message, int amend,
 		     int allow_empty, int quiet);
 
 /* ------------------------------------------------------------------ */
-/* the commit message editor                                           */
+/* the editor, shared by the commands that open one                    */
 
 /*
  * The command to run as the editor.  First one set wins, as in git: GIT_EDITOR,
  * then the repository's core.editor, then VISUAL, then EDITOR.  The string is a
  * shell command line, not a program name, so that "code --wait" works.
  */
-static char *editor_command(struct repo *r)
+char *repo_editor_command(struct repo *r)
 {
 	char *v = NULL;
 
@@ -940,14 +940,14 @@ static char *editor_command(struct repo *r)
  * that could break out of those quotes is refused rather than escaped, as the
  * transports do with the same kind of argument.
  */
-static int run_editor(const char *editor, const char *path)
+int repo_run_editor(const char *editor, const char *path)
 {
 	struct buf cmd = BUF_INIT;
 	char *p;
 	int rc;
 
 	if (strpbrk(path, "\"\r\n%")) {
-		gp_error("commit: refusing to hand '%s' to the shell", path);
+		gp_error("refusing to hand '%s' to the shell", path);
 		return -1;
 	}
 	p = xstrdup(path);
@@ -1023,7 +1023,7 @@ static int edit_message(struct repo *r, struct buf *msg)
 {
 	struct buf file = BUF_INIT;
 	char *path = repo_git_path(r, "COMMIT_EDITMSG");
-	char *editor = editor_command(r);
+	char *editor = repo_editor_command(r);
 	char *branch;
 	int rc = -1;
 
@@ -1055,7 +1055,7 @@ static int edit_message(struct repo *r, struct buf *msg)
 		gp_error("commit: cannot write %s", path);
 		goto out;
 	}
-	if (run_editor(editor, path) < 0) {
+	if (repo_run_editor(editor, path) < 0) {
 		gp_error("commit: the editor exited with an error; nothing was "
 			 "committed");
 		goto out;

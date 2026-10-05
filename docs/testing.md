@@ -5,8 +5,8 @@ caught.
 
 ## The numbers
 
-The end-to-end suite passes: **1175 checks, 0 failures** — 1023 in
-`test/smoke.sh`, 116 in `test/surface.sh` and 36 in `test/restore.sh`.
+The end-to-end suite passes: **1211 checks, 0 failures** — 1056 in
+`test/smoke.sh`, 119 in `test/surface.sh` and 36 in `test/restore.sh`.
 
 ```console
 $ make test
@@ -57,7 +57,14 @@ output is git's byte for byte. A tree is handed out with `archive`, and what is
 checked is that `tar` and `unzip` read what it wrote rather than that gitprompt
 does: the entries come back with their contents, a prefix lands on every name,
 the archive of a tree is the archive of the commit that points at it, and an
-unreadable option or an unknown format is refused.
+unreadable option or an unknown format is refused. A note is put on a commit, a
+blob, and an object that is about to be collected: the note reads back, the list
+names the object it belongs to, the ref over it is a commit whose tree holds the
+note under the object's own name, an overwrite is refused without `-f`, the note
+on the doomed object survives `gc` and is dropped by `notes prune` once nothing
+is left to hang it on, the ref outlives the last note removed, an editor is
+driven to write and then to empty one, and a message nobody gives and a
+subcommand nobody has are both refused.
 
 `test/surface.sh` asks the other question: not whether each command is right in
 depth, but whether the whole surface still is when the commands are used in the
@@ -79,7 +86,11 @@ faked when git is not on PATH. `archive` is compared on one tree: `git archive`
 and `gitprompt archive` are each written out and extracted, tar and zip alike,
 and the two sets of files have to be the same files — which is what makes the
 container an ordinary one and not a gitprompt format that happens to look like
-a tar. Two things `smoke.sh` did not catch were found here — a merge that carried
+a tar. `notes` is compared the way it has to be for a note to be worth writing:
+one tool writes a note and the other reads it, in both directions, against the
+same repository — `git notes show` reading what `gitprompt notes add` wrote, and
+`gitprompt notes show` reading what `git notes add` wrote — with the two tools'
+lists having to name the same pair. Two things `smoke.sh` did not catch were found here — a merge that carried
 no prompts, and a reflog that forgot the past after a checkout — which is what
 made it worth keeping rather than folding in.
 

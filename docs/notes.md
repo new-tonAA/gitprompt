@@ -498,6 +498,55 @@ mtime, so the time in the header is the one thing about a tree that is a date,
 and every entry gets it. The mode comes from the tree, so an executable file is
 `0755` in the tar and a symlink is written as a symlink.
 
+## A note is a blob with the object's name
+
+A note in git is not a special kind of object and it is not an entry in any
+index. It is an ordinary blob, in an ordinary tree, hanging off an ordinary
+commit that a ref points at — and that is the whole of it. Which ref, which
+name inside the tree, and what the blob holds is all convention, and the
+convention is the format. `notes` is written to match it rather than to invent
+a store of its own, because the point of a note is that the other tool can read
+it.
+
+The ref is `refs/notes/commits`. Its value is a commit — git writes a commit
+whose message says a note was added or removed, and this does too, though the
+message is the only part of that commit nobody reads. The commit's tree holds
+one blob per annotated object, and the *name* of the blob is the object's full
+40-character hex id. There is no extension and no suffix: the path
+`ab12…ef` under the notes tree is the note for the object `ab12…ef`.
+
+Git fans that path out once a notes tree grows large, putting the note for
+`ab12…ef` at `ab/12…ef` — a directory named by the first two hex digits. Both
+shapes are the same note; a reader that only knows one shape will miss notes the
+other tool wrote. So the reader here takes either, and the writer always writes
+the flat form: at the scale a person keeps notes, the fanout saves nothing, and
+a tree that is flat is one somebody can read with `cat-file` and a hex id they
+already have. A tree git has fanned out is still read correctly, and the next
+`notes add` over one of those objects lifts that note back to the top level
+rather than leaving a second copy behind — which is why the write removes both
+paths before it adds one.
+
+Removing the last note leaves the ref standing over an empty tree, rather than
+deleting the ref. That is git's behaviour and it is the useful one: the
+difference between "this repository has never had notes" and "this repository
+had notes once and does not now" is a difference in what the ref is, not in
+whether it is there, and keeping it means a second `notes add` does not have to
+decide which of those it is.
+
+`notes prune` is not `prune`. The first drops a note whose *annotated object*
+has gone away — the note is intact, but there is nothing left for it to hang on,
+and it is that object the garbage collector took, not the note. It walks the
+notes tree, asks whether each object still exists, and rewrites the tree only if
+some did not. `gitprompt prune` and `gitprompt gc` do not touch notes at all:
+reachability is walked from the refs, `refs/notes/commits` among them, so an
+ordinary prune cannot reach a note to delete it.
+
+The editor that `notes edit` opens is the same one `commit` opens, from the same
+configuration and the same command line, because "which editor this machine
+uses" is one answer and not one per command. It is shared by name —
+`repo_editor_command` and `repo_run_editor` — so that a `notes edit` and a
+`commit` on one machine cannot disagree about it.
+
 ## Transports
 
 | URL form | how it works |

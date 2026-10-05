@@ -596,6 +596,10 @@ void repo_config_list(struct repo *r, int global,
 		      void *data);
 /* resolved identity */
 void repo_ident(struct repo *r, struct buf *out);      /* "Name <email>" */
+/* the editor to run, and running it; shared by commit, notes edit and
+ * replace -e, so that one machine's choice of editor means one thing */
+char *repo_editor_command(struct repo *r);
+int repo_run_editor(const char *editor, const char *path);
 void repo_ident_with_time(struct repo *r, struct buf *out);  /* with " 123 +0800" */
 
 /* gitprompt configuration */
@@ -970,6 +974,7 @@ int cmd_commit(struct repo *, int, char **);
 int cmd_log(struct repo *, int, char **);
 int cmd_shortlog(struct repo *, int, char **);
 int cmd_archive(struct repo *, int, char **);
+int cmd_notes(struct repo *, int, char **);
 int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);

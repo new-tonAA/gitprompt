@@ -390,6 +390,8 @@ const struct command commands[] = {
 	/* other */
 	{ "archive",    cmd_archive,    "Write a tree to a tar or zip",
 	  "archive [--format=tar|zip] [-o <file>] [--prefix=<p>] [<rev>]" },
+	{ "notes",      cmd_notes,      "Attach text to an object",
+	  "notes [list|add|show|remove|edit|prune] [-m <msg>|-F <file>] [-f] [<object>]" },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",
