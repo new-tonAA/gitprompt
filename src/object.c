@@ -290,3 +290,39 @@ i64 commit_time(const struct commit *c)
 	}
 	return 0;
 }
+
+/*
+ * Split an identity line -- "Name <email> <epoch> <tzzone>" -- into its name
+ * and its email.  Either out pointer may be NULL, and either result is left
+ * NULL when that part is not in the line.  Both are freshly allocated, and the
+ * whitespace before "<" is not part of the name, so a hand-written ident does
+ * not carry it into a group heading.  This is what `shortlog` groups on and
+ * what `format_author_line` renders, so the two cannot disagree about where a
+ * name ends.
+ */
+void parse_ident(const char *raw, char **name, char **email)
+{
+	const char *lt, *gt;
+
+	if (name)
+		*name = NULL;
+	if (email)
+		*email = NULL;
+	if (!raw)
+		return;
+
+	lt = strchr(raw, '<');
+	gt = lt ? strchr(lt, '>') : NULL;
+	if (lt && gt) {
+		size_t n = (size_t)(lt - raw);
+
+		if (email)
+			*email = xstrndup(lt + 1, (size_t)(gt - lt) - 1);
+		while (n && raw[n - 1] == ' ')
+			n--;
+		if (name)
+			*name = xstrndup(raw, n);
+	} else if (name) {
+		*name = xstrdup(raw);
+	}
+}

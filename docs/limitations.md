@@ -39,10 +39,9 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 64. Missing are
-  `archive`, `notes`, `worktree`, `submodule`, `apply`, `shortlog` and
-  `range-diff`, along with the layers under them -- credential helpers, sparse
-  checkout, `replace`
+  gitprompt built from this tree lists 65. Missing are
+  `archive`, `notes`, `worktree`, `submodule`, `apply` and `range-diff`, along
+  with the layers under them -- credential helpers, sparse checkout, `replace`
   and `rerere`. The object model, the index, committing, history, branches,
   merging including conflicts, replaying a commit elsewhere, undoing one,
   setting work aside, tags,

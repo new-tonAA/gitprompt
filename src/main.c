@@ -269,6 +269,8 @@ const struct command commands[] = {
 	  "status [--short]" },
 	{ "log",        cmd_log,        "Show the commit log",
 	  "log [--oneline] [-n N] [<ref>]" },
+	{ "shortlog",   cmd_shortlog,   "Summarise the log by author",
+	  "shortlog [-s] [-n] [-e] [<rev>...]" },
 	{ "show",       cmd_show,       "Show a commit, prompt or object",
 	  "show [--stat] <rev|prompt-id>" },
 	{ "diff",       cmd_diff,       "Show changes between commits, index and work tree",

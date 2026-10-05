@@ -772,6 +772,7 @@ void read_commit(struct repo *r, const oid_t *oid, struct commit *c);
 void read_tree_obj(struct repo *r, const oid_t *oid, struct tree *t);
 char *commit_message_line(const struct commit *c);
 i64 commit_time(const struct commit *c);
+void parse_ident(const char *raw, char **name, char **email);
 
 /* ------------------------------------------------------------------ */
 /* the prompt history                                                  */
@@ -967,6 +968,7 @@ int cmd_clean(struct repo *, int, char **);
 int cmd_status(struct repo *, int, char **);
 int cmd_commit(struct repo *, int, char **);
 int cmd_log(struct repo *, int, char **);
+int cmd_shortlog(struct repo *, int, char **);
 int cmd_show(struct repo *, int, char **);
 int cmd_diff(struct repo *, int, char **);
 int cmd_reset(struct repo *, int, char **);

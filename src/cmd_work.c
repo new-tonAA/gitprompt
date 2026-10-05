@@ -1523,12 +1523,18 @@ struct log_ctx {
 void format_author_line(const char *raw, struct buf *out)
 {
 	/* raw is "Name <email> 1700000000 +0800"; drop the timestamp */
-	const char *gt = raw ? strrchr(raw, '>') : NULL;
+	char *name, *email;
+
 	buf_reset(out);
-	if (gt)
-		buf_add(out, raw, (size_t)(gt - raw) + 1);
-	else if (raw)
-		buf_addstr(out, raw);
+	parse_ident(raw, &name, &email);
+	if (!name)
+		return;
+	if (email)
+		buf_addf(out, "%s <%s>", name, email);
+	else
+		buf_addstr(out, name);
+	free(name);
+	free(email);
 }
 
 static void log_one(const oid_t *oid, const struct commit *c, void *ud)

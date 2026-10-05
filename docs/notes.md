@@ -93,6 +93,24 @@ The suite hands `commit` editors it writes itself: one that replaces the buffer,
 one that appends to it, one that fails, and none at all, and asserts on the
 message that ends up in the commit rather than on the exit status.
 
+## Summarising the log by author
+
+`shortlog` groups commits by the name on the author line, and the grouping key
+is the name *alone* unless `-e` is given — two commits made by the same person
+under two addresses are one group by default and two groups with `-e`, which is
+how the command tells a contributor who has committed from two machines. The
+block form lists each group's subjects oldest first, because git reverses the
+walk it read; `-s` prints only the counts, `-n` orders the groups by size
+instead of by name, and both orders are git's exactly, down to the six-wide
+count column and the tab after it. That is why this is the one summary command
+the suite diffs against real `git shortlog` line for line rather than checking
+its parts.
+
+The name and the email have to come apart the same way everywhere, so
+`parse_ident` in `src/object.c` is the single place that does it: `shortlog`
+groups on its halves, and `log`'s `Author:` line is rendered from them, so the
+two cannot disagree about where a name ends.
+
 ## A merge is three-way, line by line
 
 A merge conflict is where the agreement with git is tested hardest, because a

@@ -543,6 +543,58 @@ else
 	skip "the remotes section (git is not on PATH)"
 fi
 
+# ---------------------------------------------------------------- summarising
+say "summarising the log by author"
+cd "$repo" || exit 2
+"$GP" config user.name "Ada Lovelace" >/dev/null 2>&1
+"$GP" config user.email ada@example.com >/dev/null 2>&1
+printf 'four\n' >> a.txt
+"$GP" add a.txt >/dev/null
+"$GP" commit -m "a commit by Ada" >/dev/null
+"$GP" config user.name "Grace Hopper" >/dev/null 2>&1
+"$GP" config user.email grace@example.com >/dev/null 2>&1
+printf 'five\n' >> a.txt
+"$GP" add a.txt >/dev/null
+"$GP" commit -m "a commit by Grace" >/dev/null
+"$GP" config user.name "Ada Lovelace" >/dev/null 2>&1
+"$GP" config user.email ada@example.com >/dev/null 2>&1
+printf 'six\n' >> a.txt
+"$GP" add a.txt >/dev/null
+"$GP" commit -m "another by Ada" >/dev/null
+
+has "shortlog -s counts the commits per author" "2 Ada Lovelace" \
+	"$("$GP" shortlog -s | tr '\t' ' ')"
+has "and lists the other author" "Grace Hopper" "$("$GP" shortlog -s)"
+sl_order=$("$GP" shortlog -sn | tr '\t' '|' | sed 's/^ *[0-9]*|//' | tr '\n' ' ')
+case "$sl_order" in
+*"Ada Lovelace"*"Grace Hopper"*)
+	ok "shortlog -n orders by the number of commits" ;;
+*) bad "shortlog -n orders by the number of commits" "$sl_order" ;;
+esac
+has "shortlog -e appends the email" "Ada Lovelace <ada@example.com>" \
+	"$("$GP" shortlog -se)"
+if [ "$have_git" = 1 ]; then
+	"$GP" shortlog -sne > "$work/sl-gp"
+	git --git-dir=.gitprompt shortlog -sne HEAD > "$work/sl-git"
+	if diff "$work/sl-git" "$work/sl-gp" >/dev/null 2>&1; then
+		ok "git and gitprompt summarise the log identically"
+	else
+		bad "git and gitprompt summarise the log identically" \
+			"$(diff "$work/sl-git" "$work/sl-gp" | head -4)"
+	fi
+	"$GP" shortlog > "$work/slb-gp"
+	git --git-dir=.gitprompt shortlog HEAD > "$work/slb-git"
+	if diff "$work/slb-git" "$work/slb-gp" >/dev/null 2>&1; then
+		ok "and the block form is identical too"
+	else
+		bad "and the block form is identical too" \
+			"$(diff "$work/slb-git" "$work/slb-gp" | head -4)"
+	fi
+else
+	skip "git and gitprompt summarise the log identically (no git)"
+	skip "and the block form is identical too (no git)"
+fi
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

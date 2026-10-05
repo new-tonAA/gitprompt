@@ -1660,6 +1660,77 @@ expect "prune --expire cannot be guessed at" "cannot parse" \
 	gp prune --expire=whenever
 expect_status "a bad --expire fails" 128 gp prune --expire=whenever
 
+# ------------------------------------------------------------------
+say "the log, by author"
+
+# shortlog groups the commits by the name on the author line, so the identity
+# is changed between commits the way a second person's machine would.
+sl=$work/shortlog
+mergecase "$sl"
+gp config user.name "Alice" >/dev/null 2>&1
+gp config user.email alice@example.com >/dev/null 2>&1
+printf 'one\n' > a.txt
+gp add a.txt >/dev/null 2>&1
+gp commit -m "the first thing" >/dev/null 2>&1
+gp config user.name "Bob" >/dev/null 2>&1
+gp config user.email bob@example.com >/dev/null 2>&1
+printf 'two\n' > b.txt
+gp add b.txt >/dev/null 2>&1
+gp commit -m "the second thing" >/dev/null 2>&1
+gp config user.name "Alice" >/dev/null 2>&1
+gp config user.email alice@example.com >/dev/null 2>&1
+printf 'three\n' > c.txt
+gp add c.txt >/dev/null 2>&1
+gp commit -m "the third thing" >/dev/null 2>&1
+
+sl_s=$(gp shortlog -s | tr '\t' '|')
+case "$sl_s" in
+*"     2|Alice"*) ok "shortlog -s counts the commits by author" ;;
+*) bad "shortlog -s counts the commits by author" "$sl_s" ;;
+esac
+case "$sl_s" in
+*"     1|Bob"*) ok "and lists the author with fewer" ;;
+*) bad "and lists the author with fewer" "$sl_s" ;;
+esac
+
+sl_sn=$(gp shortlog -sn | tr '\t' '|')
+case "$sl_sn" in
+"     2|Alice
+     1|Bob"*) ok "shortlog -n sorts by the number of commits" ;;
+*) bad "shortlog -n sorts by the number of commits" "$sl_sn" ;;
+esac
+
+case "$(gp shortlog -se)" in
+*"Alice <alice@example.com>"*) ok "shortlog -e shows the email" ;;
+*) bad "shortlog -e shows the email" "$(gp shortlog -se)" ;;
+esac
+
+sl_b=$(gp shortlog)
+case "$sl_b" in
+*"Alice (2):"*) ok "shortlog groups under the author's name" ;;
+*) bad "shortlog groups under the author's name" "$sl_b" ;;
+esac
+if printf '%s\n' "$sl_b" | grep -A1 '^Alice (2):$' | grep -q "the first thing"; then
+	ok "and lists the group's subjects oldest first"
+else
+	bad "and lists the group's subjects oldest first" "$sl_b"
+fi
+
+sl_r=$(gp shortlog -s HEAD~1..HEAD | tr '\t' ' ')
+case "$sl_r" in
+"     1 Alice"*) ok "shortlog takes a revision range" ;;
+*) bad "shortlog takes a revision range" "$sl_r" ;;
+esac
+
+expect "shortlog refuses a form it does not do" "unknown option" gp shortlog -c
+expect "and another" "unknown option" gp shortlog --format=oneline
+
+sl_unborn=$work/shortlog-unborn
+mergecase "$sl_unborn"
+expect "shortlog names the unborn branch" "does not have any commits yet" \
+	gp shortlog
+expect_status "shortlog on an unknown revision fails" 128 gp shortlog nope
+
 # the local transport reads objects rather than copying loose files, so a
 # packed repository clones like any other
 cd "$work" || exit 2
