@@ -385,14 +385,24 @@ struct pack;
 
 struct odb {
 	char *dir;              /* .gitprompt/objects */
+	char *replace_dir;      /* .gitprompt/refs/replace, or NULL for none */
 	struct buf tmp;
 	struct pack *packs;     /* the object packs, loaded on demand */
 	size_t nr_packs, alloc_packs;
 	int packs_loaded;
 };
-#define ODB_INIT { NULL, BUF_INIT, NULL, 0, 0, 0 }
+#define ODB_INIT { NULL, NULL, BUF_INIT, NULL, 0, 0, 0 }
 void odb_init(struct odb *o, const char *dir);
 void odb_release(struct odb *o);
+
+/*
+ * Where the replace refs are, or NULL to read the store as it literally is.
+ * A repository sets this at open; the maintenance commands clear it, because a
+ * traversal that followed a replacement would mark the wrong sub-objects.
+ */
+void odb_set_replace_dir(struct odb *o, const char *dir);
+/* follow refs/replace from *oid to the object that stands in for it */
+void odb_replace(struct odb *o, oid_t *oid);
 
 int odb_exists(struct odb *o, const oid_t *oid);
 int odb_read(struct odb *o, const oid_t *oid, enum obj_type *type,
@@ -710,6 +720,9 @@ void path_list_free(char **paths);
 
 /* paths */
 void path_normalize(const char *in, struct buf *out);   /* no leading ./, / */
+/* a glob against a whole single name -- no slash in either, anchored at both
+ * ends (ignore.c, which owns the matcher) */
+int glob_match_name(const char *pattern, const char *name);
 int path_is_ignored(struct repo *r, const char *relpath);
 int path_is_ignored_dir(struct repo *r, const char *relpath);
 void ignore_forget(void);       /* the index was written: look at it again */
@@ -975,6 +988,7 @@ int cmd_log(struct repo *, int, char **);
 int cmd_shortlog(struct repo *, int, char **);
 int cmd_archive(struct repo *, int, char **);
 int cmd_notes(struct repo *, int, char **);
+int cmd_replace(struct repo *, int, char **);
 int cmd_apply(struct repo *, int, char **);
 int cmd_range_diff(struct repo *, int, char **);
 int cmd_show(struct repo *, int, char **);

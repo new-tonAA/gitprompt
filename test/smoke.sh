@@ -2372,6 +2372,127 @@ expect_status "with a fatal exit" 128 gp range-diff nope..left main..right
 cd "$repo" || exit 2
 
 # ------------------------------------------------------------------
+say "one object read in place of another"
+
+# A replace ref is an ordinary ref, refs/replace/<id>, naming the object to be
+# read wherever <id> would have been read.  Nothing is rewritten -- the object
+# itself is untouched -- so a clone without the ref sees the history exactly as
+# it was written, which is what makes this a repair and not a rewrite.  The
+# substitution is made at the object store's read, so `log`, `cat-file` and
+# everything built on them follow it; the store's own maintenance does not,
+# because a walk that followed a replacement would mark the replacement's
+# sub-objects and leave the replaced object's own unmarked.
+repl=$work/replace
+mergecase "$repl"
+gp config user.name "Replace Tester" >/dev/null 2>&1
+gp config user.email repl@example.com >/dev/null 2>&1
+printf 'one\n' > r.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "first" >/dev/null 2>&1
+c1=$(gp rev-parse HEAD)
+t1=$(gp cat-file -p "$c1" | sed -n 's/^tree //p')
+printf 'two\n' >> r.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "second" >/dev/null 2>&1
+c2=$(gp rev-parse HEAD)
+printf 'three\n' >> r.txt
+gp add -A >/dev/null 2>&1
+gp commit -m "third" >/dev/null 2>&1
+c3=$(gp rev-parse HEAD)
+
+expect_out "nothing is replaced to begin with" "" gp replace -l
+expect_status "an object can be given a stand-in" 0 gp replace "$c1" "$c2"
+expect_out "the list names the object replaced, not the one replacing it" "$c1" \
+	gp replace -l
+expect_out "a bare replace lists them too" "$c1" gp replace
+expect "and the stand-in is what reads back" "second" gp cat-file -p "$c1"
+expect "while the object, read literally, still says what it always said" \
+	"first" env GIT_NO_REPLACE_OBJECTS=1 "$GP" cat-file -p "$c1"
+out=$(gp log --oneline | sed -n '3p')
+expect_out "so a walk of the history reads it that way too" "$c1 second" \
+	printf '%s\n' "$out"
+
+# the ref is a ref: writing it twice is refused, and -f overwrites it
+expect "writing it again is refused" "already exists" gp replace "$c1" "$c2"
+expect_status "and the refusal is an error" 1 gp replace "$c1" "$c2"
+expect_status "-f overwrites it" 0 gp replace -f "$c1" "$c3"
+expect "the newer stand-in is the one that reads" "third" gp cat-file -p "$c1"
+
+# a chain that would not end is refused, where git writes it and lets the read
+# give up when its hops run out
+expect "an object cannot stand in for itself" "cannot stand in for itself" \
+	gp replace "$c2" "$c2"
+expect_status "and that refusal is an error" 1 gp replace "$c2" "$c2"
+expect "nor can two objects stand in for each other" "would not end" \
+	gp replace "$c3" "$c1"
+expect_status "which is an error too" 1 gp replace "$c3" "$c1"
+
+# a stand-in of another type could not be parsed where it landed
+blob=$(printf 'a blob\n' | gp hash-object -w --stdin)
+expect "an object of another type is refused" "Objects must be of the same type." \
+	gp replace "$c2" "$blob"
+expect_status "and -f does not make it legal" 1 gp replace -f "$c2" "$blob"
+
+# a pattern is a glob over the whole name, as git's is, and not a prefix
+short=$(printf '%s' "$c1" | cut -c1-7)
+expect_out "a bare prefix matches nothing" "" gp replace -l "$short"
+expect "a star at the end makes it a match" "$c1" gp replace -l "${short}*"
+expect_out "a pattern that matches nothing prints nothing" "" gp replace -l 'zzz*'
+expect "and the whole name matches itself" "$c1" gp replace -l "$c1"
+expect_status "more than one pattern is refused" 1 gp replace -l a b
+
+# the maintenance commands walk the store as it literally is, so the tree the
+# replaced commit really points at is still reachable and has to survive them
+expect_status "a prune runs over the store" 0 gp prune --expire=now
+expect "the tree the replaced object really names is still there" "tree" \
+	gp cat-file -t "$t1"
+expect_status "and the store is whole" 0 gp fsck
+expect_status "so is gc" 0 gp gc
+expect "with the stand-in still what reads afterwards" "third" \
+	gp cat-file -p "$c1"
+
+# taking one away
+expect "a replace ref can be removed" "Deleted replace ref '$c1'" \
+	gp replace -d "$c1"
+expect_status "removing it again is an error" 1 gp replace -d "$c1"
+expect "which names the ref it could not find" "not found" gp replace -d "$c1"
+expect_out "and the list is empty again" "" gp replace -l
+
+# an editor writes the stand-in, and what comes back is stored under the same
+# type as the object it stands in for
+cat > "$work/repl-edit.sh" <<'EOF'
+#!/bin/sh
+printf 'an edit from the editor\n' >> "$1"
+EOF
+expect "with no editor configured there is nothing to run" \
+	"no editor is configured" gp replace -e "$c3"
+expect_status "an editor can write the stand-in" 0 \
+	env GIT_EDITOR="sh $work/repl-edit.sh" "$GP" replace -e "$c3"
+expect "and the edited bytes are what reads back" "an edit from the editor" \
+	gp cat-file -p "$c3"
+expect "the ref it wrote is listed" "$c3" gp replace -l
+expect "an editor that changes nothing is refused" "same as the old one" \
+	env GIT_EDITOR=true "$GP" replace -e "$c3"
+expect_status "which is an error" 1 env GIT_EDITOR=true "$GP" replace -e "$c3"
+expect "with more than one object it is refused" "exactly one object" \
+	gp replace -e "$c1" "$c2"
+
+# arguments it cannot make sense of
+expect_status "with no object a delete is refused" 1 gp replace -d
+expect "and says how many it needs" "at least one object" gp replace -d
+expect_status "three objects is neither a set nor a delete" 1 \
+	gp replace "$c1" "$c2" "$c3"
+expect "a revision that names nothing is fatal" "does not name an object" \
+	gp replace nope "$c2"
+expect_status "with the fatal exit" 128 gp replace nope "$c2"
+expect "and the replacement must name something too" "does not name an object" \
+	gp replace "$c2" nope
+expect "an option it does not read is refused" "unknown option" \
+	gp replace --graft "$c1"
+
+cd "$repo" || exit 2
+
+# ------------------------------------------------------------------
 say "git interoperability"
 
 if command -v git >/dev/null 2>&1; then

@@ -43,13 +43,30 @@ static int path_is_absolute(const char *p)
 	return p[0] == '/';
 }
 
+/*
+ * The object store and the refs, which are the same two pieces for a repository
+ * however it was reached.  The replace refs are named here rather than inside
+ * odb_init because they are a property of the repository and not of the store:
+ * an odb opened for any other reason reads what is on disk and nothing else.
+ */
+static void repo_odb_init(struct repo *r)
+{
+	char *objects = xstrfmt("%s/objects", r->gpdir);
+	char *replace = xstrfmt("%s/refs/replace", r->gpdir);
+
+	odb_init(&r->odb, objects);
+	odb_set_replace_dir(&r->odb, replace);
+	free(objects);
+	free(replace);
+	refs_init(&r->refs, r->gpdir);
+}
+
 static void repo_adopt(struct repo *r, char *gpdir, const char *root)
 {
 	memset(r, 0, sizeof *r);
 	r->gpdir = gpdir;
 	r->root = xstrdup(root);
-	odb_init(&r->odb, xstrfmt("%s/objects", r->gpdir));
-	refs_init(&r->refs, r->gpdir);
+	repo_odb_init(r);
 }
 
 /*
@@ -113,8 +130,7 @@ int repo_open(struct repo *r, const char *dir)
 	memset(r, 0, sizeof *r);
 	r->gpdir = gpdir;
 	r->root = is_directory(dir) && looks_like_gpdir(dir) ? NULL : xstrdup(dir);
-	odb_init(&r->odb, xstrfmt("%s/objects", r->gpdir));
-	refs_init(&r->refs, r->gpdir);
+	repo_odb_init(r);
 	return 0;
 }
 

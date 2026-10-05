@@ -818,6 +818,58 @@ else
 fi
 cd "$repo" || exit 2
 
+# ---------------------------------------------------------------- replace
+say "one object standing in for another, read by both tools"
+# refs/replace/<id> is git's own name, so a stand-in written by either tool is
+# read by the other: the same id is asked for and both answer with the object
+# that stands in for it.  Nothing is rewritten, so the ids the rest of the
+# history points at do not move, and a pattern over the names -- a glob over
+# the whole name, not a prefix -- is the same pattern for both.
+rdir=$work/replace
+rm -rf "$rdir"
+mkdir -p "$rdir" || exit 2
+cd "$rdir" || exit 2
+"$GP" init . >/dev/null
+"$GP" config user.name "Surface" >/dev/null
+"$GP" config user.email s@example.com >/dev/null
+printf 'one\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the first" >/dev/null 2>&1
+ra=$("$GP" rev-parse HEAD)
+printf 'two\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the second" >/dev/null 2>&1
+rb=$("$GP" rev-parse HEAD)
+printf 'three\n' > f.txt
+"$GP" add -A >/dev/null 2>&1
+"$GP" commit -m "the third" >/dev/null 2>&1
+rc=$("$GP" rev-parse HEAD)
+"$GP" replace "$ra" "$rb" >/dev/null 2>&1
+
+if [ "$have_git" = 1 ]; then
+	chk "the two tools list the same replace refs" \
+		"$(git --git-dir=.gitprompt replace -l)" "$("$GP" replace -l)"
+	has "git reads the stand-in gitprompt wrote" "the second" \
+		"$(git --git-dir=.gitprompt cat-file -p "$ra" 2>&1)"
+	git --git-dir=.gitprompt replace -f "$ra" "$rc" >/dev/null 2>&1
+	has "and gitprompt reads the stand-in git wrote" "the third" \
+		"$("$GP" cat-file -p "$ra")"
+	rshort=$(printf '%s' "$ra" | cut -c1-7)
+	chk "a bare prefix matches neither tool's list" \
+		"$(git --git-dir=.gitprompt replace -l "$rshort")" \
+		"$("$GP" replace -l "$rshort")"
+	chk "and a star matches the same one for both" \
+		"$(git --git-dir=.gitprompt replace -l "${rshort}*")" \
+		"$("$GP" replace -l "${rshort}*")"
+else
+	skip "the two tools list the same replace refs (no git)"
+	skip "git reads the stand-in gitprompt wrote (no git)"
+	skip "and gitprompt reads the stand-in git wrote (no git)"
+	skip "a bare prefix matches neither tool's list (no git)"
+	skip "and a star matches the same one for both (no git)"
+fi
+cd "$repo" || exit 2
+
 # ---------------------------------------------------------------- the prompt layer
 say "what git has no equivalent for"
 has "replay reconstructs the history as one document" "write the first file" \

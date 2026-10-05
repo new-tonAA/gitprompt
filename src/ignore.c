@@ -160,6 +160,18 @@ static int seg_match(const char *p, const char *pe,
 }
 
 /*
+ * The same matcher, over a whole name rather than a path: for the few places a
+ * pattern is about one field, as `replace -l` matching the name of a replace
+ * ref.  Neither side holds a slash, so a star here steps over nothing, and the
+ * match runs to the end of the name.
+ */
+int glob_match_name(const char *pattern, const char *name)
+{
+	return seg_match(pattern, pattern + strlen(pattern),
+			 name, name + strlen(name));
+}
+
+/*
  * A whole pattern against a whole path, a segment at a time, with a double star
  * standing for any number of segments wherever it is a segment of its own --
  * first, last, or in the middle.  Anywhere else it is no different from one

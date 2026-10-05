@@ -39,9 +39,9 @@ counterpart here, is in [The commands](commands.md).
   well as Windows, which is the only place the Unix builds are exercised: the
   development machine has one compiler for one of the three.
 - **The commands git has that gitprompt does not.** git 2.49 lists 176; a
-  gitprompt built from this tree lists 69. Missing are `worktree` and
+  gitprompt built from this tree lists 70. Missing are `worktree` and
   `submodule`, along with the layers under them -- credential helpers, sparse
-  checkout, `replace` and `rerere`. The object model, the index, committing,
+  checkout and `rerere`. The object model, the index, committing,
   history, branches, merging including conflicts, replaying a commit elsewhere,
   undoing one, setting work aside, tags, reset, the ref plumbing, remotes, the
   prompt layer and the object-store maintenance `archive`, `notes`, `gc`,
@@ -66,6 +66,26 @@ counterpart here, is in [The commands](commands.md).
   `-m` or `-F` does not open an editor as git's does -- the message has to be
   given -- while `notes edit` is there for the interactive case. The reasoning
   is in [Notes](notes.md#a-note-is-a-blob-with-the-objects-name).
+- **`replace`, at its edges.** A replace ref is read at the object store, so
+  every reader here follows it and the store's own maintenance deliberately does
+  not -- `fsck`, `gc`, `repack` and `prune` walk the history as it literally is,
+  which is what git's do, so a commit reachable only through a replaced parent
+  link is neither reported dangling nor thrown away. Two of git's liberties are
+  not taken: an object cannot be made to stand in for itself, and two objects
+  cannot stand in for each other, because either builds a chain the read has to
+  give up on part-way; and a stand-in of another type is refused whether or not
+  `-f` is given, where git checks only when it is about to create the ref. The
+  pattern `-l` takes is a glob over the whole 40-hex name and not a prefix, so
+  a seven-character abbreviation matches nothing. A replace ref is read and
+  written as a loose file: one that `pack-refs` has folded into `packed-refs` is
+  listed here but not followed on a read, and `-d` does not remove it. `-e`
+  edits what would be read
+  -- the stand-in when there is one, the object itself otherwise -- and writes
+  the ref, where git refuses with `already exists`; `--graft` and
+  `--convert-graft-file` are refused as unknown options. Reads written here are
+  seen by git and the other way round, and the environment variable
+  `GIT_NO_REPLACE_OBJECTS` turns the whole mechanism off for either. The
+  reasoning is in [Notes](notes.md#reading-one-object-in-place-of-another).
 - **`apply`, at its edges.** It reads git's unified diff and writes through
   whichever layer is asked for -- the work tree by default, the index with
   `--cached`, both with `--index` -- but only that diff: a `GIT binary patch`,

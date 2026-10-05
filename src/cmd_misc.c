@@ -421,6 +421,21 @@ static int dangling_one(const oid_t *oid, void *ud)
 	return 0;
 }
 
+/*
+ * The graph these four commands work on is the one the store literally holds,
+ * so each of them turns replacement off before it starts.  A walk that followed
+ * a replacement would mark the replacement's sub-objects and leave the replaced
+ * object's own unmarked, and the pack that followed would write the
+ * replacement's bytes under the replaced id; both are corruptions of a
+ * repository whose history anyone else still sees as the real object.  git's
+ * own fsck and prune do the same.  Reading a replacement, which is what
+ * replacement is for, is untouched and happens in odb_read.
+ */
+static void no_replace(struct repo *r)
+{
+	odb_set_replace_dir(&r->odb, NULL);
+}
+
 /* mark everything reachable from the refs, for gc to work from */
 static void mark_reachable(struct repo *r, struct fsck *f)
 {
@@ -450,6 +465,7 @@ int cmd_fsck(struct repo *r, int argc, char **argv)
 		"-v", "--verbose", NULL });
 	verbose = opts_flag(&o, "-v") || opts_flag(&o, "--verbose");
 
+	no_replace(r);
 	memset(&f, 0, sizeof f);
 	f.r = r;
 	mark_reachable(r, &f);
@@ -622,6 +638,7 @@ int cmd_gc(struct repo *r, int argc, char **argv)
 	opts_init(&o, argc, argv, (const char *const[]){
 		"-n", "--dry-run", NULL });
 
+	no_replace(r);
 	memset(&f, 0, sizeof f);
 	f.r = r;
 	mark_reachable(r, &f);
@@ -698,6 +715,7 @@ int cmd_repack(struct repo *r, int argc, char **argv)
 	dry_run = opts_flag(&o, "-n") || opts_flag(&o, "--dry-run");
 	quiet = opts_flag(&o, "-q") || opts_flag(&o, "--quiet");
 
+	no_replace(r);
 	memset(&f, 0, sizeof f);
 	f.r = r;
 	mark_reachable(r, &f);
@@ -812,6 +830,7 @@ int cmd_prune(struct repo *r, int argc, char **argv)
 	opts_init(&o, argc, argv, (const char *const[]){
 		"-n", "--dry-run", "-v", "--verbose", "--expire=", NULL });
 
+	no_replace(r);
 	memset(&f, 0, sizeof f);
 	f.r = r;
 	mark_reachable(r, &f);

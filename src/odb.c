@@ -37,9 +37,17 @@ void odb_init(struct odb *o, const char *dir)
 void odb_release(struct odb *o)
 {
 	free(o->dir);
+	free(o->replace_dir);
 	o->dir = NULL;
+	o->replace_dir = NULL;
 	buf_release(&o->tmp);
 	pack_release_all(o);
+}
+
+void odb_set_replace_dir(struct odb *o, const char *dir)
+{
+	free(o->replace_dir);
+	o->replace_dir = dir ? xstrdup(dir) : NULL;
 }
 
 static char *odb_path(struct odb *o, const oid_t *oid)
@@ -49,15 +57,76 @@ static char *odb_path(struct odb *o, const oid_t *oid)
 	return xstrfmt("%s/%c%c/%s", o->dir, hex[0], hex[1], hex + 2);
 }
 
+/* ------------------------------------------------------------------ */
+/* replacement                                                         */
+
+/*
+ * One hop of the replace chain: refs/replace/<id>, read straight off the disk
+ * the way every other single ref is.  A missing file, a file that is not a bare
+ * id, and a ref pointing at itself all end the walk where it stands, which
+ * leaves the caller holding the last object it could actually name.
+ */
+static int replace_one(struct odb *o, const oid_t *in, oid_t *out)
+{
+	char hex[GP_SHA1_HEXSZ + 1];
+	char *path;
+	struct buf b;
+	int rc = -1;
+
+	oid_hex(in, hex);
+	path = xstrfmt("%s/%s", o->replace_dir, hex);
+	buf_init(&b);
+	if (read_file(path, &b) >= 0) {
+		char *s = (char *)b.b;
+		size_t n = b.len;
+
+		while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' '))
+			s[--n] = '\0';
+		if (n == GP_SHA1_HEXSZ && oid_parse(out, s) == 0)
+			rc = 0;
+	}
+	buf_release(&b);
+	free(path);
+	return rc;
+}
+
+/*
+ * The object that stands in for *oid when the store is read.  git's limit of
+ * five hops is kept, because a chain that long is already a mistake; a chain
+ * that would run forever is not walked, since replace refuses to write a cycle.
+ * GIT_NO_REPLACE_OBJECTS turns the whole mechanism off, which is how a caller
+ * sees what the store literally holds.
+ */
+void odb_replace(struct odb *o, oid_t *oid)
+{
+	int i;
+
+	if (!o->replace_dir || getenv("GIT_NO_REPLACE_OBJECTS"))
+		return;
+	for (i = 0; i < 5; i++) {
+		oid_t next;
+
+		if (replace_one(o, oid, &next) < 0)
+			return;
+		if (oid_equal(&next, oid))
+			return;
+		*oid = next;
+	}
+}
+
 int odb_exists(struct odb *o, const oid_t *oid)
 {
-	char *p = odb_path(o, oid);
-	int rc = is_file(p);
+	oid_t id = *oid;
+	char *p;
+	int rc;
 
+	odb_replace(o, &id);
+	p = odb_path(o, &id);
+	rc = is_file(p);
 	free(p);
 	if (rc)
 		return 1;
-	return pack_has(o, oid);
+	return pack_has(o, &id);
 }
 
 /*
@@ -196,7 +265,8 @@ static int parse_header(struct buf *raw, enum obj_type *type, size_t *hdrlen,
 int odb_read(struct odb *o, const oid_t *oid, enum obj_type *type,
 	     struct buf *out)
 {
-	char *path = odb_path(o, oid);
+	oid_t id = *oid;
+	char *path;
 	struct buf raw, disk, scratch;
 	size_t hdrlen, paylen;
 	enum obj_type t;
@@ -212,6 +282,11 @@ int odb_read(struct odb *o, const oid_t *oid, enum obj_type *type,
 		out = &scratch;
 		borrowed = 1;
 	}
+
+	/* A replaced object is read as its replacement, and this is the one
+	 * place that happens: every reader in this tree funnels through here. */
+	odb_replace(o, &id);
+	path = odb_path(o, &id);
 
 	buf_init(&raw);
 	buf_init(&disk);
@@ -241,7 +316,7 @@ packed:
 	{
 		enum obj_type packed_type;
 
-		rc = pack_read_object(o, oid, &packed_type, out);
+		rc = pack_read_object(o, &id, &packed_type, out);
 		if (rc == 0 && type)
 			*type = packed_type;
 	}

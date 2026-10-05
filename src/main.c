@@ -400,6 +400,15 @@ const struct command commands[] = {
 	  "archive [--format=tar|zip] [-o <file>] [--prefix=<p>] [<rev>]" },
 	{ "notes",      cmd_notes,      "Attach text to an object",
 	  "notes [list|add|show|remove|edit|prune] [-m <msg>|-F <file>] [-f] [<object>]" },
+	{ "replace",    cmd_replace,    "Read one object in place of another",
+	  "replace [-f] <object> <replacement>\n"
+	  "   replace [-f] -e <object>\n"
+	  "   replace -d <object>...\n"
+	  "   replace [-l [<pattern>]]\n"
+	  "   refs/replace/<object> names the object to be read wherever <object>\n"
+	  "   would have been.  Nothing is rewritten: a clone without the ref sees\n"
+	  "   the history as it was written, which is what makes this a repair and\n"
+	  "   not a rewrite." },
 	{ "stats",      cmd_stats,      "Summarise the repository and its prompt history",
 	  "stats [--json]" },
 	{ "gc",         cmd_gc,         "Prune unreachable objects and repack",

@@ -672,6 +672,40 @@ resolved and the base is worked out with the merge-base machinery, which is a
 few lines, rather than borrowing a reading of the same characters that answers
 a different question.
 
+## Reading one object in place of another
+
+A replaced object is a problem about *where* to do the substitution. The rest of
+the tree never asks the object store a question the store cannot answer
+differently for one id than for another -- a commit's tree, a tree's entries, a
+blob's bytes -- so there is no repository-wide resolution step to hang this on,
+and a command-by-command approach would mean every reader that walks parents or
+reads a tree having to remember to look at `refs/replace` first. Missing one
+would not fail loudly; it would quietly read the history as though the
+replacement were not there, which is the bug that is hardest to notice.
+
+So the substitution is made at the single funnel: `odb_read`, and with it
+`odb_exists`, `odb_type_of` and `odb_resolve_prefix`. Fifteen files go through
+it and none of them has to know. `repo_open` names the directory
+(`<gitdir>/refs/replace`) and the maintenance commands clear it again, which is
+the only asymmetry in the design and a deliberate one.
+
+That asymmetry is `gc`, `repack`, `prune` and `fsck`. A reachability walk that
+followed a replacement would mark the replacement's tree, its blobs and its
+parents, and leave the replaced object's own unmarked -- and the pack that
+followed would then write the replacement's bytes under the replaced id. Every
+other reader in the repository would still see the original, so the result is
+not "the replacement is used", it is a store that has lost an object some other
+reader is entitled to. git's own `fsck` and `prune` do not follow replace refs
+for the same reason, which is what makes this a fidelity choice rather than an
+invention. Reading a replacement happens in `odb_read`, and that is untouched.
+
+Two things the walk has to be safe against are then free. The read stops at five
+hops, as git's does, because a longer chain is already a mistake; and a ref
+whose value is the id it is filed under ends the walk where it stands, so a
+self-replacement cannot spin. Neither is reachable through the commands here --
+`replace` refuses both -- but a hand-written ref is a file, and the read is what
+has to survive it.
+
 ## Transports
 
 | URL form | how it works |
