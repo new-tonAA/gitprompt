@@ -104,6 +104,13 @@ jobs:
     needs: [unix, windows]
     runs-on: ubuntu-latest
     steps:
+      # Before the download, not after: checkout cleans the workspace of
+      # untracked files, and dist/ is untracked files.  The tags come with it
+      # because the release notes below are the tag's own message.
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -117,13 +124,34 @@ jobs:
       # A tag pushed for the first time has no release yet, so one is made; a
       # tag that already has one -- which is every dispatch at a released tag
       # -- is only added to.
+      #
+      # What the new release says is the body of the message the tag carries --
+      # its first line is the tag's subject and the release title already says
+      # that.  An annotated tag is asked for a message when it is made, and it
+      # is where this project writes its release notes; the notes GitHub
+      # generates from the commits of a repository that takes no pull requests
+      # are one line and a compare link, which is what v0.1.1 went out with.
+      # A tag whose message is only its own name -- v0.1.0's is -- and a
+      # lightweight tag with no message at all both fall back on those, so the
+      # worst case is what happened before rather than an empty page.
       - name: make the release, if it is not there yet
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1
+          then
+            exit 0
+          fi
+
+          notes=$(git tag -l --format='%(contents:body)' "$TAG")
+          if [ -n "$notes" ]
+          then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "gitprompt ${TAG#v}" --notes "$notes"
+          else
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
               --title "gitprompt ${TAG#v}" --generate-notes
+          fi
 
       # Only what the release is missing is attached, and nothing already on it
       # is touched.  `--clobber` would be one line shorter and is what this did
