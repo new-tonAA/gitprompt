@@ -116,13 +116,36 @@ jobs:
 
       # A tag pushed for the first time has no release yet, so one is made; a
       # tag that already has one -- which is every dispatch at a released tag
-      # -- is only given the files.  --clobber so that a second run replaces
-      # what it wrote rather than stopping on it.
-      - name: attach the binaries to the release
+      # -- is only added to.
+      - name: make the release, if it is not there yet
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
             gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
               --title "gitprompt ${TAG#v}" --generate-notes
-          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" dist/* --clobber
+
+      # Only what the release is missing is attached, and nothing already on it
+      # is touched.  `--clobber` would be one line shorter and is what this did
+      # at first; it is also how a dispatch at v0.1.0 replaced that tag's
+      # Windows binary with a build from a different compiler, without anyone
+      # asking for that.  An asset on a published release is a thing people
+      # download and check, and a re-run months later -- against a runner image
+      # whose compiler has moved on since -- would rewrite it again under the
+      # same tag.  So replacing one is made a deliberate act: delete the asset
+      # first, then dispatch.  This only ever adds.
+      - name: attach what the release does not have yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          have=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" \
+                   --json assets --jq '.assets[].name')
+          for f in dist/*; do
+            name=$(basename "$f")
+            if printf '%s\n' "$have" | grep -qxF "$name"; then
+              echo "already on the release, left alone: $name"
+            else
+              echo "attaching: $name"
+              gh release upload "$TAG" -R "$GITHUB_REPOSITORY" "$f"
+            fi
+          done
