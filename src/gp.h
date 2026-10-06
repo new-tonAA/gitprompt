@@ -49,7 +49,7 @@ typedef int gp_socket;
 #endif
 #define GP_SOCKET_INVALID ((gp_socket)-1)
 
-#define GP_VERSION "0.1.0"
+#define GP_VERSION "0.1.1"
 
 /* ------------------------------------------------------------------ */
 /* errors                                                              */
