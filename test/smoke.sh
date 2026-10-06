@@ -1228,6 +1228,43 @@ gp diff --cached | tr -d '\r' | sed -n '/^diff --git a\/tail.txt/,$p' \
 expect_same "a last line with no newline says so" "$work/got-tail" \
 	"$work/want-tail"
 
+# A hunk that empties one side names the line *before* the range on that side,
+# so a file that was empty reads `-0,0` and one that has just become empty
+# reads `+0,0`.  Those are the two spellings git writes, and the ones a patch
+# reader takes to mean "above the first line"; naming the line after instead
+# would move the hunk by one and apply it in the wrong place.  Both are here
+# compared whole rather than looked for, since it is the digit that matters.
+mergecase "$work/diff-empty"
+: > was-empty.txt
+printf 'a\nb\nc\n' > now-empty.txt
+gp add was-empty.txt now-empty.txt >/dev/null 2>&1
+gp commit -m "the base" >/dev/null 2>&1
+printf 'a\nb\nc\n' > was-empty.txt
+: > now-empty.txt
+gp add was-empty.txt now-empty.txt >/dev/null 2>&1
+
+cat > "$work/want-empty" <<'EOF'
+diff --git a/now-empty.txt b/now-empty.txt
+index de98044..e69de29 100644
+--- a/now-empty.txt
++++ b/now-empty.txt
+@@ -1,3 +0,0 @@
+-a
+-b
+-c
+diff --git a/was-empty.txt b/was-empty.txt
+index e69de29..de98044 100644
+--- a/was-empty.txt
++++ b/was-empty.txt
+@@ -0,0 +1,3 @@
++a
++b
++c
+EOF
+gp diff --cached | tr -d '\r' > "$work/got-empty"
+expect_same "a hunk that empties one side names the line before it" \
+	"$work/got-empty" "$work/want-empty"
+
 # ------------------------------------------------------------------
 say "writing the commit message in an editor"
 

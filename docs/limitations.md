@@ -7,15 +7,15 @@ the smaller divergences inside a command that does exist are in
 counterpart here, is in [The commands](commands.md).
 
 - **Byte-for-byte `diff` output.** A move is reported as a move, and the changes
-  are the changes git reports, but the text around them is not git's. A hunk that
-  empties one side is notated `-1,0` where git writes `-0,0`. A reader skimming a
-  diff sees the same changes; a script that parses one should be pointed at git
-  instead. The `similarity index` a rename reports is the share of lines the two
-  files still have in common rather than git's byte estimate, so the number can
-  read differently from git's even where the judgement behind it does not. The
-  `--stat` block is not one of these differences: its columns and its bar are
-  laid out the way git lays them out, and the two agree byte for byte at every
-  width the suite tries.
+  are the changes git reports, but the text around them is not git's. The
+  `similarity index` a rename reports is the share of lines the two files still
+  have in common rather than git's byte estimate, so the number can read
+  differently from git's even where the judgement behind it does not: a rename
+  that kept eight of ten lines reads 80% here where git's estimate of the same
+  pair is 58%. A reader skimming a diff sees the same changes; a script that
+  parses one should be pointed at git instead. The `--stat` block and the `@@`
+  line a hunk is introduced by are not among these differences -- both are
+  written the way git writes them, and both are pinned whole by the suite.
 - **What an answer is.** `response` and `rerun --record` keep what the agent
   wrote to standard output, verbatim — its own formatting, progress lines and
   all, or a JSON envelope if that is what it was asked for. Nothing else about

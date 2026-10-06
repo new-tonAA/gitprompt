@@ -83,7 +83,7 @@ $ gitprompt replay -o PROMPTS.md
 
 ## Status
 
-**1578 checks, 0 failures** — 1385 in `test/smoke.sh`, 157 in `test/surface.sh`
+**1579 checks, 0 failures** — 1386 in `test/smoke.sh`, 157 in `test/surface.sh`
 and 36 in `test/restore.sh`.
 
 ```console
